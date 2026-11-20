@@ -28,14 +28,24 @@ Python, it is only needed to make new tables, and it drives the `picotone dev` c
 
 ## Quick start
 
+The model weights (Meta's EnCodec, MIT; about 160 MB) are stored with [Git LFS](https://git-lfs.com). Install
+it before cloning, or fetch them afterwards:
+
+```powershell
+git lfs install
+git clone https://github.com/rbroderi/picotone.git
+cd picotone
+git lfs pull          # only needed if LFS was installed after cloning
+```
+
 Build (Rust 1.88 or newer):
 
 ```powershell
 cargo build --release
 ```
 
-The model weights go in `weights/` (`encodec_24khz.{json,safetensors}` and `encodec_48khz.{json,safetensors}`), or
-point `--weights` or `PICOTONE_WEIGHTS` at another folder (the older name `ENCODEC_WEIGHTS` still works
+The model weights are in `weights/` (`encodec_24khz.{json,safetensors}` and `encodec_48khz.{json,safetensors}`,
+with Meta's licence notice in `weights/EnCodec-MIT.txt`). To use another folder, point `--weights` or `PICOTONE_WEIGHTS` at another folder (the older name `ENCODEC_WEIGHTS` still works
 when `PICOTONE_WEIGHTS` is not set). The cx2 tables are read from `models/` (or `--tables` /
 `PICOTONE_TABLES`).
 

@@ -18,7 +18,8 @@ The full text is in [`LICENSES/EnCodec-MIT.txt`](LICENSES/EnCodec-MIT.txt).
 **Every copy of the weights must carry that notice.** That covers `weights/` and the converted browser models
 (`web/public/models/`, `wasm/www/models/`, and any site that serves them).
 
-The weights are not stored in this repository.
+The weights are stored unmodified in `weights/` with Git LFS, with the notice beside them in
+`weights/EnCodec-MIT.txt`.
 
 picotone is an independent project. It is not made, endorsed or supported by Meta. "EnCodec" is used only to
 name the model it implements.

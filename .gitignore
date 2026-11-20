@@ -8,7 +8,6 @@ web/public/build/
 wasm/www/picotone/
 
 # Large or downloaded data (re-created by the tools; see the READMEs)
-weights/
 work/
 dwp/out/
 dwp/cache/
