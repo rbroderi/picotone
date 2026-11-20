@@ -1,6 +1,6 @@
 """Scan a folder of audio (recursively, zip archives included) into a training manifest.
 
-    uv run python prep_corpus.py --root D:\\jamendo --source jamendo --out data\\jamendo.jsonl --workers 14
+    uv run --extra cuda python prep_corpus.py --root D:\\jamendo --source jamendo --out data\\jamendo.jsonl --workers 14
 
 Every track gets: codec (sniffed from bytes, not the extension), sample rate, channels, duration, container
 bitrate, measured effective bandwidth, artist/album/title, licence class + URL, an attribution URL, keep/reject

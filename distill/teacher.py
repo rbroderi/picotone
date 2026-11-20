@@ -14,7 +14,17 @@ def load_teacher(device="cpu"):
     warnings.filterwarnings("ignore", category=SyntaxWarning)
     import dac
 
-    model = dac.DAC.load(dac.utils.download(model_type="44khz", model_bitrate="8kbps"))
+    import os
+    import zipfile
+
+    path = dac.utils.download(model_type="44khz", model_bitrate="8kbps")
+    if not zipfile.is_zipfile(path):  # an interrupted download leaves a truncated file that dac never re-fetches
+        print(f"DAC weights at {path} are damaged; downloading them again")
+        os.remove(path)
+        path = dac.utils.download(model_type="44khz", model_bitrate="8kbps")
+        if not zipfile.is_zipfile(path):
+            raise SystemExit(f"DAC weights download at {path} is still damaged; check the network and retry")
+    model = dac.DAC.load(path)
     for m in model.modules():
         if hasattr(m, "weight_g"):
             torch.nn.utils.remove_weight_norm(m)

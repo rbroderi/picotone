@@ -94,11 +94,17 @@ def probe(ref, windows=3, window_s=8.0, drop_db=60.0):
     inf = audio_io.info(ref)
     dur = inf["seconds"]
     data = audio_io.read_bytes(ref) if audio_io.SEP in ref else None
-    bws, rms = [], []
+    bws, rms, peak = [], [], 0.0
     for i in range(windows):
         start = max(0.0, dur * (i + 1) / (windows + 1) - window_s / 2)
         x, sr = audio_io.decode(ref, start, min(window_s, dur), data)
         if x.size == 0:
+            continue
+        if not np.isfinite(x).all():
+            peak = float("inf")
+            continue
+        peak = max(peak, float(np.abs(x).max()))
+        if peak > CORRUPT_PEAK:  # a broken stream decodes to huge values; don't run spectra on it
             continue
         r = float(np.sqrt((x ** 2).mean()))
         rms.append(r)
@@ -108,16 +114,21 @@ def probe(ref, windows=3, window_s=8.0, drop_db=60.0):
     inf["bandwidth_min_hz"] = float(min(bws)) if bws else 0.0
     inf["rms_db"] = float(20 * np.log10(max(np.mean(rms) if rms else 0.0, 1e-9)))
     inf["kbps"] = inf["bytes"] * 8 / max(dur, 1e-3) / 1000
+    inf["peak"] = peak if np.isfinite(peak) else 1e9  # JSON has no inf
     return inf
 
 
 LOSSLESS = {"flac", "ogg-flac", "wav", "aiff"}
+# Full scale is 1.0; lossy decoders overshoot a little on clipped masters (MP3 rarely past 1.5).
+CORRUPT_PEAK = 4.0
 
 
 def judge(inf, min_bw, min_kbps, min_seconds=5.0, drop_low_kbps=False):
     """-> (keep, reasons, flags). Bandwidth is the main test; bitrate is a flag (a lossless file can hold a
     low-bitrate transcode, and a container's bitrate says little), a reject only with drop_low_kbps."""
     reasons, flags = [], []
+    if inf.get("peak", 0.0) > CORRUPT_PEAK:
+        reasons.append("corrupt")
     if inf["seconds"] < min_seconds:
         reasons.append("short")
     if inf["rms_db"] < -50:

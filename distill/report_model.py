@@ -1,7 +1,7 @@
 """Parameters, MACs and Snake evaluations per second of audio (one channel) for the student widths against
 stock DAC's decoder, measured with forward hooks; plus a 1-thread CPU timing and projected browser speeds.
 
-    uv run python report_model.py [--widths 512 384] [--time-seconds 2] [--json out.json]
+    uv run --extra cuda python report_model.py [--widths 512 384] [--time-seconds 2] [--json out.json]
 """
 import argparse
 import json

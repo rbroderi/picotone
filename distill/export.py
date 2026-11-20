@@ -1,7 +1,7 @@
 """Export a trained student: weight norm folded, generator only, fp32, plus a config and the training
 attribution list (for the licence policy chosen).
 
-    uv run python export.py --ckpt runs\\full512\\ckpt_last.pt --out export\\student_w512_q5
+    uv run --extra cuda python export.py --ckpt runs\\full512\\ckpt_last.pt --out export\\student_w512_q5
         [--manifest data\\pd.jsonl --manifest data\\jamendo.jsonl]
 
 Writes <out>.pt (state dict of plain Conv1d/ConvTranspose1d weights + Snake alphas), <out>.json (width, rates,

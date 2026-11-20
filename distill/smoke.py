@@ -1,7 +1,7 @@
 """Smoke test: a tiny training run on 2-3 clips that checks losses fall, checkpoint/resume is bit-exact,
 evaluation + WAV writing work, and the MAC/parameter report prints.
 
-    uv run python smoke.py --manifest data\\pd.jsonl --out runs\\smoke [--device cpu] [--steps 300]
+    uv run --extra cuda python smoke.py --manifest data\\pd.jsonl --out runs\\smoke [--device cpu] [--steps 300]
 
 Each child run has a hard timeout (--timeout, seconds).
 """
@@ -79,6 +79,11 @@ def main():
 
     ha, hb = final_hash(ra), final_hash(rb)
     print(f"resume check: straight {ha}, resumed {hb} -> {'BIT-EXACT' if ha == hb else 'DIFFERENT'}", flush=True)
+    if ha != hb and a.device != "cpu":
+        # cudnn.benchmark and atomic-add backward kernels make CUDA runs differ even run-to-run, so only the
+        # CPU run tests the resume logic bit-exactly; on CUDA, only a crash on resume is a failure.
+        print("  (expected on CUDA: GPU training is not deterministic; the CPU smoke checks resume bit-exactly)",
+              flush=True)
     res = {"resume_bit_exact": ha == hb, "hash_straight": ha, "hash_resumed": hb}
     if not a.skip_long:
         rl = os.path.join(a.out, "long")

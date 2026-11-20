@@ -15,7 +15,7 @@ Nothing here has been trained yet. The code was checked with a CPU smoke run (se
 
 ## Cost: measured, per second of audio, one channel
 
-Run `uv run python report_model.py` to reproduce this table. The parameter count and MACs come from forward
+Run `uv run --extra cuda python report_model.py` to reproduce this table. The parameter count and MACs come from forward
 hooks.
 
 | Decoder | Params | GMAC/s | Snake evals/s | MAC-eq ratio | Projected wasm, 1 thread, stereo | Projected WebGPU, stereo |
@@ -61,9 +61,13 @@ read Ogg FLAC. Then:
 ```powershell
 cd <repo>\distill
 uv sync --extra cuda          # torch 2.15 + cu132 (change the index suffix in pyproject.toml if the driver needs it)
-uv run python -c "import torch; print(torch.cuda.get_device_name(0))"
-uv run python report_model.py
+uv run --extra cuda python -c "import torch; print(torch.cuda.get_device_name(0))"
+uv run --extra cuda python report_model.py
 ```
+
+**Always run with `--extra cuda`.** A plain `uv run` re-syncs the environment without the extra, and because
+descript-audio-codec depends on torch, uv swaps in the CPU-only torch from PyPI ("Torch not compiled with CUDA
+enabled"). Every command below uses `uv run --extra cuda python ...`.
 
 The first run downloads the DAC weights (about 300 MB) into `~/.cache/descript`.
 
@@ -104,7 +108,7 @@ uv run python prep_clips.py D:\picotone_pd\dl D:\picotone_pd\work <encodec-exe> 
 Then:
 
 ```powershell
-uv run python prep_pd.py --pd-root D:\picotone_pd --out data\pd.jsonl --workers 14    # < 1 min
+uv run --extra cuda python prep_pd.py --pd-root D:\picotone_pd --out data\pd.jsonl --workers 14    # < 1 min
 ```
 
 Measured on the build machine (`--min-bandwidth 18000`):
@@ -140,7 +144,7 @@ From the archive.org file listing (nothing was downloaded):
 Keep the zips as they are, ideally on an SSD.
 
 ```powershell
-uv run python prep_corpus.py --root D:\jamendo --source jamendo --out data\jamendo.jsonl --workers 14 `
+uv run --extra cuda python prep_corpus.py --root D:\jamendo --source jamendo --out data\jamendo.jsonl --workers 14 `
     --url-base https://archive.org/download/jamendo_complete_zip_2012_05_20
 ```
 
@@ -235,32 +239,32 @@ The DAC rates are raw: 10 bits per code, 86.13 frames/s, two channels, before an
 To recompute it, copy `picotone.exe` along with `weights\` and `models\`, delete the json, and run:
 
 ```powershell
-uv run python compare_picotone.py --eval-set data\pd.jsonl.eval.json --exe <path>\picotone.exe `
+uv run --extra cuda python compare_picotone.py --eval-set data\pd.jsonl.eval.json --exe <path>\picotone.exe `
     --out data\picotone_eval.json
 ```
 
 At any time, this prints the table of picotone, stock DAC and the student, with bitrates:
 
 ```powershell
-uv run python compare_picotone.py --eval-set data\pd.jsonl.eval.json --out data\picotone_eval.json --run runs\w512
+uv run --extra cuda python compare_picotone.py --eval-set data\pd.jsonl.eval.json --out data\picotone_eval.json --run runs\w512
 ```
 
 ## 4. Bench, pilot, full run
 
 ```powershell
 # 0) smoke on the GPU (5 min)
-uv run python smoke.py --manifest data\pd.jsonl --out runs\smoke --device cuda --steps 200 --batch 8 --seg-frames 32 --threads 8
+uv run --extra cuda python smoke.py --manifest data\pd.jsonl --out runs\smoke --device cuda --steps 200 --batch 8 --seg-frames 32 --threads 8
 
 # 1) pick the batch size (5 min): ms/step and peak memory for each size
-uv run python train.py --run runs\bench --bench 16,24,32,48,64 --manifest data\pd.jsonl --manifest data\jamendo.jsonl --workers 12
+uv run --extra cuda python train.py --run runs\bench --bench 16,24,32,48,64 --manifest data\pd.jsonl --manifest data\jamendo.jsonl --workers 12
 
 # 2) pilot: 50k steps
-uv run python train.py --run runs\w512 --manifest data\pd.jsonl --manifest data\jamendo.jsonl `
+uv run --extra cuda python train.py --run runs\w512 --manifest data\pd.jsonl --manifest data\jamendo.jsonl `
     --eval-set data\pd.jsonl.eval.json --eval-set data\jamendo.jsonl.eval.json `
     --picotone-json data\picotone_eval.json --width 512 --n-q 5 --batch 32 --workers 12 --steps 50000
 
 # 3) full run: the SAME run continued (the pilot is its first 50k steps)
-uv run python train.py --run runs\w512 <same arguments> --steps 400000 --resume
+uv run --extra cuda python train.py --run runs\w512 <same arguments> --steps 400000 --resume
 
 # after a crash or reboot: the same command with --resume continues from the last checkpoint (every 2,500 steps)
 ```
@@ -378,7 +382,7 @@ distance** (1.09 → 1.11) and **−0.4 dB SI-SDR** (9.1 → 8.7) against the 15
 - The export:
 
   ```powershell
-  uv run python export.py --ckpt runs\w512\ckpt_last.pt --out export\student_w512_q5 --manifest data\pd.jsonl --manifest data\jamendo.jsonl
+  uv run --extra cuda python export.py --ckpt runs\w512\ckpt_last.pt --out export\student_w512_q5 --manifest data\pd.jsonl --manifest data\jamendo.jsonl
   ```
 
   It writes `student_w512_q5.pt` (34 MB fp32, weight norm folded) and `.json`, plus:
@@ -450,7 +454,7 @@ distance** (1.09 → 1.11) and **−0.4 dB SI-SDR** (9.1 → 8.7) against the 15
 
 ## Smoke results (CPU, build machine, 6 threads, another test suite running)
 
-Command: `uv run python smoke.py --manifest <pd.jsonl> --out <dir> --steps 240 --batch 2 --resume-steps 20 --timeout 1500`.
+Command: `uv run --extra cpu python smoke.py --manifest <pd.jsonl> --out <dir> --steps 240 --batch 2 --resume-steps 20 --timeout 1500`.
 It took 21 min in all.
 
 - **The MAC and parameter report prints.** Its numbers are the table at the top. Stock DAC measured

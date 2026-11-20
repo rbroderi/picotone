@@ -1,6 +1,6 @@
 """Distil DAC 44 kHz's decoder into a narrow student, with DAC's own GAN recipe against the original audio.
 
-    uv run python train.py --run runs\\pilot512 --manifest data\\pd.jsonl --manifest data\\jamendo.jsonl \\
+    uv run --extra cuda python train.py --run runs\\pilot512 --manifest data\\pd.jsonl --manifest data\\jamendo.jsonl \\
         --eval-set data\\pd.jsonl.eval.json --eval-set data\\jamendo.jsonl.eval.json --steps 50000
 
 Inputs: a frozen DAC encoder + quantiser encode each crop with `--enc-ctx` samples of context on both sides
@@ -8,7 +8,7 @@ Inputs: a frozen DAC encoder + quantiser encode each crop with `--enc-ctx` sampl
 and the losses see the centre only. Losses: 15 x multi-scale mel + 2 x feature matching + 1 x adversarial
 (least squares as in DAC's code, or --gan hinge), optional output matching against the stock decoder
 (--w-teacher-mel). AdamW (lr 1e-4, betas 0.8/0.99, decay 0.999996 per step) for generator and discriminator,
-gradient clipping 1e3 / 10, bf16 autocast on CUDA (Snake, residual sums, STFTs and losses stay fp32).
+gradient clipping 1e3 / 10, bf16 autocast on CUDA (Snake, residual sums, the output head, STFTs and losses stay fp32; evals run fully in fp32).
 
 Every --eval-every steps: log-mel / MR-STFT / SNR / SI-SDR on the held-out clips, stock DAC's numbers on the
 same clips (once, as the target line), the pilot verdict, and listening WAVs in <run>/listen/.
@@ -142,8 +142,8 @@ def forward_g(a, teacher, G, batch, dev):
     y = x[..., a.enc_ctx: a.enc_ctx + S * HOP]
     y_t = None
     if a.w_teacher_mel > 0 or a.w_teacher_wave > 0:
-        with torch.no_grad(), autocast(a):
-            y_t = stock_decode(teacher, z).float()[..., cd * HOP: (cd + S) * HOP]
+        with torch.no_grad(), torch.autocast(device_type=z.device.type, enabled=False):  # fp32 target, no bf16 floor
+            y_t = stock_decode(teacher, z.float()).float()[..., cd * HOP: (cd + S) * HOP]
     return y_hat, y, y_t
 
 
@@ -190,8 +190,10 @@ def train_step(a, step, teacher, G, D, mel, opt_g, opt_d, sch_g, sch_d, batch, d
 
 @torch.no_grad()
 def decode_clip(a, teacher, G, codes, n_q):
-    z = codes_to_z(teacher, codes, n_q)
-    with autocast(a):
+    # Eval decodes in fp32, as deployment will and as picotone's scores were measured: under bf16, stock DAC
+    # scores about 0.8 dB worse log-mel (same SI-SDR), which would skew every comparison.
+    z = codes_to_z(teacher, codes, n_q).float()
+    with torch.autocast(device_type=z.device.type, enabled=False):
         y = G(z) if G is not None else stock_decode(teacher, z)
     return y.float()[:, 0].clamp(-1, 1).cpu().numpy()
 
@@ -257,11 +259,12 @@ def rng_state():
 
 
 def set_rng_state(s):
-    torch.set_rng_state(s["torch"])
+    # torch.load(map_location="cuda") moves these to the GPU too; the setters want CPU ByteTensors.
+    torch.set_rng_state(s["torch"].cpu())
     np.random.set_state(s["numpy"])
     random.setstate(s["python"])
     if s.get("cuda") is not None and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(s["cuda"])
+        torch.cuda.set_rng_state_all([t.cpu() for t in s["cuda"]])
 
 
 def save_ckpt(path, step, G, D, opts, scheds, ema, a):

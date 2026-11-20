@@ -104,7 +104,11 @@ class StudentDecoder(nn.Module):
                         torch.linalg.vector_norm(w, dim=(1, 2), keepdim=True))
 
     def forward(self, z):
-        return self.model(z).float()
+        # The output head (Snake, last conv, tanh) always runs in fp32: a bf16 output rounds every sample to
+        # 8 mantissa bits, a noise floor that costs stock DAC about 0.8 dB log-mel (fp32 head: 0.07 dB).
+        h = self.model[:-3](z)
+        with torch.autocast(device_type=z.device.type, enabled=False):
+            return self.model[-3:](h.float()).float()
 
 
 def fold_weight_norm(model):

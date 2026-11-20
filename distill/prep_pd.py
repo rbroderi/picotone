@@ -1,6 +1,6 @@
 """The existing picotone public-domain / CC0 corpus (about 24 h of clips) -> a training manifest.
 
-    uv run python prep_pd.py --pd-root D:\\picotone_pd --out data\\pd.jsonl --workers 14
+    uv run --extra cuda python prep_pd.py --pd-root D:\\picotone_pd --out data\\pd.jsonl --workers 14
 
 --pd-root holds what the picotone fetch/clip tools produced (copy it from the build machine, or re-fetch):
     dl\\manifest.json, dl\\manifest2.json, dl\\manifest_oga.json      (licence + creator per download)
@@ -76,6 +76,9 @@ def main():
             for c in json.load(open(p, encoding="utf-8")):
                 c["wav"] = os.path.join(work, sub, c["name"] + ".wav")
                 clips.append(c)
+    if not clips or not man:
+        raise SystemExit(f"no picotone corpus under {a.pd_root}: expected dl\\manifest*.json and "
+                         f"work\\clips_*.json + work\\wav*\\ (see the top of this file)")
     test_creators = {corpus.norm_artist(man.get(c["source"], {}).get("creator", ""))
                      for c in clips if c["split"] in ("test", "test2")}
     test_creators.discard("")

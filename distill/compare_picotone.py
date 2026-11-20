@@ -1,6 +1,6 @@
 """Score picotone music24/12/6 on the held-out eval excerpts, and print them next to stock DAC and the student.
 
-    uv run python compare_picotone.py --eval-set data\\pd.jsonl.eval.json --exe C:\\...\\picotone.exe \\
+    uv run --extra cuda python compare_picotone.py --eval-set data\\pd.jsonl.eval.json --exe C:\\...\\picotone.exe \\
         --out data\\picotone_eval.json [--run runs\\pilot512]
 
 Each excerpt is cut at its native rate (48 kHz for the picotone test clips), encoded with
