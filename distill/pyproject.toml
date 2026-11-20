@@ -1,0 +1,42 @@
+[project]
+name = "picotone-distill"
+version = "0.1.0"
+description = "Distils DAC 44 kHz's decoder into a narrow (512- or 384-wide) student decoder for real-time browser decoding"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "descript-audio-codec==1.0.0",
+    "numpy>=2.5,<3",
+    "scipy>=1.18",
+    "soundfile>=0.14",
+    "mutagen>=1.47",
+]
+
+# Pick exactly one: `uv sync --extra cuda` (the 3090 PC) or `uv sync --extra cpu` (smoke tests).
+[project.optional-dependencies]
+cpu = ["torch==2.15.0", "torchaudio==2.11.1"]
+cuda = ["torch==2.15.0", "torchaudio==2.11.1"]
+
+[tool.uv]
+package = false
+conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cuda", extra = "cuda" },
+]
+torchaudio = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cuda", extra = "cuda" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+# Change the suffix to the CUDA build that matches the GPU driver if needed.
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true

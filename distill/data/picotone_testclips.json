@@ -1,0 +1,479 @@
+[
+ {
+  "set": "old",
+  "index": 0,
+  "name": "test__band__KingChampagne__king_champagne_die_fledermaus__w0",
+  "split": "test",
+  "group": "band",
+  "source": "test__band__KingChampagne__king_champagne_die_fledermaus.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 1,
+  "name": "test__band__MusicOfRichardStrauss__03GuntramOp.25-PreludeToAct2__w0",
+  "split": "test",
+  "group": "band",
+  "source": "test__band__MusicOfRichardStrauss__03GuntramOp.25-PreludeToAct2.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 2,
+  "name": "test__band__MusicOfRichardStrauss__05Parade-marschCavallerieNo.2__w0",
+  "split": "test",
+  "group": "band",
+  "source": "test__band__MusicOfRichardStrauss__05Parade-marschCavallerieNo.2.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 3,
+  "name": "test__band__MusicOfRichardStrauss__06LoveSceneFromFeuersnotOp.50__w0",
+  "split": "test",
+  "group": "band",
+  "source": "test__band__MusicOfRichardStrauss__06LoveSceneFromFeuersnotOp.50.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 4,
+  "name": "test__band__TheFourSeasonsWinter__USAFB_Winter__w0",
+  "split": "test",
+  "group": "band",
+  "source": "test__band__TheFourSeasonsWinter__USAFB_Winter.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 5,
+  "name": "test__electronic__gt577Noisesurfer-RainTearDrops__01-Noisesurfer-Distocusion__w0",
+  "split": "test",
+  "group": "electronic",
+  "source": "test__electronic__gt577Noisesurfer-RainTearDrops__01-Noisesurfer-Distocusion.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 6,
+  "name": "test__electronic__gt577Noisesurfer-RainTearDrops__02-Noisesurfer-RainteardropsPart1__w0",
+  "split": "test",
+  "group": "electronic",
+  "source": "test__electronic__gt577Noisesurfer-RainTearDrops__02-Noisesurfer-RainteardropsPart1.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 7,
+  "name": "test__electronic__gt577Noisesurfer-RainTearDrops__03-Noisesurfer-RainteardropsPart2__w0",
+  "split": "test",
+  "group": "electronic",
+  "source": "test__electronic__gt577Noisesurfer-RainTearDrops__03-Noisesurfer-RainteardropsPart2.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 8,
+  "name": "test__orchestraLR__musopen-brahms-symphony-premix__Premix_Brahms_Symphony_No._4_in_E_Minor_01__w0",
+  "split": "test",
+  "group": "orchestraLR",
+  "source": "test__orchestraLR__musopen-brahms-symphony-premix__Premix_Brahms_Symphony_No._4_in_E_Minor_01.L.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 9,
+  "name": "test__orchestraLR__musopen-brahms-symphony-premix__Premix_Brahms_Symphony_No._4_in_E_Minor_01__w1",
+  "split": "test",
+  "group": "orchestraLR",
+  "source": "test__orchestraLR__musopen-brahms-symphony-premix__Premix_Brahms_Symphony_No._4_in_E_Minor_01.L.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 10,
+  "name": "test__piano__OpenGoldbergVariations__KimikoIshizaka-J.s.Bach--open-GoldbergVariationsBwv988piano-23Variatio22A1Clav.__w0",
+  "split": "test",
+  "group": "piano",
+  "source": "test__piano__OpenGoldbergVariations__KimikoIshizaka-J.s.Bach--open-GoldbergVariationsBwv988piano-23Variatio22A1Clav..flac",
+  "seconds": 60.0
+ },
+ {
+  "set": "old",
+  "index": 11,
+  "name": "test__piano__OpenGoldbergVariations__KimikoIshizaka-J.s.Bach--open-GoldbergVariationsBwv988piano-26Variatio25A2Clav.__w0",
+  "split": "test",
+  "group": "piano",
+  "source": "test__piano__OpenGoldbergVariations__KimikoIshizaka-J.s.Bach--open-GoldbergVariationsBwv988piano-26Variatio25A2Clav..flac",
+  "seconds": 60.0
+ },
+ {
+  "set": "old",
+  "index": 12,
+  "name": "test__piano__OpenGoldbergVariations__KimikoIshizaka-J.s.Bach--open-GoldbergVariationsBwv988piano-28Variatio27A2Clav.CanoneAllaNona-Variatio28A2Clav.__",
+  "split": "test",
+  "group": "piano",
+  "source": "test__piano__OpenGoldbergVariations__KimikoIshizaka-J.s.Bach--open-GoldbergVariationsBwv988piano-28Variatio27A2Clav.CanoneAllaNona-Variatio28A2Clav..flac",
+  "seconds": 60.0
+ },
+ {
+  "set": "old",
+  "index": 13,
+  "name": "test__piano__OpenGoldbergVariations__Kimiko_Ishizaka_-_J.S._Bach-_-Open-_Goldberg_Variations__BWV_988__Piano__-_08_Variatio_7_a_1_ovvero_2_Clav.__w0",
+  "split": "test",
+  "group": "piano",
+  "source": "test__piano__OpenGoldbergVariations__Kimiko_Ishizaka_-_J.S._Bach-_-Open-_Goldberg_Variations__BWV_988__Piano__-_08_Variatio_7_a_1_ovvero_2_Clav..flac",
+  "seconds": 60.0
+ },
+ {
+  "set": "old",
+  "index": 14,
+  "name": "test__piano__musopen-chopin__Allegro_de_Concert_Op._46_in_A_Major__w0",
+  "split": "test",
+  "group": "piano",
+  "source": "test__piano__musopen-chopin__Allegro_de_Concert_Op._46_in_A_Major.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "old",
+  "index": 15,
+  "name": "test__piano__musopen-chopin__Ballade_no._1_-_Op._23__w0",
+  "split": "test",
+  "group": "piano",
+  "source": "test__piano__musopen-chopin__Ballade_no._1_-_Op._23.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "old",
+  "index": 16,
+  "name": "test__piano__musopen-chopin__Ballade_no._2_-_Op._38__w0",
+  "split": "test",
+  "group": "piano",
+  "source": "test__piano__musopen-chopin__Ballade_no._2_-_Op._38.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "old",
+  "index": 17,
+  "name": "test__piano__musopen-chopin__Ballade_no._3_-_Op._47__w0",
+  "split": "test",
+  "group": "piano",
+  "source": "test__piano__musopen-chopin__Ballade_no._3_-_Op._47.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "old",
+  "index": 18,
+  "name": "test__speech__adventures_holmes__adventureholmes_07_doyle_64kb__w0",
+  "split": "test",
+  "group": "speech",
+  "source": "test__speech__adventures_holmes__adventureholmes_07_doyle_64kb.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 19,
+  "name": "test__speech__huck_finn_librivox__huckfinn_22_twain_apc_64kb__w0",
+  "split": "test",
+  "group": "speech",
+  "source": "test__speech__huck_finn_librivox__huckfinn_22_twain_apc_64kb.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 20,
+  "name": "test__speech__jane_eyre_ver03_0809_librivox__janeeyre_16_bronte_64kb__w0",
+  "split": "test",
+  "group": "speech",
+  "source": "test__speech__jane_eyre_ver03_0809_librivox__janeeyre_16_bronte_64kb.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 21,
+  "name": "test__speech__peter_pan_0707_librivox__peterpan_09_barrie_64kb__w0",
+  "split": "test",
+  "group": "speech",
+  "source": "test__speech__peter_pan_0707_librivox__peterpan_09_barrie_64kb.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "old",
+  "index": 22,
+  "name": "test__speech__robinson_crusoe_librivox__robinson_crusoe_08_defoe_64kb__w0",
+  "split": "test",
+  "group": "speech",
+  "source": "test__speech__robinson_crusoe_librivox__robinson_crusoe_08_defoe_64kb.mp3",
+  "seconds": 120.0
+ },
+ {
+  "set": "new",
+  "index": 0,
+  "name": "test2__ambient__Jade_Furnace_I__4d49d81b__c0",
+  "split": "test2",
+  "group": "ambient",
+  "source": "test2__ambient__Jade_Furnace_I__4d49d81b.mp3",
+  "seconds": 56.96608333333333
+ },
+ {
+  "set": "new",
+  "index": 1,
+  "name": "test2__ambient__Seetyca_Suite__30e6d904__c0",
+  "split": "test2",
+  "group": "ambient",
+  "source": "test2__ambient__Seetyca_Suite__30e6d904.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 2,
+  "name": "test2__ambient__elevatormusic__3ca9cb25__c0",
+  "split": "test2",
+  "group": "ambient",
+  "source": "test2__ambient__elevatormusic__3ca9cb25.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 3,
+  "name": "test2__electronic__DCRPS018__38cee0dc__c0",
+  "split": "test2",
+  "group": "electronic",
+  "source": "test2__electronic__DCRPS018__38cee0dc.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 4,
+  "name": "test2__electronic__USR-022__4dc034cb__c0",
+  "split": "test2",
+  "group": "electronic",
+  "source": "test2__electronic__USR-022__4dc034cb.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 5,
+  "name": "test2__electronic__USR-023__ba4a7c75__c0",
+  "split": "test2",
+  "group": "electronic",
+  "source": "test2__electronic__USR-023__ba4a7c75.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 6,
+  "name": "test2__electronic__shoki005g__3bf54ab5__c0",
+  "split": "test2",
+  "group": "electronic",
+  "source": "test2__electronic__shoki005g__3bf54ab5.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 7,
+  "name": "test2__folk__JOAT034__4f7a6885__c0",
+  "split": "test2",
+  "group": "folk",
+  "source": "test2__folk__JOAT034__4f7a6885.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 8,
+  "name": "test2__folk__SPUTNIKRECORDS038__36e54181__c0",
+  "split": "test2",
+  "group": "folk",
+  "source": "test2__folk__SPUTNIKRECORDS038__36e54181.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 9,
+  "name": "test2__folk__The_Machine_-_Black_and_White__08b37e85__c0",
+  "split": "test2",
+  "group": "folk",
+  "source": "test2__folk__The_Machine_-_Black_and_White__08b37e85.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 10,
+  "name": "test2__game__oga_12-music-loops__d79ae2e2__c0",
+  "split": "test2",
+  "group": "game",
+  "source": "test2__game__oga_12-music-loops__d79ae2e2.zip",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 11,
+  "name": "test2__game__oga_bleeding-out__81c5ac81__c0",
+  "split": "test2",
+  "group": "game",
+  "source": "test2__game__oga_bleeding-out__81c5ac81.flac",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 12,
+  "name": "test2__game__oga_forgoten-tomb-ambience__a7a2b74f__c0",
+  "split": "test2",
+  "group": "game",
+  "source": "test2__game__oga_forgoten-tomb-ambience__a7a2b74f.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 13,
+  "name": "test2__game__oga_jrpg-pack-5-action__e3c2a82f__c2",
+  "split": "test2",
+  "group": "game",
+  "source": "test2__game__oga_jrpg-pack-5-action__e3c2a82f.zip",
+  "seconds": 54.857166666666664
+ },
+ {
+  "set": "new",
+  "index": 14,
+  "name": "test2__game__oga_opening-theme-actionsuspense__b94ee93b__c0",
+  "split": "test2",
+  "group": "game",
+  "source": "test2__game__oga_opening-theme-actionsuspense__b94ee93b.wav",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 15,
+  "name": "test2__game__oga_snowfall__1ad95e77__c0",
+  "split": "test2",
+  "group": "game",
+  "source": "test2__game__oga_snowfall__1ad95e77.ogg",
+  "seconds": 34.5
+ },
+ {
+  "set": "new",
+  "index": 16,
+  "name": "test2__hiphop__catrap__3c157bad__c0",
+  "split": "test2",
+  "group": "hiphop",
+  "source": "test2__hiphop__catrap__3c157bad.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 17,
+  "name": "test2__hiphop__dontfeedthetrolls__b55bc4c5__c0",
+  "split": "test2",
+  "group": "hiphop",
+  "source": "test2__hiphop__dontfeedthetrolls__b55bc4c5.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 18,
+  "name": "test2__hiphop__gt291BoljnyieEychiny-RakhaKhyLamenea__619b505b__c0",
+  "split": "test2",
+  "group": "hiphop",
+  "source": "test2__hiphop__gt291BoljnyieEychiny-RakhaKhyLamenea__619b505b.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 19,
+  "name": "test2__jazz__Tim_Vanbrabant_Songs_Of_Muhaha_mml005__2f11e167__c0",
+  "split": "test2",
+  "group": "jazz",
+  "source": "test2__jazz__Tim_Vanbrabant_Songs_Of_Muhaha_mml005__2f11e167.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 20,
+  "name": "test2__jazz__brennanworldwideblackwhite__3863a636__c0",
+  "split": "test2",
+  "group": "jazz",
+  "source": "test2__jazz__brennanworldwideblackwhite__3863a636.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 21,
+  "name": "test2__jazz__dronewars__6976449e__c0",
+  "split": "test2",
+  "group": "jazz",
+  "source": "test2__jazz__dronewars__6976449e.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 22,
+  "name": "test2__pop__MZR043__561b25a6__c0",
+  "split": "test2",
+  "group": "pop",
+  "source": "test2__pop__MZR043__561b25a6.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 23,
+  "name": "test2__pop__gt488MyCrazySilverSkyvol.1__027bfae5__c0",
+  "split": "test2",
+  "group": "pop",
+  "source": "test2__pop__gt488MyCrazySilverSkyvol.1__027bfae5.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 24,
+  "name": "test2__pop__hujan027__bd2fd10d__c0",
+  "split": "test2",
+  "group": "pop",
+  "source": "test2__pop__hujan027__bd2fd10d.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 25,
+  "name": "test2__rock__DTRASH63-DHCMeinhof-WayOfDeath__8516dd76__c0",
+  "split": "test2",
+  "group": "rock",
+  "source": "test2__rock__DTRASH63-DHCMeinhof-WayOfDeath__8516dd76.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 26,
+  "name": "test2__rock__GT586__1f4e3e83__c0",
+  "split": "test2",
+  "group": "rock",
+  "source": "test2__rock__GT586__1f4e3e83.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 27,
+  "name": "test2__rock__USR-021__10ea20b4__c0",
+  "split": "test2",
+  "group": "rock",
+  "source": "test2__rock__USR-021__10ea20b4.mp3",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 28,
+  "name": "test2__sfx__oga_100-cc0-metal-and-wood-sfx__92e73ad9__c0",
+  "split": "test2",
+  "group": "sfx",
+  "source": "test2__sfx__oga_100-cc0-metal-and-wood-sfx__92e73ad9.zip",
+  "seconds": 60.0
+ },
+ {
+  "set": "new",
+  "index": 29,
+  "name": "test2__sfx__oga_100-cc0-sfx-2__ed52d538__c2",
+  "split": "test2",
+  "group": "sfx",
+  "source": "test2__sfx__oga_100-cc0-sfx-2__ed52d538.zip",
+  "seconds": 27.711791666666667
+ }
+]

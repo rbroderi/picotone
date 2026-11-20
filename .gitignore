@@ -16,6 +16,11 @@ wasm/www/models/
 train/**/*.npz
 train/**/*.pt
 train/**/*.ckpt
+# DAC distillation: training runs, exports and the corpus manifests (made by prep_*.py)
+distill/runs/
+distill/export/
+distill/data/*.jsonl
+distill/data/*.jsonl.*
 
 # Scratch audio
 *.wav
