@@ -1,0 +1,26 @@
+# Build output
+target/
+node_modules/
+web/dist/
+web/public/build/
+# The wasm builds and the compiled TypeScript API: `powershell -File wasm\build.ps1`
+# (or `npm run build:ts` in wasm/ for the .js/.d.ts files alone).
+wasm/www/picotone/
+
+# Large or downloaded data (re-created by the tools; see the READMEs)
+weights/
+work/
+dwp/out/
+dwp/cache/
+web/public/models/
+wasm/www/models/
+train/**/*.npz
+train/**/*.pt
+train/**/*.ckpt
+
+# Scratch audio
+*.wav
+
+# Python
+.venv/
+__pycache__/

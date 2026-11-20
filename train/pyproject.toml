@@ -1,0 +1,32 @@
+[project]
+name = "encodec-entropy-train"
+version = "0.1.0"
+description = "Trains the optional net expert of the cx entropy model for EnCodec codes"
+requires-python = ">=3.12"
+dependencies = ["numpy==2.5.4"]
+
+# Pick exactly one: `uv sync --extra cpu` or `uv sync --extra cuda`.
+[project.optional-dependencies]
+cpu = ["torch==2.15.0"]
+cuda = ["torch==2.15.0"]
+
+[tool.uv]
+package = false
+conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cuda", extra = "cuda" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+# Change the suffix to the CUDA build that matches the GPU driver if needed.
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true

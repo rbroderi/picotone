@@ -1,0 +1,4 @@
+512 ['867.6', '619.1', '917.4'] us per matvec; ratio of best 1.000 MAC ratio 1.000
+448 ['330.8', '345.6', '223.4'] us per matvec; ratio of best 0.361 MAC ratio 0.766
+384 ['194.1', '230.1', '138.7'] us per matvec; ratio of best 0.224 MAC ratio 0.562
+320 ['153.6', '126.3', '90.0'] us per matvec; ratio of best 0.145 MAC ratio 0.391

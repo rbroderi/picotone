@@ -1,0 +1,15 @@
+{
+ "bandwidths": [
+  2,
+  4,
+  8,
+  16
+ ],
+ "codebooks": 16,
+ "h1": 384,
+ "h2": 256,
+ "rank_low": 64,
+ "rank_high": 32,
+ "steps": 200000,
+ "model": "encodec_48khz"
+}

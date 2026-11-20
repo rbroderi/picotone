@@ -1,0 +1,21 @@
+{
+  "name": "picotone-webgpu",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WebGPU decoder for picotone .pico files (cx2 decode in WebAssembly)",
+  "type": "module",
+  "scripts": {
+    "export-weights": "node tools/export-weights.mjs",
+    "typecheck": "tsc --noEmit -p .",
+    "build": "tsc --noEmit -p . && node tools/build.mjs",
+    "serve": "node tools/serve.mjs",
+    "make-refs": "node tools/make-refs.mjs",
+    "test:parity": "npm run build && node tools/make-refs.mjs && node tools/test-parity.mjs"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.60",
+    "esbuild": "^0.28.2",
+    "puppeteer-core": "^25.18.1",
+    "typescript": "^5.9.0"
+  }
+}

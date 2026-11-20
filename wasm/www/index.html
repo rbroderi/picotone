@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EnCodec in the browser</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fafafa; --muted: #6b6b70; --line: #d6d6db; --accent: #2a62d4; --warn: #a35a00; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #ececef; --bg: #16161a; --muted: #9a9aa2; --line: #34343b; --accent: #7aa2ff; --warn: #f0a640; } }
+  body { margin: 0; font: 15px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); }
+  #drop { border: 2px dashed var(--line); border-radius: 10px; padding: 32px 16px; text-align: center; cursor: pointer; }
+  #drop.over { border-color: var(--accent); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 16px 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
+  button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: inherit; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  progress { width: 100%; height: 10px; }
+  .warn { color: var(--warn); }
+  #log { font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>EnCodec decoder (WebAssembly)</h1>
+  <p class="sub">Decodes <code>.pico</code> files in a Web Worker and plays them through Web Audio.</p>
+
+  <dl>
+    <dt>Build</dt><dd id="build">starting…</dd>
+    <dt>Context</dt><dd id="context"></dd>
+  </dl>
+
+  <div id="drop" tabindex="0">Drop a <code>.pico</code> file here, or click to choose one<input id="file" type="file" accept=".pico" hidden></div>
+
+  <dl id="meta" hidden>
+    <dt>File</dt><dd id="m-file"></dd>
+    <dt>Model</dt><dd id="m-model"></dd>
+    <dt>Duration</dt><dd id="m-duration"></dd>
+    <dt>Bandwidth</dt><dd id="m-bw"></dd>
+    <dt>Model load</dt><dd id="m-load"></dd>
+    <dt>Decode</dt><dd id="m-stats"></dd>
+  </dl>
+  <progress id="progress" value="0" max="1" hidden></progress>
+
+  <div class="row">
+    <button id="play" disabled>Decode &amp; play</button>
+    <button id="stop" disabled>Stop</button>
+    <label><input id="loop" type="checkbox"> loop</label>
+    <button id="wav" disabled>Download WAV</button>
+  </div>
+  <div id="log"></div>
+</main>
+<script type="module" src="demo.js"></script>
+</body>
+</html>

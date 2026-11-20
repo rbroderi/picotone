@@ -1,0 +1,8 @@
+H1=H2=512 (stock): 2474 us CPU per frame (torch, 1 thread)
+H1=H2=496: MAC ratio 0.948, measured LSTM time ratio 1.105 -> whole-codec speedup if LSTM is 72% of time: x0.93 (MAC model: x1.04)
+H1=H2=480: MAC ratio 0.897, measured LSTM time ratio 1.021 -> whole-codec speedup if LSTM is 72% of time: x0.99 (MAC model: x1.08)
+H1=H2=448: MAC ratio 0.800, measured LSTM time ratio 0.853 -> whole-codec speedup if LSTM is 72% of time: x1.12 (MAC model: x1.17)
+H1=H2=416: MAC ratio 0.708, measured LSTM time ratio 0.821 -> whole-codec speedup if LSTM is 72% of time: x1.15 (MAC model: x1.27)
+H1=H2=384: MAC ratio 0.621, measured LSTM time ratio 0.642 -> whole-codec speedup if LSTM is 72% of time: x1.35 (MAC model: x1.38)
+H1=H2=320: MAC ratio 0.464, measured LSTM time ratio 0.453 -> whole-codec speedup if LSTM is 72% of time: x1.65 (MAC model: x1.63)
+H1=H2=256: MAC ratio 0.328, measured LSTM time ratio 0.547 -> whole-codec speedup if LSTM is 72% of time: x1.48 (MAC model: x1.94)

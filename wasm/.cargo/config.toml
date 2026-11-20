@@ -1,0 +1,4 @@
+# Keep every build of this crate inside wasm/target, never the parent's target/.
+# build.ps1 also sets CARGO_TARGET_DIR to wasm/target/<st|mt> per build.
+[build]
+target-dir = "target"

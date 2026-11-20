@@ -1,0 +1,4 @@
+msrv = "1.88"
+doc-valid-idents = ["EnCodec", "PyTorch", "SEANet", "GroupNorm", "LSTM", "WebGPU", ".."]
+# Numeric kernels conventionally use short names (m, k, n, x, h, c, ...).
+single-char-binding-names-threshold = 8

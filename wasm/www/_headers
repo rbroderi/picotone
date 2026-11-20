@@ -1,0 +1,11 @@
+# Netlify / Cloudflare Pages: cross-origin isolation for the threaded build.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+
+/*.wasm
+  Content-Type: application/wasm
+
+# Model weights and cx2 tables change only when re-exported; let browsers keep them.
+/models/*
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800

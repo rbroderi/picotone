@@ -1,0 +1,48 @@
+
+24khz enc layer 1: units by regime: memoryless (f<0.1 for >95% of frames) 134, integrators (f>0.9 for >95%) 15, data-dependent forget 363; cell pinned |c|>3 for >90% of frames 5; near-constant output (std<0.02) 6
+   share of hidden-state variance: memoryless 20%, integrators 5%, data-dependent 75%
+   longest-memory units: unit | tau frames | mean|c| | corr(c, frame index) | corr(c, accumulated input RMS) | corr(|dc|, input RMS) | frames with |c|>3 | h std | sign changes of c per 1000 frames
+    331 |   3367.7 |  355.05 | +0.96 | +0.66 | +0.01 | 100% | 0.003 | 0.0
+     18 |    917.0 |  229.85 | +0.66 | +0.03 | -0.08 |  91% | 0.347 | 0.0
+    338 |    598.6 |    4.12 | -0.38 | -0.36 | +0.04 |  28% | 0.102 | 1.4
+    503 |    549.6 |    0.10 | -0.16 | -0.07 | +0.01 |   0% | 0.003 | 0.4
+     65 |    231.2 |   41.71 | +0.38 | -0.06 | -0.27 |  83% | 0.171 | 0.3
+    186 |    171.1 |    0.36 | +0.09 | -0.02 | +0.06 |   0% | 0.268 | 7.3
+    283 |    143.4 |    0.20 | +0.13 | +0.01 | +0.00 |   0% | 0.021 | 1.3
+      8 |     94.7 |  144.94 | -0.56 | +0.08 | -0.04 |  91% | 0.144 | 0.0
+
+24khz enc layer 2: units by regime: memoryless (f<0.1 for >95% of frames) 43, integrators (f>0.9 for >95%) 32, data-dependent forget 437; cell pinned |c|>3 for >90% of frames 12; near-constant output (std<0.02) 3
+   share of hidden-state variance: memoryless 6%, integrators 13%, data-dependent 81%
+   longest-memory units: unit | tau frames | mean|c| | corr(c, frame index) | corr(c, accumulated input RMS) | corr(|dc|, input RMS) | frames with |c|>3 | h std | sign changes of c per 1000 frames
+     84 |   2519.7 |   56.19 | +0.60 | +0.85 | +0.34 |  96% | 0.332 | 0.0
+    455 |   1619.4 |  360.46 | -0.98 | -0.59 | +0.05 | 100% | 0.209 | 0.0
+     33 |   1527.3 |   38.68 | +0.46 | +0.43 | +0.02 |  96% | 0.053 | 0.0
+    501 |    516.2 |  320.87 | -0.88 | -0.69 | +0.03 | 100% | 0.010 | 0.0
+    229 |    446.7 |  314.06 | +0.81 | +0.21 | +0.05 | 100% | 0.023 | 0.0
+     30 |    401.9 |   16.08 | +0.22 | +0.08 | -0.12 |  71% | 0.276 | 0.0
+    122 |    280.4 |  338.16 | +0.88 | +0.60 | +0.07 |  99% | 0.271 | 0.0
+    100 |    256.5 |   24.90 | +0.25 | -0.04 | -0.04 |  62% | 0.313 | 0.0
+
+24khz dec layer 1: units by regime: memoryless (f<0.1 for >95% of frames) 27, integrators (f>0.9 for >95%) 10, data-dependent forget 475; cell pinned |c|>3 for >90% of frames 8; near-constant output (std<0.02) 1
+   share of hidden-state variance: memoryless 5%, integrators 2%, data-dependent 93%
+   longest-memory units: unit | tau frames | mean|c| | corr(c, frame index) | corr(c, accumulated input RMS) | corr(|dc|, input RMS) | frames with |c|>3 | h std | sign changes of c per 1000 frames
+    192 |    542.9 |   65.68 | +0.38 | +0.72 | +0.66 |  97% | 0.129 | 1.0
+    179 |    243.5 |    4.41 | -0.40 | -0.55 | +0.22 |  52% | 0.177 | 0.4
+    228 |    218.9 |  142.62 | -0.58 | -0.60 | +0.16 |  99% | 0.249 | 0.1
+     74 |    126.4 |    2.05 | -0.18 | +0.05 | -0.28 |  27% | 0.269 | 0.4
+     86 |     97.5 |    2.30 | +0.12 | +0.02 | +0.25 |  23% | 0.334 | 3.9
+    462 |     78.9 |    0.41 | -0.19 | +0.08 | -0.26 |   0% | 0.081 | 3.4
+    111 |     70.4 |    0.17 | -0.01 | +0.00 | +0.03 |   0% | 0.146 | 10.1
+     35 |     60.5 |  118.94 | +0.59 | +0.77 | +0.20 |  97% | 0.059 | 0.0
+
+24khz dec layer 2: units by regime: memoryless (f<0.1 for >95% of frames) 17, integrators (f>0.9 for >95%) 25, data-dependent forget 470; cell pinned |c|>3 for >90% of frames 6; near-constant output (std<0.02) 5
+   share of hidden-state variance: memoryless 2%, integrators 12%, data-dependent 86%
+   longest-memory units: unit | tau frames | mean|c| | corr(c, frame index) | corr(c, accumulated input RMS) | corr(|dc|, input RMS) | frames with |c|>3 | h std | sign changes of c per 1000 frames
+    325 |    659.2 |    7.79 | -0.50 | -0.17 | -0.17 |  71% | 0.158 | 0.0
+    446 |    511.7 |  127.50 | -0.60 | -0.76 | +0.40 |  99% | 0.047 | 0.0
+    408 |    293.4 |  170.84 | +0.57 | +0.71 | +0.16 |  99% | 0.161 | 0.0
+     87 |    102.7 |    2.83 | +0.11 | -0.01 | -0.25 |  25% | 0.349 | 0.1
+    282 |    101.5 |  146.34 | -0.47 | -0.66 | +0.30 |  91% | 0.124 | 2.7
+    391 |     80.9 |    0.20 | +0.10 | +0.15 | +0.07 |   0% | 0.185 | 7.9
+    435 |     76.5 |  107.26 | +0.34 | +0.46 | +0.07 | 100% | 0.160 | 0.0
+    366 |     63.8 |    1.99 | +0.08 | +0.03 | -0.14 |  17% | 0.098 | 0.0

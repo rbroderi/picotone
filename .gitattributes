@@ -1,0 +1,9 @@
+# Text files are stored with LF line endings in the repository.
+* text=auto eol=lf
+
+# The cx2 tables are hashed into every stream, so their bytes must never be changed.
+*.ecxm binary
+*.pico binary
+*.picol binary
+*.wasm binary
+*.ps1 text eol=crlf

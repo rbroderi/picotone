@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EnCodec WebGPU Player</title>
+<style>
+  :root { --bg: #f7f7f8; --fg: #1d1d1f; --muted: #6b6b73; --card: #fff; --line: #dcdce0; --accent: #2b6cb0; --err: #b42318; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151518; --fg: #ececf1; --muted: #9a9aa5; --card: #1f1f24; --line: #34343c; --accent: #6aa5e8; --err: #f97066; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  #drop { border: 2px dashed var(--line); border-radius: 10px; padding: 28px 16px; text-align: center; color: var(--muted); cursor: pointer; }
+  #drop.over { border-color: var(--accent); color: var(--fg); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; font-variant-numeric: tabular-nums; word-break: break-all; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button, select { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  progress { width: 100%; height: 10px; margin-top: 12px; }
+  #status { margin-top: 8px; color: var(--muted); min-height: 1.5em; font-variant-numeric: tabular-nums; }
+  #status.err, #gpu.err { color: var(--err); }
+  #gpu { margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>EnCodec WebGPU Player</h1>
+  <p class="sub">Decodes picotone <code>.pico</code> files on your GPU. Nothing leaves this page.</p>
+  <div id="gpu"></div>
+  <div class="card">
+    <div id="drop" tabindex="0">Drop a <code>.pico</code> file here, or click to choose one</div>
+    <input id="file" type="file" accept=".pico" hidden>
+  </div>
+  <div class="card" id="meta-card" hidden>
+    <dl id="meta"></dl>
+  </div>
+  <div class="card">
+    <div class="row">
+      <label for="dtype">Weights</label>
+      <select id="dtype">
+        <option value="f16">f16 (half download)</option>
+        <option value="f32">f32</option>
+      </select>
+      <label><input type="checkbox" id="stream" checked> play while decoding</label>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button id="decode" class="primary" disabled>Decode</button>
+      <button id="play" disabled>Play</button>
+      <button id="stop" disabled>Stop</button>
+      <button id="download" disabled>Download WAV</button>
+    </div>
+    <progress id="progress" value="0" max="1"></progress>
+    <div id="status"></div>
+  </div>
+</main>
+<script type="module" src="public/build/app.js"></script>
+</body>
+</html>

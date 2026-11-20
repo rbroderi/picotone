@@ -1,0 +1,20 @@
+{
+  "name": "picotone-wasm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser (WebAssembly) build of the picotone decoder, its worker API and demo",
+  "type": "module",
+  "scripts": {
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1",
+    "build:ts": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "models": "node tools/export-models.mjs",
+    "serve": "node serve.mjs",
+    "serve:no-isolation": "node serve.mjs --no-isolation",
+    "test": "node test/run.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "25.18.1",
+    "typescript": "7.0.2"
+  }
+}

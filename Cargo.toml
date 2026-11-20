@@ -1,0 +1,93 @@
+[package]
+name = "picotone"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "EnCodec neural audio codec with the cx2 entropy coder and the .pico file format"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "picotone"
+path = "src/lib.rs"
+
+[[bin]]
+name = "picotone"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# Audio file decoding (Symphonia) and WAV output (hound): the `audio` module.
+audio-io = ["dep:symphonia", "dep:hound"]
+# The command-line program.
+cli = ["audio-io", "dep:clap"]
+# Stage timers, printed by `decode`: see the `prof` module.
+profile = []
+# WebAssembly only: use the relaxed SIMD fused multiply-add when the build
+# enables the `relaxed-simd` target feature. Such a module does not load in
+# browsers without relaxed SIMD.
+relaxed-simd = ["pulp/relaxed-simd"]
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.8", features = ["derive"], optional = true }
+hound = { version = "3.5.1", optional = true }
+ndarray = "0.17.2"
+# Without its default `relaxed-simd`: WebAssembly builds must load in browsers
+# that lack the relaxed SIMD instructions.
+pulp = { version = "0.22.3", default-features = false, features = ["std", "x86-v3"] }
+rayon = "1.12.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+symphonia = { version = "0.5.4", features = ["all"], optional = true }
+
+[dev-dependencies]
+# An independent Ogg reader for the format tests.
+ogg = "0.9.2"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+
+# Dependencies are optimised even in debug builds; the neural network is
+# unusably slow otherwise.
+[profile.dev.package."*"]
+opt-level = 3
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+unreachable_pub = "deny"
+unused_qualifications = "deny"
+unused_results = "deny"
+unused_lifetimes = "deny"
+unused_import_braces = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+let_underscore_drop = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+warnings = { level = "deny", priority = -2 }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+# Duplicate transitive crate versions come from upstream dependencies.
+multiple_crate_versions = "allow"
+# Selected restriction lints.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
+expect_used = "deny"
+get_unwrap = "deny"
+panic = "deny"
+print_stdout = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+undocumented_unsafe_blocks = "deny"
+use_debug = "deny"

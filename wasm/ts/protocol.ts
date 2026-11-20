@@ -1,0 +1,159 @@
+/**
+ * Messages between {@link PicotoneDecoder} (any thread) and its dedicated
+ * decoder worker (`worker.js`). Shared by both sides; no runtime code.
+ */
+
+/** The two published EnCodec models. */
+export type ModelName = "encodec_24khz" | "encodec_48khz";
+
+/** Which WebAssembly build to run. `auto` picks `threaded` when possible. */
+export type BuildPreference = "auto" | "threaded" | "single";
+
+/** The build the worker chose, and why. */
+export interface BuildInfo {
+  /** `threaded`: rayon over a Web Worker pool. `single`: one thread, SIMD only. */
+  readonly kind: "threaded" | "single";
+  /**
+   * Whether the build uses relaxed SIMD (fused multiply-add). Only the
+   * single-threaded build has such a variant; it is about a third faster.
+   */
+  readonly relaxedSimd: boolean;
+  /** Rayon threads (1 for `single`). */
+  readonly threads: number;
+  /** `self.crossOriginIsolated` as seen by the worker. */
+  readonly crossOriginIsolated: boolean;
+  /** `self.isSecureContext` as seen by the worker. */
+  readonly isSecureContext: boolean;
+  /** Human-readable reason for the choice (why threads are unavailable, if so). */
+  readonly reason: string;
+}
+
+/** A loaded decoder model. */
+export interface ModelInfo {
+  readonly name: ModelName;
+  readonly sampleRate: number;
+  readonly channels: number;
+  /** Bytes of weights fetched (0 when served from Cache Storage). */
+  readonly fetchedBytes: number;
+  /** Whether the weights came from Cache Storage. */
+  readonly fromCache: boolean;
+  /** Hashes (16 hex digits) of the cx2 tables loaded for the model. */
+  readonly tables: readonly string[];
+  /** Time to fetch and build the model, in milliseconds. */
+  readonly loadMs: number;
+}
+
+/** Timing and memory of one decode. */
+export interface DecodeStats {
+  /** Wall time of the whole decode in the worker, in milliseconds. */
+  readonly decodeMs: number;
+  /** Wall time until the first chunk was ready, in milliseconds. */
+  readonly firstChunkMs: number;
+  /** Decoded audio duration in seconds. */
+  readonly audioSeconds: number;
+  /** Audio seconds per wall-clock second (× realtime). */
+  readonly speed: number;
+  /** WebAssembly memory size after the decode (its peak: it never shrinks). */
+  readonly memoryBytes: number;
+}
+
+export interface InitRequest {
+  readonly type: "init";
+  readonly id: number;
+  /** URL of the directory holding `pkg-st/`, `pkg-st-fma/` and `pkg-mt/`. */
+  readonly baseUrl: string;
+  readonly prefer: BuildPreference;
+  /** Whether the single-threaded build may be the relaxed SIMD one. */
+  readonly relaxedSimd: boolean;
+  /** Thread pool size for the threaded build; 0 means `navigator.hardwareConcurrency`. */
+  readonly threads: number;
+}
+
+export interface LoadRequest {
+  readonly type: "load";
+  readonly id: number;
+  readonly model: ModelName;
+  /**
+   * URL of the directory holding `<model>.json`, `<model>.safetensors`,
+   * `cx2-tables.json` and the `.ecxm` tables it lists.
+   */
+  readonly modelsUrl: string;
+  /** Cache Storage bucket for model files, or null to rely on the HTTP cache. */
+  readonly cacheName: string | null;
+}
+
+export interface DecodeRequest {
+  readonly type: "decode";
+  readonly id: number;
+  readonly bytes: ArrayBuffer;
+  /** First playable sample to decode (a seek; 0 for the whole file). */
+  readonly startSample: number;
+  /** Segments in the first chunk (smaller starts playback sooner). */
+  readonly firstChunkSegments: number;
+  /** Largest number of segments per later chunk. */
+  readonly chunkSegments: number;
+}
+
+export interface CancelRequest {
+  readonly type: "cancel";
+  readonly id: number;
+}
+
+export type Request = InitRequest | LoadRequest | DecodeRequest | CancelRequest;
+
+export interface ReadyResponse {
+  readonly type: "ready";
+  readonly id: number;
+  readonly build: BuildInfo;
+}
+
+export interface LoadProgressResponse {
+  readonly type: "loadProgress";
+  readonly id: number;
+  readonly loaded: number;
+  /** Total bytes, or 0 when the server sent no length. */
+  readonly total: number;
+}
+
+export interface LoadedResponse {
+  readonly type: "loaded";
+  readonly id: number;
+  readonly model: ModelInfo;
+}
+
+export interface ChunkResponse {
+  readonly type: "chunk";
+  readonly id: number;
+  readonly sampleRate: number;
+  /** First sample of the chunk, per channel, from the start of the file. */
+  readonly offset: number;
+  readonly length: number;
+  /** Total samples per channel in the file. */
+  readonly audioLength: number;
+  /** One planar buffer per channel (transferred). */
+  readonly channels: Float32Array<ArrayBuffer>[];
+  readonly segmentsDone: number;
+  readonly segmentCount: number;
+  /** Milliseconds since the decode started. */
+  readonly elapsedMs: number;
+}
+
+export interface DoneResponse {
+  readonly type: "done";
+  readonly id: number;
+  readonly stats: DecodeStats;
+}
+
+export interface ErrorResponse {
+  readonly type: "error";
+  readonly id: number;
+  readonly message: string;
+}
+
+export type Response =
+  | ReadyResponse
+  | LoadProgressResponse
+  | LoadedResponse
+  | ChunkResponse
+  | DoneResponse
+  | ErrorResponse;

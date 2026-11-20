@@ -1,0 +1,5 @@
+/target/
+/node_modules/
+# Build outputs: rebuild with build.ps1 (wasm + TS) and tools/export-models.mjs (weights).
+/www/encodecx/
+/www/models/*.safetensors
