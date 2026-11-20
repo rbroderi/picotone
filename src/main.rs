@@ -494,7 +494,7 @@ fn load(weights: &Path, kind: ModelKind, parts: LoadOptions) -> Result<Encodec> 
 const fn default_table(kind: ModelKind) -> &'static str {
     match kind {
         ModelKind::Mono24k => "cx2_encodec_24khz_v5.ecxm",
-        ModelKind::Stereo48k => "cx2_encodec_48khz_net_v5.ecxm",
+        ModelKind::Stereo48k => "cx2_encodec_48khz_net2_v5.ecxm",
     }
 }
 

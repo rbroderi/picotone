@@ -363,7 +363,25 @@ That is 0.3% (music24) to 0.8% (music6) smaller than the previous container; the
 because headers and scales were a larger share there. With 8 parallel jobs, pack and unpack ran at 33–101× real
 time per file.
 
-The shipped tables are `cx2_encodec_48khz_net_v5.ecxm` (hybrid, the 48 kHz default),
+**The `net48v2` retrain.** The network was retrained on the full 24.3-hour corpus (13.1 M frames) for 180,000
+steps at batch 2048 (about 28 passes, 40 minutes on an RTX 3090), with an embedding for 15 codebooks and a
+learned position-in-segment input (33 buckets over the 150 frames). A learning-curve check first showed little
+gain from data alone: at 40,000 steps, doubling from 50% to 100% of the corpus gained only 0.014–0.018 bits per
+code at 15 codebooks. The network alone reached 7.75 / 8.05 bits per code at 15 codebooks (old / new set),
+against 7.87 / 8.33 for the first network at 16, with a float-to-integer gap under 0.0003. In the shipped
+hybrid table, same test sets and checks:
+
+| Preset | old set: `net48` / `net48v2` | new set: `net48` / `net48v2` | saved vs plain, old / new set |
+|---|---|---|---|
+| `music24` | 8.047 / 7.998 | 8.717 / 8.635 | 20.1% / 13.8% |
+| `music12` | 7.438 / 7.388 | 8.326 / 8.231 | 26.3% / 17.9% |
+| `music6` | 7.068 / 7.001 | 8.052 / 7.950 | 30.4% / 20.9% |
+
+Files are 0.6–1.3% smaller, most on the harder new set and at low bitrates; the other experts had already
+captured much of what the network alone gained. Speed is unchanged (`music12`: 53–58× real time against 46–49×,
+measured back to back). The table replaced the first network's; picotone ships only its newest tables.
+
+The shipped tables are `cx2_encodec_48khz_net2_v5.ecxm` (hybrid with `net48v2`, the 48 kHz default),
 `cx2_encodec_48khz_v5.ecxm` (constructed only) and `cx2_encodec_24khz_v5.ecxm`. A stream stores its table's
 hash (FNV-1a 64 of the file), so shipped tables must never change in place.
 
@@ -557,10 +575,10 @@ search (beam) and entropy coding (cx2).
 
 ## 10. Limitations and future work
 
-- **Bitrate gap:** cx2 still trails Meta's LM by 0.6–1 bit per code. The likely gains are training the network
-  on the full 24.3-hour corpus (it saw 6.7 hours), more steps, and an embedding for 15 codebooks (`music24` now
-  borrows the 16-codebook one). That retrain (`net48v2`) is prepared in `train/`; its table will ship under a
-  new name beside the current one. A design review proposed further ideas, from a slimmer container (the merge
+- **Bitrate gap:** cx2 still trails Meta's LM by about 0.5–0.9 bit per code. More data has stopped helping
+  (§6.3, `net48v2`), so the remaining gap is more likely context: the network sees only four frames, and Meta's
+  LM is a transformer over seconds. A recurrent trunk is being tested (`train/train_gru.py`). A design review
+  proposed further ideas, from a slimmer container (the merge
   took 0.3–0.8% of it) to encoder-side rate-distortion optimisation against cx2 (an estimated 5–12%).
 - **Enhancement layers:** a `.picol` sidecar holding the upper codebooks of the same encode, so a small base file
   plays alone and base plus sidecar plays at a higher preset. The format reserves room for it (FORMAT.md); the

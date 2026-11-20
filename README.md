@@ -111,9 +111,9 @@ The cx2 coder is lossless on the codes. Against plainly packed 10-bit codes it s
 
 | Preset | Smaller by |
 |---|---|
-| `music24` | 13–20% |
-| `music12` | 17–26% |
-| `music6` | 20–30% |
+| `music24` | 14–20% |
+| `music12` | 18–26% |
+| `music6` | 21–30% |
 
 The lower figure is on a harder, more varied test set (pop, vocals). It decodes far faster than the neural
 decoder (tens of times real time on one thread).
@@ -122,11 +122,12 @@ Three tables ship in `models/`:
 
 | Table | What it is |
 |---|---|
-| `cx2_encodec_48khz_net_v5.ecxm` | The 48 kHz default, with the trained network expert |
+| `cx2_encodec_48khz_net2_v5.ecxm` | The 48 kHz default, with the trained network expert (`net48v2`) |
 | `cx2_encodec_48khz_v5.ecxm` | The 48 kHz no-network fallback |
 | `cx2_encodec_24khz_v5.ecxm` | For 24 kHz |
 
-A file names its table by hash and decodes only with that exact table. The tables are self-contained (they hold
+A file names its table by hash and decodes only with that exact table. picotone ships only its newest tables;
+when a table is replaced, re-encode files made with the old one. The tables are self-contained (they hold
 the codebook centroids), so a decoder needs only the table and the decoder half of the weights.
 
 ## In the browser

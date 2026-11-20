@@ -834,7 +834,7 @@ mod tests {
     fn table(kind: ModelKind) -> Result<Vec<u8>> {
         let name = match kind {
             ModelKind::Mono24k => "cx2_encodec_24khz_v5.ecxm",
-            ModelKind::Stereo48k => "cx2_encodec_48khz_net_v5.ecxm",
+            ModelKind::Stereo48k => "cx2_encodec_48khz_net2_v5.ecxm",
         };
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../models")

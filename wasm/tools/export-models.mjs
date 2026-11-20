@@ -18,7 +18,7 @@ const outDir = resolve(here, "..", "www", "models");
 const tablesDir = resolve(here, "..", "..", "models");
 const licence = resolve(here, "..", "..", "LICENSES", "EnCodec-MIT.txt");
 // The table each model codes with by default (as the picotone command line).
-const TABLES = { encodec_24khz: "cx2_encodec_24khz_v5.ecxm", encodec_48khz: "cx2_encodec_48khz_net_v5.ecxm" };
+const TABLES = { encodec_24khz: "cx2_encodec_24khz_v5.ecxm", encodec_48khz: "cx2_encodec_48khz_net2_v5.ecxm" };
 
 /** The hash a .pico stream stores for a self-contained table: FNV-1a 64 of its bytes, as 16 hex digits. */
 function tableHash(bytes) {

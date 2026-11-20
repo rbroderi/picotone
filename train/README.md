@@ -8,7 +8,7 @@ files stay bit-identical across machines. A table file (`.ecxm`) carries the net
 
 ## What changed for the v2 retrain
 
-| | v1 (`out/net48.pt`, shipped) | v2 (`out/net48v2.pt`) |
+| | v1 (`out/net48.pt`, replaced) | v2 (`out/net48v2.pt`, shipped) |
 |---|---|---|
 | data | `train_data_48k.npz`, 6.7 h | `train_data_48k_full.npz`, 24.3 h (13.14 M frames) |
 | batch, steps | 512, 200,000 (28 passes over 3.6 M frames) | 2048, 180,000 (28 passes over 13.14 M frames) |
@@ -160,10 +160,11 @@ cd ..
 # 2. Build the lean hybrid table (version 5, centroids inside).
 uv run --project tools tools/build_tables.py 48k models/cx2_encodec_48khz_net2_v5.ecxm --net train/out/net48v2.pt --reset 2 --no-hist --no-static --geo 0
 
-# 3. Determinism and size on the preset test sets, new table then current table. Each line
-#    runs `picotone dev check`: .pico pack / unpack compare, seek decode, a stream without a
-#    length field, baseline (non-SIMD) path compare; it fails on any differing code.
-foreach ($t in "cx2_encodec_48khz_net2_v5", "cx2_encodec_48khz_net_v5") {
+# 3. Determinism and size on the preset test sets, new table then the shipped one (name the
+#    new table after the next network, for example net3). Each line runs `picotone dev
+#    check`: .pico pack / unpack compare, seek decode, a stream without a length field,
+#    baseline (non-SIMD) path compare; it fails on any differing code.
+foreach ($t in "cx2_encodec_48khz_net3_v5", "cx2_encodec_48khz_net2_v5") {
   foreach ($s in "ps_music24_old 15", "ps_music24_new 15", "ps_music12_old 8", "ps_music12_new 8", "ps_music6_old 4", "ps_music6_new 4") {
     $a = $s.Split(" ")
     uv run --project tools tools/check_testset.py 48k models/$t.ecxm auto $a[0] $a[1]
@@ -177,15 +178,16 @@ cargo test --release
 ```
 
 Compare the `bits/code` and `% saved` lines of step 3 between the two tables (WHITEPAPER §6.3
-has the current table's numbers in the `.pico` format: music24 8.05 / 8.72, music12 7.44 / 8.33,
-music6 7.07 / 8.05 bits per code, old / new set). Each run also writes
+has the shipped `net48v2` table's numbers: music24 8.00 / 8.64, music12 7.39 / 8.23, music6
+7.00 / 7.95 bits per code, old / new set). Each run also writes
 `work/eval_<table>_<set>_rauto.json`. A version 5 table needs no EnCodec weights.
 
-5. **Make it the default** (a user decision): point the 48 kHz default in `src/main.rs`
-   (`default_table`), `wasm/tools/export-models.mjs` and `web/tools/export-weights.mjs` (`TABLES`) at
-   the new file, then re-export the browser models. Files coded with the old table keep decoding
-   only while the old table ships too: keep `cx2_encodec_48khz_net_v5.ecxm` in `models/` and list
-   both in `cx2-tables.json`.
+5. **Make it the default** if it wins: point the 48 kHz default in `src/main.rs`
+   (`default_table`), `wasm/src/lib.rs`, `wasm/tools/export-models.mjs` and
+   `web/tools/export-weights.mjs` (`TABLES`) at the new file, **delete the old table** from
+   `models/`, re-export the browser models, and rerun the tests. picotone ships only its newest
+   tables; files coded with the old table must be re-encoded. Keep the new file name: the table
+   hash in old files then fails cleanly with a "wrong table" error.
 
 ## Table versions
 

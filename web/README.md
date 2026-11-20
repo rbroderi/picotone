@@ -24,7 +24,7 @@ npm run test:parity      # makes the references with the exe, then checks SNR an
 ```
 encodec_{24,48}khz/{manifest.json,weights-f32.bin,weights-f16.bin,EnCodec-MIT.txt}
 EnCodec-MIT.txt                      the weights' licence (must travel with them)
-cx2_encodec_24khz_v5.ecxm, cx2_encodec_48khz_net_v5.ecxm   each model's default cx2 table
+cx2_encodec_24khz_v5.ecxm, cx2_encodec_48khz_net2_v5.ecxm  each model's default cx2 table
 cx2-tables.json                      { tables: [{ file, model, hash }] }
 cx2/picotone.js, cx2/picotone_bg.wasm   (from npm run build)
 ```
