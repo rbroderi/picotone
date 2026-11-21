@@ -83,6 +83,9 @@ def get_args(argv=None):
     g.add_argument("--w-adv", type=float, default=1.0)
     g.add_argument("--w-teacher-mel", type=float, default=0.0, help="mel loss vs the stock decoder's output")
     g.add_argument("--w-teacher-wave", type=float, default=0.0, help="L1 waveform loss vs the stock output")
+    g.add_argument("--w-lf", type=float, default=100.0,
+                   help="L1 on the 1024-sample moving average (DC and sub-bass below ~40 Hz), which the mel loss "
+                        "and the discriminators barely see; without it the output can drift a DC offset")
     g.add_argument("--gan-start", type=int, default=0, help="steps of mel-only training before the GAN")
     g = ap.add_argument_group("schedule")
     g.add_argument("--log-every", type=int, default=100)
@@ -163,6 +166,11 @@ def train_step(a, step, teacher, G, D, mel, opt_g, opt_d, sch_g, sch_d, batch, d
     l_mel = mel(y_hat, y)
     total = a.w_mel * l_mel
     out["mel"] = l_mel.item()
+    if a.w_lf > 0:
+        l_lf = (torch.nn.functional.avg_pool1d(y_hat.float(), 1024, 256)
+                - torch.nn.functional.avg_pool1d(y.float(), 1024, 256)).abs().mean()
+        total = total + a.w_lf * l_lf
+        out["lf"] = l_lf.item()
     if gan:
         with autocast(a):
             adv, fm = losses.g_losses(D(y_hat), D(y), a.gan)
@@ -247,8 +255,11 @@ def stock_eval(a, teacher, clips, run, log):
 
 
 def fmt_means(means):
+    def dc(m):
+        return f" dc {m['dc_mfs']:.2f}" if "dc_mfs" in m else ""
+
     return " | ".join(f"{s}: mel {m['logmel']:.3f} mrstft {m['mrstft']:.3f} snr {m['snr']:.2f} sisdr {m['sisdr']:.2f}"
-                      for s, m in means.items())
+                      + dc(m) for s, m in means.items())
 
 
 # ------------------------------------------------------------------ checkpoints

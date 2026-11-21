@@ -50,11 +50,13 @@ def score(ref, x, sr=SR):
     n = min(ref.shape[-1], x.shape[-1])
     ref, x = ref[..., :n], x[..., :n]
     fb = _mel_fb(sr, 2048)
-    out = {"logmel": [], "mrstft": [], "snr": [], "sisdr": []}
+    out = {"logmel": [], "mrstft": [], "snr": [], "sisdr": [], "dc_mfs": []}
     for r, y in zip(ref, x):
         if float(r.abs().max()) < 1e-4:  # digital silence: nothing to score
             continue
         out["snr"].append(snr_db(r, y))
+        # DC error in thousandths of full scale: SI-SDR removes the means, SNR doesn't, log-mel barely sees it
+        out["dc_mfs"].append(1000 * abs(float(y.double().mean() - r.double().mean())))
         out["sisdr"].append(si_sdr_db(r, y))
         mr, my = fb @ _mag(r, 2048), fb @ _mag(y, 2048)
         floor = mr.max() * 1e-4
