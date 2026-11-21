@@ -28,6 +28,23 @@ def _mean(d, key):
     return sum(vals) / len(vals) if vals else float("nan")
 
 
+def picotone_logmel(means):
+    """Mean log-mel over the picotone test sets (old + new): the score the verdicts and ckpt_best use."""
+    return _mean(means, "logmel")
+
+
+def tier_line(student, stock, n_q, rule="full"):
+    """-> (ok, one line): log-mel and SI-SDR against the rule's limits for one codebook count."""
+    th = PILOT if rule == "pilot" else FULL
+    s_lm, t_lm = _mean(student, "logmel"), _mean(stock, "logmel")
+    s_si, t_si = _mean(student, "sisdr"), _mean(stock, "sisdr")
+    lim, si_lim = t_lm * th["logmel_rel"], t_si - th["sisdr_db"]
+    ok_lm, ok_si = s_lm <= lim, s_si >= si_lim
+    return ok_lm and ok_si, (f"q{n_q}: log-mel {s_lm:.3f} / limit {lim:.3f} ({s_lm / t_lm - 1:+.1%} vs stock) "
+                             f"{'ok' if ok_lm else 'FAIL'}, SI-SDR {s_si:.2f} / limit {si_lim:.2f} "
+                             f"{'ok' if ok_si else 'FAIL'}")
+
+
 def verdict(student, stock, history, picotone=None, rule="pilot", n_q=None):
     """student/stock: {set: metrics}; history: list of (step, {set: metrics}); picotone: {preset: {set: metrics}}."""
     th = PILOT if rule == "pilot" else FULL

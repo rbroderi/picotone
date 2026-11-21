@@ -270,8 +270,18 @@ uv run --extra cuda python train.py --run runs\w512 <same arguments> --steps 400
 ```
 
 - **Without Jamendo,** drop its `--manifest` and `--eval-set`.
-- **For a decoder that serves several bitrates,** use `--n-q 4,5,6,9` (quantiser dropout). The eval then
-  scores every count, and the verdict uses the first.
+- **For a decoder that serves several bitrates,** use `--n-q 4,5,6,7,9` (quantiser dropout). The eval then
+  scores every count (or the counts in `--eval-n-q`). The verdict uses the first, and after each eval
+  every count is also checked against the full-run rule, one line per count.
+- **Smoothed weights and the best checkpoint.** `--g-ema 0.999` (the default; 0 turns it off) keeps a moving
+  average of G's weights, which smooths out the GAN's swing between evals. Every eval scores both the raw
+  weights (`raw`) and the smoothed ones (`ema`). The score is the mean picotone log-mel over the evaluated
+  counts. `ckpt_best.pt` holds G only, from the best-scoring eval and variant; `export.py` reads it like
+  `ckpt_last.pt`. The smoothed copy is training-only bookkeeping: the shipped decoder is one set of weights,
+  so decode speed doesn't change.
+- **Stop rules.** `--stop-plateau 0.01 --plateau-steps 20000` stops once the 4-eval average score improved
+  by less than 0.01 over 20k steps. `--stop-when-pass` stops once every count passes the full-run rule.
+  `--listen-every 25000` limits the listening WAVs, which add up at five counts × two variants per eval.
 - **The study suggests one decoder per bitrate wins.** Train the 5-codebook student first.
 - **Options:**
   - `--w-teacher-mel 5`: output matching against stock DAC (off by default).

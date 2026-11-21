@@ -16,6 +16,7 @@ same clips (once, as the target line), the pilot verdict, and listening WAVs in 
 step) and restored optimiser/scheduler/RNG state. `--bench` measures memory and ms/step for batch sizes.
 """
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -103,6 +104,17 @@ def get_args(argv=None):
     g.add_argument("--ckpt-every", type=int, default=2500)
     g.add_argument("--keep-every", type=int, default=25000, help="also keep ckpt_<step>.pt at multiples")
     g.add_argument("--listen", type=int, default=6, help="eval clips written as WAVs at each eval")
+    g.add_argument("--listen-every", type=int, default=0,
+                   help="write listening WAVs only at evals on multiples of this (0 = every eval)")
+    g.add_argument("--g-ema", type=float, default=0.999,
+                   help="decay of a moving average of G's weights, evaluated beside G (0 = off); the "
+                        "checkpoints keep both, ckpt_best.pt keeps whichever scored better")
+    g.add_argument("--stop-plateau", type=float, default=0.0,
+                   help="stop once the best score (mean picotone log-mel over --eval-n-q, the average of the "
+                        "last 4 evals) improved by less than this over --plateau-steps (0 = never)")
+    g.add_argument("--plateau-steps", type=int, default=20000)
+    g.add_argument("--stop-when-pass", action="store_true",
+                   help="stop once every --eval-n-q tier passes the full-run rule")
     g.add_argument("--pilot-steps", type=int, default=50000, help="verdict rule: pilot before, full after")
     g.add_argument("--picotone-json", default="", help="compare_picotone.py output for the verdict")
     a = ap.parse_args(argv)
@@ -299,9 +311,16 @@ def set_rng_state(s):
         torch.cuda.set_rng_state_all([t.cpu() for t in s["cuda"]])
 
 
-def save_ckpt(path, step, G, D, opts, scheds, ema, a):
+@torch.no_grad()
+def update_g_ema(G_ema, G, decay):
+    e, p = list(G_ema.parameters()), list(G.parameters())
+    torch._foreach_lerp_(e, [q.detach() for q in p], 1.0 - decay)
+
+
+def save_ckpt(path, step, G, D, opts, scheds, ema, a, G_ema=None):
     tmp = path + ".tmp"
     torch.save({"step": step, "G": G.state_dict(), "D": D.state_dict(),
+                "G_ema": G_ema.state_dict() if G_ema is not None else None,
                 "opt_g": opts[0].state_dict(), "opt_d": opts[1].state_dict(),
                 "sch_g": scheds[0].state_dict(), "sch_d": scheds[1].state_dict(), "ema": ema,
                 "rng": rng_state(), "args": vars(a), "width": a.width}, tmp)
@@ -402,6 +421,15 @@ def main(argv=None):
         set_rng_state(s["rng"])
         step, ema = s["step"], s["ema"]
         log(f"resumed from {ck} at step {step} (G {state_hash(G)})")
+    G_ema = None
+    if a.g_ema > 0:
+        G_ema = copy.deepcopy(G).eval()
+        for p in G_ema.parameters():
+            p.requires_grad_(False)
+        if a.resume and s.get("G_ema") is not None:
+            G_ema.load_state_dict(s["G_ema"])
+        elif a.resume:
+            log("G_ema: none in the checkpoint, so it starts as a copy of G")
 
     lic = corpus.parse_licences(a.licences)
     log(f"licences: {sorted(lic)}")
@@ -418,28 +446,97 @@ def main(argv=None):
     clips = prepare_eval(a, teacher, dev, log) if a.eval_set else []
     stock = stock_eval(a, teacher, clips, a.run, log) if clips else {}
     pico = json.load(open(a.picotone_json)) if a.picotone_json and os.path.exists(a.picotone_json) else None
-    history = [(r["step"], r["means"]) for r in (corpus.read_jsonl(os.path.join(a.run, "evals.jsonl"))
-                                                 if os.path.exists(os.path.join(a.run, "evals.jsonl")) else [])
-               if r["n_q"] == a.n_q_list[0]]
+    past = (corpus.read_jsonl(os.path.join(a.run, "evals.jsonl"))
+            if os.path.exists(os.path.join(a.run, "evals.jsonl")) else [])
+    # Pilot-verdict trend, per weights variant ("raw" = G, "ema" = G_ema; older rows have no "w" and are raw).
+    history = {"raw": [], "ema": []}
+    by_step = {}
+    for r in past:
+        w = r.get("w", "raw")
+        if r["n_q"] == a.n_q_list[0]:
+            history[w].append((r["step"], r["means"]))
+        by_step.setdefault((r["step"], w), {})[r["n_q"]] = r["means"]
+    # Best score per eval (best variant), for the plateau rule: only evals that covered every --eval-n-q.
+    scores = []
+    for st in sorted({k[0] for k in by_step}):
+        sc = [sum(verdict.picotone_logmel(m[nq]) for nq in a.eval_n_q) / len(a.eval_n_q)
+              for (s2, w), m in by_step.items() if s2 == st and all(nq in m for nq in a.eval_n_q)]
+        if sc:
+            scores.append((st, min(sc)))
+    best_path = os.path.join(a.run, "ckpt_best.pt")
+    best = {"score": float("inf")}
+    if os.path.exists(best_path):
+        b = torch.load(best_path, map_location="cpu", weights_only=False)
+        if b.get("eval_n_q") == a.eval_n_q:
+            best = {k: b[k] for k in ("score", "step", "w")}
+            log(f"ckpt_best.pt: {best['w']} weights at step {best['step']}, score {best['score']:.4f}")
+        else:
+            log(f"ckpt_best.pt was scored on tiers {b.get('eval_n_q')}, not {a.eval_n_q}: it will be replaced")
 
     def evaluate(step):
+        """-> True when a stop rule fires."""
+        listen = os.path.join(a.run, "listen") if not a.listen_every or step % a.listen_every == 0 else None
+        variants = [("raw", G)] + ([("ema", G_ema)] if G_ema is not None else [])
         G.eval()
-        listen = os.path.join(a.run, "listen")
-        for nq in a.eval_n_q:
-            t = time.perf_counter()
-            means, rows = run_eval(a, teacher, G, clips, nq, f"s{step:07d}_q{nq}", listen)
-            jsonl(a.run, "evals.jsonl", {"step": step, "n_q": nq, "means": means, "rows": rows})
-            log(f"eval step {step} q{nq} ({time.perf_counter() - t:.0f} s): " + fmt_means(means))
-            sm = stock[str(nq)]["means"]
-            log("   stock DAC          : " + fmt_means({k: v for k, v in sm.items() if k in means}))
-            if nq == a.n_q_list[0]:
-                history.append((step, means))
-                if any(s in means for s in verdict.SETS):
+        results = {}
+        for w, model in variants:
+            per = {}
+            for nq in a.eval_n_q:
+                t = time.perf_counter()
+                means, rows = run_eval(a, teacher, model, clips, nq, f"s{step:07d}_{w}_q{nq}", listen)
+                per[nq] = means
+                jsonl(a.run, "evals.jsonl", {"step": step, "w": w, "n_q": nq, "means": means, "rows": rows})
+                log(f"eval step {step} {w} q{nq} ({time.perf_counter() - t:.0f} s): " + fmt_means(means))
+                sm = stock[str(nq)]["means"]
+                log("   stock DAC          : " + fmt_means({k: v for k, v in sm.items() if k in means}))
+                if nq == a.n_q_list[0] and any(s in means for s in verdict.SETS):
+                    history[w].append((step, means))
                     rule = "pilot" if step <= a.pilot_steps else "full"
-                    status, text = verdict.verdict(means, sm, history, pico, rule, nq)
-                    log(text)
-                    jsonl(a.run, "verdicts.jsonl", {"step": step, "rule": rule, "status": status})
+                    status, text = verdict.verdict(means, sm, history[w], pico, rule, nq)
+                    log(f"[{w}] " + text)
+                    jsonl(a.run, "verdicts.jsonl", {"step": step, "w": w, "rule": rule, "status": status})
+            results[w] = per
         G.train()
+        if not any(s in results["raw"][a.eval_n_q[0]] for s in verdict.SETS):
+            return False
+        # Every tier against the full-run rule, then the best-checkpoint and stop rules.
+        summary = {}
+        for w, per in results.items():
+            oks = []
+            for nq in a.eval_n_q:
+                ok, line = verdict.tier_line(per[nq], stock[str(nq)]["means"], nq, "full")
+                oks.append(ok)
+                log(f"  [{w}] full-run rule {line}")
+            summary[w] = (sum(verdict.picotone_logmel(per[nq]) for nq in a.eval_n_q) / len(a.eval_n_q), all(oks))
+            log(f"  [{w}] score {summary[w][0]:.4f} (mean picotone log-mel over q{a.eval_n_q}), "
+                f"{'ALL TIERS PASS' if summary[w][1] else 'not every tier passes yet'}")
+        w_best = min(summary, key=lambda k: summary[k][0])
+        score = summary[w_best][0]
+        if score < best["score"] and not a.eval_only:
+            best.update(score=score, step=step, w=w_best)
+            model = G if w_best == "raw" else G_ema
+            tmp = best_path + ".tmp"
+            torch.save({"step": step, "w": w_best, "score": score, "eval_n_q": a.eval_n_q, "width": a.width,
+                        "args": vars(a),
+                        "G": model.state_dict(), "tiers": {str(nq): results[w_best][nq] for nq in a.eval_n_q}}, tmp)
+            os.replace(tmp, best_path)
+            log(f"  new best: {w_best} weights, score {score:.4f} -> ckpt_best.pt")
+        scores.append((step, score))
+        if a.stop_when_pass and summary[w_best][1]:
+            log(f"stop: every tier passes the full-run rule ({w_best} weights)")
+            return True
+        if a.stop_plateau > 0:
+            def avg_upto(s_end):
+                v = [sc for st, sc in scores if st <= s_end][-4:]
+                return sum(v) / len(v) if len(v) == 4 else None
+            now, then = avg_upto(step), avg_upto(step - a.plateau_steps)
+            if now is not None and then is not None:
+                log(f"  plateau check: 4-eval average {then:.4f} at {step - a.plateau_steps} -> {now:.4f} "
+                    f"(stop if better by < {a.stop_plateau})")
+                if then - now < a.stop_plateau:
+                    log("stop: the score has plateaued")
+                    return True
+        return False
 
     if a.eval_only:
         if not clips:
@@ -448,6 +545,11 @@ def main(argv=None):
         if s.get("width", a.width) != a.width:
             raise SystemExit(f"checkpoint width {s['width']} != --width {a.width}")
         G.load_state_dict(s["G"])
+        if G_ema is not None:
+            if s.get("G_ema") is not None:
+                G_ema.load_state_dict(s["G_ema"])
+            else:
+                G_ema = None  # an older checkpoint: raw weights only
         log(f"eval-only: {a.eval_only} at step {s['step']} (G {state_hash(G)})")
         evaluate(s["step"])
         return
@@ -464,6 +566,8 @@ def main(argv=None):
         assert batch["step"] == step, (batch["step"], step)
         t_data += time.perf_counter() - t0
         out = train_step(a, step, teacher, G, D, mel, opt_g, opt_d, sch_g, sch_d, batch, dev)
+        if G_ema is not None:
+            update_g_ema(G_ema, G, a.g_ema)
         step += 1
         for k, v in out.items():
             if math.isfinite(v):
@@ -481,12 +585,15 @@ def main(argv=None):
                 + f" | {dt:.0f} ms/step (data wait {row['data_ms']:.0f}) lr {row['lr']:.3g}")
             t_last, t_data = time.perf_counter(), 0.0
         if step % a.ckpt_every == 0 or step == a.steps:
-            save_ckpt(ck, step, G, D, (opt_g, opt_d), (sch_g, sch_d), ema, a)
+            save_ckpt(ck, step, G, D, (opt_g, opt_d), (sch_g, sch_d), ema, a, G_ema)
             if step % a.keep_every == 0:
                 save_ckpt(os.path.join(a.run, f"ckpt_{step:07d}.pt"), step, G, D, (opt_g, opt_d), (sch_g, sch_d),
-                          ema, a)
+                          ema, a, G_ema)
         if clips and (step % a.eval_every == 0 or step == a.steps):
-            evaluate(step)
+            if evaluate(step):
+                if step % a.ckpt_every != 0:
+                    save_ckpt(ck, step, G, D, (opt_g, opt_d), (sch_g, sch_d), ema, a, G_ema)
+                break
     log(f"done at step {step}; G {state_hash(G)}")
 
 
