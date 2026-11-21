@@ -7,6 +7,7 @@ Workers take every W-th batch, so any worker count gives the same stream and `--
 exact sequence. Only the windows in flight are in memory.
 """
 import math
+import os
 
 import numpy as np
 import torch
@@ -18,11 +19,42 @@ import corpus
 SR = audio_io.SR
 
 
-def load_sources(manifests, licences, mix, mix_floor, log=print):
+def parse_path_map(specs):
+    """['OLD=NEW', ...] -> [(old, new)], longest prefix first."""
+    out = []
+    for s in specs:
+        old, sep, new = s.partition("=")
+        if not sep or not old:
+            raise SystemExit(f"--path-map wants OLD=NEW, got {s!r}")
+        out.append((old, new))
+    return sorted(out, key=lambda m: -len(m[0]))
+
+
+def remap_ref(ref, maps):
+    """Rewrite a manifest ref recorded on another machine: swap the first matching prefix (case-insensitive,
+    either slash direction), then use '/' throughout when running on a POSIX system. A zip member ('::') keeps
+    its own path."""
+    if not maps:
+        return ref
+    path, sep, member = ref.partition(audio_io.SEP)
+    norm = path.replace("\\", "/").lower()
+    for old, new in maps:
+        o = old.replace("\\", "/").rstrip("/").lower()
+        if norm == o or norm.startswith(o + "/"):
+            path = new.rstrip("/\\") + path[len(o):]
+            break
+    if os.sep == "/":
+        path = path.replace("\\", "/")
+    return path + sep + member
+
+
+def load_sources(manifests, licences, mix, mix_floor, log=print, path_map=()):
     """manifests: list of jsonl paths. -> list of dict(name, rows, hours, weight)."""
     by = {}
     for p in manifests:
         for r in corpus.read_jsonl(p):
+            if path_map:
+                r["ref"] = remap_ref(r["ref"], path_map)
             if r.get("split") != "train" or not r.get("keep"):
                 continue
             if r.get("licence", "unknown") not in licences:
@@ -30,6 +62,12 @@ def load_sources(manifests, licences, mix, mix_floor, log=print):
             by.setdefault(r["source"], []).append(r)
     if not by:
         raise SystemExit("no training tracks pass the split/quality/licence filters")
+    for name, rows in by.items():  # catch a wrong or missing --path-map now, not as silent skipped windows
+        missing = [r["ref"] for r in rows[:: max(1, len(rows) // 20)]
+                   if not os.path.exists(audio_io.split_ref(r["ref"])[0])]
+        if missing:
+            raise SystemExit(f"source {name}: {len(missing)} of the sampled files are missing, e.g. {missing[0]} "
+                             f"(manifests made on another machine need --path-map OLD=NEW)")
     src = [{"name": n, "rows": sorted(rows, key=lambda r: r["id"]),
             "hours": sum(r["seconds"] for r in rows) / 3600} for n, rows in sorted(by.items())]
     total = sum(s["hours"] for s in src)
@@ -113,7 +151,7 @@ def loader(ds, workers):
                                        prefetch_factor=4 if workers > 0 else None, pin_memory=torch.cuda.is_available())
 
 
-def load_eval(eval_files, max_clips=0, log=print):
+def load_eval(eval_files, max_clips=0, log=print, path_map=()):
     """-> list of dict(name, set, x [C, T] float32 44.1 kHz, T multiple of 512)."""
     import json
 
@@ -122,6 +160,7 @@ def load_eval(eval_files, max_clips=0, log=print):
         if max_clips and len(out) >= max_clips:
             break
         for e in json.load(open(p, encoding="utf-8")):
+            e["ref"] = remap_ref(e["ref"], path_map)
             x = audio_io.decode_44k(e["ref"], e["offset"], e["dur"])
             T = x.shape[1] // 512 * 512
             out.append({**e, "x": np.ascontiguousarray(x[:, :T])})

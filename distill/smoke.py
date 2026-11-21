@@ -38,6 +38,8 @@ def main():
     ap.add_argument("--seg-frames", type=int, default=16)
     ap.add_argument("--timeout", type=int, default=1200)
     ap.add_argument("--skip-long", action="store_true")
+    ap.add_argument("--path-map", action="append", default=[], metavar="OLD=NEW",
+                    help="passed to train.py: rewrite paths of a manifest made on another machine")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     rows = corpus.read_jsonl(a.manifest)
@@ -58,6 +60,8 @@ def main():
     common = ["--manifest", man, "--eval-set", evp, "--device", a.device, "--threads", str(a.threads),
               "--batch", str(a.batch), "--seg-frames", str(a.seg_frames), "--workers", "2", "--tracks-per-batch",
               "2", "--chunk-seconds", "6", "--listen", "2", "--log-every", "10"]
+    for m in a.path_map:
+        common += ["--path-map", m]
     log = os.path.join(a.out, "smoke_log.txt")
     run([py, "report_model.py", "--time-seconds", "1", "--json", os.path.join(a.out, "cost.json")], a.timeout, log)
     run([py, "train.py", "--run", os.path.join(a.out, "bench"), "--bench", "2,4"] + common, a.timeout, log)

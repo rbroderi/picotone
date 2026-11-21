@@ -64,6 +64,9 @@ def get_args(argv=None):
     g.add_argument("--tracks-per-batch", type=int, default=12)
     g.add_argument("--chunk-seconds", type=float, default=12.0)
     g.add_argument("--max-eval-clips", type=int, default=0)
+    g.add_argument("--path-map", action="append", default=[], metavar="OLD=NEW",
+                   help="rewrite manifest/eval paths made on another machine, e.g. "
+                        "'E:\\Shared\\audio=/media/demo/External20TB/ai/audio' (repeatable)")
     g.add_argument("--eval-n-q", default="", help="codebook counts to evaluate, e.g. 5,9 (default: those of --n-q)")
     g = ap.add_argument_group("model")
     g.add_argument("--width", type=int, default=512)
@@ -104,6 +107,7 @@ def get_args(argv=None):
     g.add_argument("--picotone-json", default="", help="compare_picotone.py output for the verdict")
     a = ap.parse_args(argv)
     a.n_q_list = [int(v) for v in a.n_q.split(",")]
+    a.path_map = data.parse_path_map(a.path_map)
     a.eval_n_q = sorted({int(v) for v in a.eval_n_q.split(",")} if a.eval_n_q else set(a.n_q_list))
     assert a.enc_ctx % HOP == 0 and a.enc_ctx // HOP >= a.dec_ctx
     return a
@@ -222,7 +226,7 @@ def decode_clip(a, teacher, G, codes, n_q):
 
 
 def prepare_eval(a, teacher, dev, log):
-    clips = data.load_eval(a.eval_set, a.max_eval_clips, log)
+    clips = data.load_eval(a.eval_set, a.max_eval_clips, log, a.path_map)
     for e in clips:
         x = torch.from_numpy(e["x"])[:, None].to(dev)
         e["codes"] = encode_codes(teacher, x)
@@ -401,7 +405,7 @@ def main(argv=None):
 
     lic = corpus.parse_licences(a.licences)
     log(f"licences: {sorted(lic)}")
-    sources = None if a.eval_only else data.load_sources(a.manifest, lic, a.mix, a.mix_floor, log)
+    sources = None if a.eval_only else data.load_sources(a.manifest, lic, a.mix, a.mix_floor, log, a.path_map)
     crop = a.seg_frames * HOP + 2 * a.enc_ctx
 
     def ds_factory(B, start=0):
