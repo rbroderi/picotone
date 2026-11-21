@@ -65,6 +65,19 @@ def stock_decode(teacher, z):
     return teacher.decoder(z)
 
 
+@torch.no_grad()
+def stock_decode_bf16(teacher, z):
+    """The stock decoder with its body under bf16 autocast and its output head (Snake, last conv, tanh) in fp32.
+    A bf16 head costs about 0.8 dB log-mel; with the fp32 head the loss is about 0.07 dB. This is for the training
+    target only. Evals use stock_decode in fp32."""
+    m = teacher.decoder.model
+    dev = z.device.type
+    with torch.autocast(device_type=dev, dtype=torch.bfloat16):
+        h = m[:-3](z)
+    with torch.autocast(device_type=dev, enabled=False):
+        return m[-3:](h.float()).float()
+
+
 def encoder_cost(teacher, seconds=4.0):
     from student import count_cost
 

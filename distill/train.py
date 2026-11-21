@@ -34,7 +34,7 @@ import losses
 import metrics
 import verdict
 from student import STOCK_WIDTH, StudentDecoder, count_cost, n_params, warm_start_slice
-from teacher import HOP, codes_to_z, encode_codes, load_teacher, stock_decode
+from teacher import HOP, codes_to_z, encode_codes, load_teacher, stock_decode, stock_decode_bf16
 
 SR = 44100
 
@@ -50,6 +50,9 @@ def get_args(argv=None):
     g.add_argument("--seed", type=int, default=0)
     g.add_argument("--amp", choices=("auto", "bf16", "off"), default="auto", help="auto = bf16 on CUDA")
     g.add_argument("--bench", default="", help="comma list of batch sizes: measure memory + ms/step, then exit")
+    g.add_argument("--eval-only", default="", metavar="CKPT",
+                   help="load G from this checkpoint, run one eval (at --eval-n-q) into --run, then exit; "
+                        "use a fresh --run so the logs don't mix with the training run's")
     g = ap.add_argument_group("data")
     g.add_argument("--manifest", action="append", default=[])
     g.add_argument("--eval-set", action="append", default=[])
@@ -61,6 +64,7 @@ def get_args(argv=None):
     g.add_argument("--tracks-per-batch", type=int, default=12)
     g.add_argument("--chunk-seconds", type=float, default=12.0)
     g.add_argument("--max-eval-clips", type=int, default=0)
+    g.add_argument("--eval-n-q", default="", help="codebook counts to evaluate, e.g. 5,9 (default: those of --n-q)")
     g = ap.add_argument_group("model")
     g.add_argument("--width", type=int, default=512)
     g.add_argument("--init", choices=("random", "slice"), default="random",
@@ -83,6 +87,9 @@ def get_args(argv=None):
     g.add_argument("--w-adv", type=float, default=1.0)
     g.add_argument("--w-teacher-mel", type=float, default=0.0, help="mel loss vs the stock decoder's output")
     g.add_argument("--w-teacher-wave", type=float, default=0.0, help="L1 waveform loss vs the stock output")
+    g.add_argument("--teacher-amp", choices=("bf16", "fp32"), default="bf16",
+                   help="teacher target precision when bf16 autocast is on: bf16 body + fp32 output head "
+                        "(about 0.07 dB log-mel off fp32, faster) or fully fp32")
     g.add_argument("--w-lf", type=float, default=100.0,
                    help="L1 on the 1024-sample moving average (DC and sub-bass below ~40 Hz), which the mel loss "
                         "and the discriminators barely see; without it the output can drift a DC offset")
@@ -97,6 +104,7 @@ def get_args(argv=None):
     g.add_argument("--picotone-json", default="", help="compare_picotone.py output for the verdict")
     a = ap.parse_args(argv)
     a.n_q_list = [int(v) for v in a.n_q.split(",")]
+    a.eval_n_q = sorted({int(v) for v in a.eval_n_q.split(",")} if a.eval_n_q else set(a.n_q_list))
     assert a.enc_ctx % HOP == 0 and a.enc_ctx // HOP >= a.dec_ctx
     return a
 
@@ -117,10 +125,13 @@ def jsonl(run, name, row):
         f.write(json.dumps(row) + "\n")
 
 
+def amp_on(a):
+    return a.amp == "bf16" or (a.amp == "auto" and a.device.startswith("cuda"))
+
+
 def autocast(a):
-    use = a.amp == "bf16" or (a.amp == "auto" and a.device.startswith("cuda"))
     return torch.autocast(device_type="cuda" if a.device.startswith("cuda") else "cpu", dtype=torch.bfloat16,
-                          enabled=use)
+                          enabled=amp_on(a))
 
 
 def state_hash(model):
@@ -145,8 +156,12 @@ def forward_g(a, teacher, G, batch, dev):
     y = x[..., a.enc_ctx: a.enc_ctx + S * HOP]
     y_t = None
     if a.w_teacher_mel > 0 or a.w_teacher_wave > 0:
-        with torch.no_grad(), torch.autocast(device_type=z.device.type, enabled=False):  # fp32 target, no bf16 floor
-            y_t = stock_decode(teacher, z.float()).float()[..., cd * HOP: (cd + S) * HOP]
+        if a.teacher_amp == "bf16" and amp_on(a):
+            y_t = stock_decode_bf16(teacher, z.float())
+        else:
+            with torch.no_grad(), torch.autocast(device_type=z.device.type, enabled=False):
+                y_t = stock_decode(teacher, z.float()).float()
+        y_t = y_t[..., cd * HOP: (cd + S) * HOP]
     return y_hat, y, y_t
 
 
@@ -238,14 +253,16 @@ def run_eval(a, teacher, G, clips, n_q, tag, listen_dir):
 
 def stock_eval(a, teacher, clips, run, log):
     p = os.path.join(run, "stock_eval.json")
-    if os.path.exists(p):
-        return json.load(open(p))
+    res = json.load(open(p)) if os.path.exists(p) else {}
+    todo = [nq for nq in a.eval_n_q if str(nq) not in res]
+    if not todo:
+        return res
     listen = os.path.join(run, "listen")
     os.makedirs(listen, exist_ok=True)
-    res = {}
-    for i, e in enumerate(clips[: a.listen]):
-        write_wav(os.path.join(listen, f"{e['name']}__0_original.wav"), e["x"])
-    for nq in sorted(set(a.n_q_list)):
+    if not res:
+        for i, e in enumerate(clips[: a.listen]):
+            write_wav(os.path.join(listen, f"{e['name']}__0_original.wav"), e["x"])
+    for nq in todo:
         t = time.perf_counter()
         means, rows = run_eval(a, teacher, None, clips, nq, f"0_stockDAC_q{nq}", listen)
         res[str(nq)] = {"means": means, "rows": rows}
@@ -384,7 +401,7 @@ def main(argv=None):
 
     lic = corpus.parse_licences(a.licences)
     log(f"licences: {sorted(lic)}")
-    sources = data.load_sources(a.manifest, lic, a.mix, a.mix_floor, log)
+    sources = None if a.eval_only else data.load_sources(a.manifest, lic, a.mix, a.mix_floor, log)
     crop = a.seg_frames * HOP + 2 * a.enc_ctx
 
     def ds_factory(B, start=0):
@@ -404,7 +421,7 @@ def main(argv=None):
     def evaluate(step):
         G.eval()
         listen = os.path.join(a.run, "listen")
-        for nq in sorted(set(a.n_q_list)):
+        for nq in a.eval_n_q:
             t = time.perf_counter()
             means, rows = run_eval(a, teacher, G, clips, nq, f"s{step:07d}_q{nq}", listen)
             jsonl(a.run, "evals.jsonl", {"step": step, "n_q": nq, "means": means, "rows": rows})
@@ -419,6 +436,17 @@ def main(argv=None):
                     log(text)
                     jsonl(a.run, "verdicts.jsonl", {"step": step, "rule": rule, "status": status})
         G.train()
+
+    if a.eval_only:
+        if not clips:
+            raise SystemExit("--eval-only needs --eval-set")
+        s = torch.load(a.eval_only, map_location="cpu", weights_only=False)
+        if s.get("width", a.width) != a.width:
+            raise SystemExit(f"checkpoint width {s['width']} != --width {a.width}")
+        G.load_state_dict(s["G"])
+        log(f"eval-only: {a.eval_only} at step {s['step']} (G {state_hash(G)})")
+        evaluate(s["step"])
+        return
 
     it = iter(data.loader(ds_factory(a.batch, step), a.workers))
     G.train()
