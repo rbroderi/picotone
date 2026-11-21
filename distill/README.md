@@ -453,6 +453,9 @@ distance** (1.09 → 1.11) and **−0.4 dB SI-SDR** (9.1 → 8.7) against the 15
 
 ## 8. If it passes: integration (not built)
 
+The plan in full, with milestones and the open decisions, is in [INTEGRATION.md](INTEGRATION.md). The table
+below is the original summary.
+
 | Piece | What | Effort |
 |---|---|---|
 | Rust student decoder in picotone | Conv1d (dilated), polyphase ConvTranspose (both exist for EnCodec), and Snake as a degree-3 polynomial with range reduction (`snake_bench`, +0.005 dB log-mel). Weight norm folded at export (`export.py`); safetensors loader. Fully convolutional, so chunked decode with a receptive-field overlap replaces the segment/LSTM logic. Parity test against PyTorch. | 1–1.5 weeks |
