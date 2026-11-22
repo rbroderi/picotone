@@ -402,6 +402,85 @@ def eval_readers(text):
     return {r for r in out if r and "librivox" not in r and "volunteer" not in r and len(r) > 3}
 
 
+_BR = {1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],   # MPEG-1 layer III, kbps
+       2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]}       # MPEG-2 / 2.5 layer III
+_SR = {3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000]}
+
+
+def mp3_repair(path):
+    """Make a byte-prefix MP3 excerpt self-consistent, in place. -> (changed, seconds by frame count).
+
+    The excerpt keeps the chapter's Xing/Info header frame, which states the whole chapter's frame count, so
+    libsndfile/mpg123 report the chapter's length, not the excerpt's (found 2026-11-22: 6 min files listed as
+    15-38 min, and the probe's windows past the real end judged them silent). This rewrites that header's frame
+    count, byte count and seek table for the excerpt, and cuts the torn last frame. (Dropping the header instead
+    works for CBR but not VBR: libsndfile then guesses the length from the first frame's bitrate.) A VBRI
+    header is dropped. Idempotent."""
+    data = open(path, "rb").read()
+    pos = 0
+    if data[:3] == b"ID3" and len(data) > 10:
+        s = data[6:10]
+        pos = 10 + ((s[0] & 0x7F) << 21 | (s[1] & 0x7F) << 14 | (s[2] & 0x7F) << 7 | (s[3] & 0x7F))
+        pos += 10 if data[5] & 0x10 else 0
+    start, frames, out, first, key, xing = pos, 0, [], True, None, None
+    spf = sr = 0
+    while pos + 4 <= len(data):
+        b1, b2 = data[pos + 1], data[pos + 2]
+        if data[pos] != 0xFF or (b1 & 0xE0) != 0xE0:
+            break
+        ver, layer, bri, sri, pad = (b1 >> 3) & 3, (b1 >> 1) & 3, b2 >> 4, (b2 >> 2) & 3, (b2 >> 1) & 1
+        if ver == 1 or layer != 1 or bri in (0, 15) or sri == 3:
+            break
+        if key is None:
+            key = (ver, sri)
+        elif key != (ver, sri):  # a different stream format mid-file: not a frame boundary
+            break
+        sr = _SR[ver][sri]
+        br = _BR[1 if ver == 3 else 2][bri] * 1000
+        flen = (144 if ver == 3 else 72) * br // sr + pad
+        spf = 1152 if ver == 3 else 576
+        if pos + flen > len(data):  # torn last frame
+            break
+        fr = data[pos:pos + flen]
+        if first and fr[36:40] == b"VBRI":
+            pass  # Fraunhofer header frame: drop
+        elif first and (b"Xing" in fr[:64] or b"Info" in fr[:64]):
+            xing = bytearray(fr)  # patched below, once the audio frames are counted
+        else:
+            out.append(fr)
+            frames += 1
+        first = False
+        pos += flen
+    if not frames:
+        raise ValueError("no MP3 frames")
+    if xing is not None:
+        t = max(xing.find(b"Xing", 0, 64), xing.find(b"Info", 0, 64))
+        flags = int.from_bytes(xing[t + 4:t + 8], "big")
+        o = t + 8
+        total = len(xing) + sum(len(f) for f in out)
+        if flags & 1:
+            xing[o:o + 4] = frames.to_bytes(4, "big")
+            o += 4
+        if flags & 2:
+            xing[o:o + 4] = total.to_bytes(4, "big")
+            o += 4
+        if flags & 4:  # seek table: byte position (/256 of the stream) at each 1% of the frames
+            offs, acc = [], len(xing)
+            for f in out:
+                offs.append(acc)
+                acc += len(f)
+            xing[o:o + 100] = bytes(min(255, offs[min(frames - 1, i * frames // 100)] * 256 // total)
+                                    for i in range(100))
+        out.insert(0, bytes(xing))
+    new = data[:start] + b"".join(out)
+    changed = new != data
+    if changed:
+        with open(path + ".fix", "wb") as f:
+            f.write(new)
+        os.replace(path + ".fix", path)
+    return changed, frames * spf / sr
+
+
 def get_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": "picotone-distill-fetch/1.0"})
     for attempt in range(6):
@@ -427,6 +506,40 @@ def lv_text(md):
     return " ".join(d) if isinstance(d, list) else str(d)
 
 
+def lv_repair_all(out_root):
+    """mp3_repair every excerpt already fetched, then check the length libsndfile reports against the frame count
+    (that is the length prep_corpus.py records and training samples within)."""
+    paths = [os.path.join(d, f) for d, _, fs in os.walk(out_root) for f in fs if f.endswith(".mp3")
+             and not f.endswith(".part.mp3")]
+    if not paths:
+        return
+    fixed, bad, tot = 0, [], 0.0
+    for p in sorted(paths):
+        try:
+            ch, secs = mp3_repair(p)
+            from mutagen.id3 import ID3
+            t = ID3(p)
+            if t.getall("APIC"):  # cover art would inflate libsndfile's size-based estimates; not needed
+                t.delall("APIC")
+                t.save(p)
+                ch = True
+        except Exception as e:  # noqa: BLE001
+            bad.append((p, f"repair failed: {e}"))
+            continue
+        fixed += ch
+        tot += secs
+        i = sf.info(p)
+        rep = i.frames / i.samplerate
+        if abs(rep - secs) > 0.02 * secs + 0.5:
+            bad.append((p, f"libsndfile says {rep:.1f} s, frames say {secs:.1f} s"))
+    print(f"librivox: {len(paths)} excerpts on disk, {fixed} repaired, {tot / 3600:.1f} h by frame count, "
+          f"{len(bad)} with a length mismatch or error", flush=True)
+    for p, why in bad[:10]:
+        print(f"  {p}: {why}", flush=True)
+    if bad:
+        raise SystemExit("some excerpts still report the wrong length: stop, and report these lines")
+
+
 def stage_librivox(a):
     """One 64 kbps MP3 chapter excerpt (the first --lv-minutes, fetched as a byte prefix, not re-encoded) from
     each of many LibriVox books: the same kind of audio as the eval's speech clips, from many readers."""
@@ -434,6 +547,7 @@ def stage_librivox(a):
     from mutagen.id3 import ID3, TALB, TIT2, TPE1, WCOP, WOAR, ID3NoHeaderError
     out_root = os.path.join(a.root, "librivox")
     os.makedirs(out_root, exist_ok=True)
+    lv_repair_all(out_root)
     readers, authors = set(), set()
     for it in LV_EVAL_ITEMS:
         md = get_json(f"https://archive.org/metadata/{it}/metadata").get("result", {})
@@ -499,6 +613,7 @@ def stage_librivox(a):
             tmp = path[:-4] + ".part.mp3"  # torn last frame; libsndfile wants the .mp3 name)
             with open(tmp, "wb") as fh:
                 fh.write(data)
+            mp3_repair(tmp)
             try:
                 t = ID3(tmp)
             except ID3NoHeaderError:
@@ -531,6 +646,8 @@ def stage_librivox(a):
           flush=True)
     if have < need * 0.8:
         print("WARNING: less LibriVox audio than asked for", flush=True)
+    if not a.lv_dry_run:
+        lv_repair_all(out_root)
 
 
 # ------------------------------------------------------------------ 4. manifests
@@ -541,6 +658,11 @@ def stage_manifests(a):
         src = src.strip()
         extra = known[src]
         out = os.path.join(a.data_dir, f"{src}.jsonl")
+        if a.fresh:  # prep_corpus.py resumes, so rows probed from bad files would otherwise stay
+            for p in (out, out + ".report.json", out + ".eval.json"):
+                if os.path.exists(p):
+                    os.remove(p)
+                    print(f"removed {p}", flush=True)
         cmd = [sys.executable, os.path.join(HERE, "prep_corpus.py"), "--root", os.path.join(a.root, src),
                "--source", src, "--out", out, "--workers", str(a.workers), "--min-bandwidth", "0", *extra]
         print(" ".join(cmd), flush=True)
@@ -567,6 +689,8 @@ def main():
     ap.add_argument("--lv-hours", type=float, default=15, help="librivox stage: total hours")
     ap.add_argument("--lv-minutes", type=float, default=6, help="librivox stage: minutes kept per book")
     ap.add_argument("--lv-dry-run", action="store_true", help="librivox stage: list the picks, fetch no audio")
+    ap.add_argument("--fresh", action="store_true", help="manifests stage: delete the --sources manifests first, "
+                                                         "so every file is probed again")
     ap.add_argument("--workers", type=int, default=max(1, min(8, (os.cpu_count() or 2) - 2)))
     ap.add_argument("--speech-hours", type=float, default=20)
     ap.add_argument("--drum-hours", type=float, default=6)
