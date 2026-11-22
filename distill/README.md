@@ -44,6 +44,7 @@ hooks.
 | `corpus.py` | Licence classes and presets, the bandwidth probe, the quality judgement, the split by artist, and the data reports |
 | `prep_pd.py` | Builds the manifest for picotone's existing public-domain/CC0/CC-BY corpus, plus the 53 picotone test clips as the eval set |
 | `prep_corpus.py` | Builds a manifest for any folder of audio (recursive, zips included), for example the Jamendo dump |
+| `prep_extra.py` | Downloads and builds the `speech` (VCTK, CC BY 4.0) and `hits` (rendered CC0/CC-BY drum and piano performances) sources for the q9 fine-tune, then runs `prep_corpus.py` on them |
 | `data.py` | The streaming loader. Each batch is a pure function of (seed, step), so a resumed run continues the same sequence |
 | `train.py` | The training loop, the periodic eval, listening WAVs, the pass/fail verdict, checkpoints and `--resume`, and `--bench` |
 | `verdict.py` | The pilot pass/fail rule and the full-run target |
