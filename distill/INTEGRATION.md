@@ -146,10 +146,21 @@ and 1–2 weeks for cx2 if the probe justifies it.
 2. **Stereo (decided 2026-11-21).** Measured with stock DAC as a proxy on 12 picotone clips, and by blind
    listening; see "Stereo measurements" below. In M2:
    - build the automatic mono flag (`stereo_scan.py`'s rule);
-   - carry the stereo layout (left/right or mid/side) as one header bit per file. The encoder codes the file
-     both ways and keeps the one with the lower stereo score (log-mel on L, R and the side, averaged).
-     Encoding is offline, so the doubled cost doesn't matter. Mid/side is the default when the encoder
-     doesn't compare, for example `--stereo ms`;
+   - carry the stereo layout (left/right or mid/side) as one header bit per file, chosen by a sampled
+     comparison rather than coding the whole file twice:
+     1. the mono check first (`stereo_scan.py`'s rule; nearly free). A mono file has no layout to choose;
+     2. 6–8 excerpts of about 3 s, spread over the file and away from silence, each with enough
+        surrounding audio for the encoder and decoder to warm up. Each is encoded, decoded and scored both
+        ways: log-mel on L, R and the side, averaged;
+     3. one full encode in the winning layout.
+
+     Optionally, stop sampling early when the first 2–3 excerpts already show a large margin. Costs, against
+     a plain encode: about 1.1–1.4× for 5–15% of the file sampled, against about 2.5× for a full
+     two-layout comparison (the decode for scoring is a fifth to a sixth of the encode). A wrong pick costs
+     little: it happens mostly where the layouts score alike, and the ABX heard no difference even where
+     they don't. Check it on whole tracks before building: decide about 40 songs both ways, sampled and
+     full, and count agreement and the score lost on disagreement. Mid/side is the default when the
+     encoder doesn't compare (`--stereo ms`);
    - no per-page side codebook counts.
 3. **WebGPU now or later.** I suggest later, after the wasm numbers from M3.
 4. **Raw codes first, cx2 after a probe.** I suggest raw first.
