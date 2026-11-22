@@ -1,6 +1,9 @@
 """Where does the student lose to stock DAC? Per-clip gaps from a run's saved evals (no GPU, no audio).
 
-    uv run python clip_gap.py --run runs/w512_tiers_clean_eval [--n-q 9] [--step 107500] [--w ema]
+    uv run --extra cuda python clip_gap.py --run runs/w512_tiers_clean_eval [--n-q 9] [--step 107500] [--w ema]
+
+(Use the same --extra as the machine's venv, cuda or cpu: a bare `uv run` re-syncs the venv to CPU torch. The
+script needs only the standard library, so `.venv/bin/python clip_gap.py ...` works too.)
 
 Reads <run>/evals.jsonl (the student's per-clip scores) and <run>/stock_eval.json (stock DAC's, same clips).
 For each tier it prints the clips sorted by the log-mel gap (student - stock, and the ratio), the gap per

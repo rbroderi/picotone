@@ -19,7 +19,30 @@ better; DAC kbps are raw stereo, before any entropy coding):
 | EnCodec music24 | 19.9 | 2.80 |
 
 By ear (the user, 75k): student and stock DAC are almost impossible to tell apart, and q4 against q9 is very
-subtle. The cost is decode speed: the student is projected at about 1.9× real time in single-thread wasm
+subtle. Two of the clips in that listening test were Open Goldberg clips, which leaked into training (see
+`README.md` §2), so a re-listen on the Chopin piano clips is due.
+
+**Final, clean (step 107,500, smoothed weights, stopped by the plateau rule).** Scored on the 49 picotone
+clips left after removing the four leaked Goldberg clips; the percentages are against stock DAC on the same
+clips:
+
+| Tier | Log-mel | vs stock, all 49 | vs stock, without the 5 speech clips |
+|---|---|---|---|
+| q4 | 3.112 | +2.3% | +0.9% |
+| q5 | 2.899 | +2.7% | +1.2% |
+| q6 | 2.739 | +3.0% | +1.4% |
+| q7 | 2.598 | +3.4% | +1.8% |
+| q9 | 2.371 | +4.6% | +2.9% |
+
+(Log-mel is the set-weighted mean, as the verdict uses. The last column is a plain mean over clips, from
+`clip_gap.py`.)
+
+- **Speech is the largest gap at every tier**: 13–17% behind stock, with SI-SDR 2–3 dB worse, on the five
+  LibriVox clips. The training data has no speech.
+- **Without speech, every tier is within the 3% target.**
+- **At q9 the music gap is spread out:** the worst 25% of clips carry 62% of it. Piano, sfx, rock and
+  electronic are 5–8% behind.
+- **Orchestral is 7–9% better than stock** at every tier. The cost is decode speed: the student is projected at about 1.9× real time in single-thread wasm
 (stereo), against about 5.5× for EnCodec 48 kHz. A review (2026-11-21, see "Decode speed" below) thinks
 1.9× is optimistic: picotone's own EnCodec numbers imply 0.9–1.3×. It needs a measurement. So picotone keeps
 two modes:
@@ -224,9 +247,26 @@ devices without WebGPU and for plain-HTTP pages.
      a plain encode: about 1.1–1.4× for 5–15% of the file sampled, against about 2.5× for a full
      two-layout comparison (the decode for scoring is a fifth to a sixth of the encode). A wrong pick costs
      little: it happens mostly where the layouts score alike, and the ABX heard no difference even where
-     they don't. Check it on whole tracks before building: decide about 40 songs both ways, sampled and
-     full, and count agreement and the score lost on disagreement. Mid/side is the default when the
-     encoder doesn't compare (`--stereo ms`);
+     they don't. Mid/side is the default when the encoder doesn't compare (`--stereo ms`).
+
+     **Checked on whole tracks (2026-11-21, `stereo_pick_check.py`, the student at step 107,500, 40 tracks of
+     up to 5 min: 20 Jamendo, 20 public domain).** 4 tracks were mono by the rule. Of the 36 compared, the full
+     comparison picked mid/side for 29 and left/right for 7. The gap between the layouts had a median of
+     0.18 log-mel and a maximum of 3.9.
+
+     | Sampled pick | Agrees with full | Mean / max loss | Audio sampled |
+     |---|---|---|---|
+     | first 1 excerpt | 34 / 36 | 0.008 / 0.25 | 1.7% |
+     | first 2 excerpts | 36 / 36 | 0 / 0 | 3.3% |
+     | first 4 excerpts | 35 / 36 | 0 / 0.001 | 6.7% |
+     | all 8 excerpts | 34 / 36 | 0.010 / 0.34 | 13.3% |
+     | early exit after ≥ 2, margin 5% | 35 / 36 | 0 / 0.001 | 4.5% |
+
+     More excerpts did slightly worse. On one jig, the later loud windows favour left/right while the whole
+     track favours mid/side (2.73 against 2.39). The other miss differs by 0.002. The "first k" rows use the
+     first k of 8 regions, which covers only the start of the track. So the plan is **4 excerpts spread over
+     the whole file, with an early exit after 2 when the margin is above 5%**: about 5% of the audio, about
+     1.1× a plain encode, and a mean loss near zero;
    - no per-page side codebook counts.
 3. **WebGPU (decided 2026-11-21):** straight after M3. The LAN table runs over HTTPS, so WebGPU works there.
 4. **Raw codes first, cx2 after a probe.** I suggest raw first.
