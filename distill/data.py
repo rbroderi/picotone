@@ -48,9 +48,34 @@ def remap_ref(ref, maps):
     return path + sep + member
 
 
-def load_sources(manifests, licences, mix, mix_floor, log=print, path_map=()):
-    """manifests: list of jsonl paths. -> list of dict(name, rows, hours, weight)."""
+# Placeholder creator names that say nothing about who made a track: never used to exclude anything.
+GENERIC_ARTISTS = {"", "various", "various artists", "unknown", "anonymous", "n/a", "none"}
+
+
+def norm_artist(name):
+    return " ".join((name or "").split()).lower()
+
+
+def eval_artists(eval_files):
+    """The creators of every eval clip (normalised), minus placeholder names."""
+    import json
+
+    out = set()
+    for p in eval_files:
+        for e in json.load(open(p, encoding="utf-8")):
+            out.add(norm_artist(e.get("artist")))
+    return out - GENERIC_ARTISTS
+
+
+def load_sources(manifests, licences, mix, mix_floor, log=print, path_map=(), exclude_artists=()):
+    """manifests: list of jsonl paths. -> list of dict(name, rows, hours, weight).
+
+    exclude_artists: normalised creator names whose tracks never train (the eval set's creators). Each
+    manifest holds out its own eval creators, but a creator can turn up in another manifest too: the Open
+    Goldberg Variations are in the picotone eval set and also in the Jamendo dump (found 2026-11-21)."""
     by = {}
+    dropped = {}
+    excl = set(exclude_artists) - GENERIC_ARTISTS
     for p in manifests:
         for r in corpus.read_jsonl(p):
             if path_map:
@@ -59,7 +84,15 @@ def load_sources(manifests, licences, mix, mix_floor, log=print, path_map=()):
                 continue
             if r.get("licence", "unknown") not in licences:
                 continue
+            who = norm_artist(r.get("artist") or r.get("creator"))
+            if who in excl:
+                d = dropped.setdefault((r["source"], who), [0, 0.0])
+                d[0] += 1
+                d[1] += r.get("seconds", 0) or 0
+                continue
             by.setdefault(r["source"], []).append(r)
+    for (src, who), (n, sec) in sorted(dropped.items()):
+        log(f"source {src}: {n} tracks ({sec / 3600:.2f} h) by eval creator {who!r} left out of training")
     if not by:
         raise SystemExit("no training tracks pass the split/quality/licence filters")
     for name, rows in by.items():  # catch a wrong or missing --path-map now, not as silent skipped windows

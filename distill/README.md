@@ -77,6 +77,14 @@ There are two sources. Both go through the **same quality filter**, which is a t
 (below). Both hold out creators and artists, and the licence policy is applied at train time (`--licences`),
 so changing it doesn't need a rescan.
 
+**Eval creators never train, in any source.** Each manifest only holds out its own eval creators, so
+`train.py` also drops every training track whose artist made any clip in the `--eval-set` files, and logs
+what it left out. This was found on 2026-11-21: Kimiko Ishizaka's Open Goldberg Variations are in the picotone
+eval set (`old_10`–`old_13_piano`), and also in the Jamendo dump, whose manifest kept 28 of her tracks (1.27 h)
+for training. These included the exact tracks those four eval clips are cut from. Every run up to and
+including `runs/w512_tiers` trained on them. For their checkpoints, `data/pd.jsonl.eval.clean.json` (the 49
+other clips) gives scores free of the leak.
+
 ### 2a. The existing picotone corpus (the `pd` source)
 
 On the build machine it lives in the session scratchpad, not in `work\`, which holds only codes:

@@ -433,7 +433,8 @@ def main(argv=None):
 
     lic = corpus.parse_licences(a.licences)
     log(f"licences: {sorted(lic)}")
-    sources = None if a.eval_only else data.load_sources(a.manifest, lic, a.mix, a.mix_floor, log, a.path_map)
+    sources = None if a.eval_only else data.load_sources(a.manifest, lic, a.mix, a.mix_floor, log, a.path_map,
+                                                          data.eval_artists(a.eval_set))
     crop = a.seg_frames * HOP + 2 * a.enc_ctx
 
     def ds_factory(B, start=0):
