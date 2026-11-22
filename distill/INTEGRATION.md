@@ -69,7 +69,19 @@ Rough sizes are for one person working with Claude, and they include tests.
 - **Fold the codebook projections into the input conv.** z is a sum of 9 projected 8-dim vectors, so the
   k7 1024→512 input conv can take the 72 concatenated embedding values directly (k7 72→512, biases folded).
   That's 3.7% fewer MACs and 3.4M fewer of the 8.47M parameters, about 40% less to download, and the output
-  is the same up to float rounding.
+  is the same up to float rounding. Details to get right:
+  - **Biases must switch off with their codebook.** Each 1×1 projection has a bias. Merged into the conv
+    bias, it would wrongly count at tiers below q9, where codebooks q+1..9 are absent, and on the 3 zero-padded
+    frames at each end of a file, where the original adds nothing. Instead, give each codebook a ninth input
+    value, 1 when the codebook is present and 0 otherwise, and fold its bias into that column. The input is
+    then 9 × (8 + 1) = 81 values per frame (k7 81→512), and zero padding and tier masking are exact.
+  - **Fold in float64** and round to float32 once.
+  - **Fixtures:** the folded decoder never forms z, so the stage-by-stage fixtures check the input conv's
+    output instead. `ref_decode.py` keeps the unfolded form and asserts the two agree at every tier and at
+    the file edges.
+  - The folded weights hold DAC's frozen codebooks, under the DAC MIT notice already carried. Nothing else
+    needs z: the encoder uses DAC's own quantiser, and cx2 (M5) can read the 8-dim embeddings from the
+    codebook table.
 - A small `ref_decode.py` writes fixtures for the parity tests: codes, then z, then the output after each
   stage, for 2–3 clips at q4 and q9.
 - Licences: the exported weights carry the DAC MIT notice plus the training-data notice that `export.py`
