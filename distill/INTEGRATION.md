@@ -143,9 +143,14 @@ and 1–2 weeks for cx2 if the probe justifies it.
 1. **Which tiers ship, and the HQ default.** From your listening, I'd ship q4, q5, q6 and q9 and make q5 or
    q6 the default. Settle it with one ABX round on the hardest clips (solo piano, orchestral, sharp
    transients).
-2. **Stereo: mono flag, and left/right or mid/side per file.** Measured 2026-11-21 (stock DAC as a proxy;
-   12 picotone clips; see "Stereo measurements" below). The suggestion is to build the mono flag in M2 and
-   decide on mid/side after a stereo-aware score and listening.
+2. **Stereo (decided 2026-11-21).** Measured with stock DAC as a proxy on 12 picotone clips, and by blind
+   listening; see "Stereo measurements" below. In M2:
+   - build the automatic mono flag (`stereo_scan.py`'s rule);
+   - carry the stereo layout (left/right or mid/side) as one header bit per file. The encoder codes the file
+     both ways and keeps the one with the lower stereo score (log-mel on L, R and the side, averaged).
+     Encoding is offline, so the doubled cost doesn't matter. Mid/side is the default when the encoder
+     doesn't compare, for example `--stereo ms`;
+   - no per-page side codebook counts.
 3. **WebGPU now or later.** I suggest later, after the wasm numbers from M3.
 4. **Raw codes first, cx2 after a probe.** I suggest raw first.
 5. **Python encoder until M6.** It's fine for gaim's offline asset encoding, but it means `uv` and torch on the
@@ -173,7 +178,29 @@ better.
   tracks before building them.
 - **Caution: log-mel per channel barely sees stereo width.** It scores collapsing wide clips to mono as an
   *improvement* (hip-hop 2.620 against 2.677). So the mid/side gains are an upper bound until a score with a
-  stereo-width term (log-mel on the side signal) and listening confirm them.
+  stereo-width term (log-mel on the side signal) confirms them.
+- **The side-signal score splits by file.** Log-mel of the decoded side (L−R)/2 against the original's, on
+  the 10 stereo clips, at 8.6 kbps:
+
+  | Clip | Left/right 5+5: L/R, side | Mid/side 7+3: L/R, side | Better by L, R, side |
+  |---|---|---|---|
+  | Band | 3.33, 3.47 | 3.37, 4.08 | left/right |
+  | Piano (two clips) | 2.61, 2.80 / 2.79, 3.21 | 2.72, 3.33 / 2.85, 3.62 | left/right |
+  | Electronic, ambient, game, rock | 2.44–3.06, 2.93–4.26 | 2.39–2.89, 2.97–3.69 | mid/side (game a tie) |
+  | Hip-hop, jazz, pop | 2.89–3.49, **10.0–12.3** | 2.68–3.48, 3.3–5.2 | mid/side, by far |
+
+  Coding each channel on its own adds errors that don't cancel in L−R. Where the original side is quiet
+  in some bands (centred vocals and bass, typical of hip-hop, jazz and pop), left/right fills them with
+  noise. Wide acoustic recordings (band, piano) favour left/right instead. Side level alone doesn't predict
+  the winner (hip-hop's side is −2.7 dB, as wide as the pianos), hence the encode-both-and-compare rule.
+  Mono collapse scores 24–63 on the side, so the metric does see width. Log-mel over the side exaggerates
+  errors in bands the mid masks, and the ABX above (which had both kinds of clip) heard no difference; so
+  the stakes are small either way. Fixed splits over all 12 clips: L/R, side, mean of the three:
+  left/right 2.97, 5.78, 3.75; mid/side 6+4 2.88, 3.40, 3.02; 7+3 2.84, 3.72, 3.08. At 10.3 kbps:
+  left/right 2.81, 5.62, 3.59; mid/side 7+5 2.70, 3.16, 2.83; 9+3 2.66, 3.72, 2.94.
+- **By ear, left/right and mid/side sound the same.** Blind ABX (`abx.py`'s page), left/right 5+5 against
+  mid/side 7+3 at 8.6 kbps, on the five widest clips (band, two piano, pop, hip-hop), 3 trials each: 5 of 15
+  correct (p = 0.94), no clip above 2 of 3. Mid/side doesn't audibly narrow the image, nor sound better.
 
 **Automatic mono flag** (`stereo_scan.py`): side level relative to mid on every non-silent page of 0.93 s,
 with silent pages (both channels below −60 dBFS) skipped and side below −70 dBFS counted as zero. A file is
