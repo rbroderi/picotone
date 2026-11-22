@@ -33,6 +33,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -493,6 +494,38 @@ def get_json(url):
     raise SystemExit(f"failed: {url}")
 
 
+HONORIFICS = {"sir", "dr", "mr", "mrs", "miss", "ms", "rev", "lord", "lady", "jr", "sr", "st", "saint"}
+NOT_ONE_AUTHOR = {"various", "anonymous", "unknown", "librivox", "traditional", "none", "n a"}
+
+
+def display_name(creator):
+    """Archive.org creator -> "First Last": drops dates and brackets, and turns "Twain, Mark" (or
+    "Twain, Mark, 1835-1910") round."""
+    s = creator[0] if isinstance(creator, list) and creator else creator
+    s = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", str(s or ""))
+    s = re.sub(r"\b(?:b\.|d\.|fl\.|ca\.)?\s*\d{3,4}\??\s*-?\s*(?:\d{3,4}\??)?", " ", s)
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if len(parts) >= 2 and corpus_norm(parts[1]) not in HONORIFICS:
+        s = f"{parts[1]} {parts[0]}"
+    elif parts:
+        s = parts[0]
+    return " ".join(s.split())
+
+
+def corpus_norm(s):
+    import corpus
+    return corpus.norm_artist(s)
+
+
+def author_key(creator):
+    """(surname, first initial), after display_name and without honorifics: "Sir Arthur Conan Doyle",
+    "Doyle, Arthur Conan" and "Doyle, A. C." all give ('doyle', 'a'). ('', '') for no single named author."""
+    toks = [t for t in corpus_norm(display_name(creator)).split() if t not in HONORIFICS]
+    if not toks or " ".join(toks) in NOT_ONE_AUTHOR or toks[0] in NOT_ONE_AUTHOR:
+        return ("", "")
+    return (toks[-1], toks[0][0] if len(toks) > 1 else "")
+
+
 def lv_seconds(s):
     try:
         p = [float(v) for v in str(s).split(":")]
@@ -548,42 +581,86 @@ def stage_librivox(a):
     out_root = os.path.join(a.root, "librivox")
     os.makedirs(out_root, exist_ok=True)
     lv_repair_all(out_root)
-    readers, authors = set(), set()
+    unused = os.path.join(a.root, "librivox_unused")  # outside the folder prep_corpus.py scans
+    readers, eval_keys = set(), set()
     for it in LV_EVAL_ITEMS:
         md = get_json(f"https://archive.org/metadata/{it}/metadata").get("result", {})
-        authors.add(corpus.norm_artist(md.get("creator", "")))
+        eval_keys.add(author_key(md.get("creator", "")))
         readers.update(eval_readers(lv_text(md)))
     if not readers:
         raise SystemExit("found no reader names in the eval items' descriptions; check READ_BY")
-    print(f"librivox: leaving out eval items {LV_EVAL_ITEMS}, authors {sorted(authors)}, readers {sorted(readers)}",
-          flush=True)
-    q = urllib.parse.quote("collection:librivoxaudio AND language:eng AND mediatype:audio")
-    docs = get_json(f"https://archive.org/advancedsearch.php?q={q}&fl[]=identifier&fl[]=creator&rows=3000"
-                    f"&sort[]=downloads+desc&output=json")["response"]["docs"]
-    rng = random.Random(0)
-    rng.shuffle(docs)
-    need, have, seen_authors, n_ok, skipped = a.lv_hours * 3600, 0.0, {}, 0, collections.Counter()
+    print(f"librivox: leaving out eval items {LV_EVAL_ITEMS}, authors (surname, initial) {sorted(eval_keys)}, "
+          f"readers {sorted(readers)}", flush=True)
+    need, have, seen_authors, n_ok, skipped = a.lv_hours * 3600, 0.0, collections.Counter(), 0, collections.Counter()
     nbytes = int(a.lv_minutes * 60 * 64000 / 8)
+
+    def refuse(ident, creator):
+        """-> why this item can't train, or None. Readers are checked at fetch time (they need the metadata)."""
+        if ident in LV_EVAL_ITEMS:
+            return "eval item"
+        k = author_key(creator)
+        if not k[0]:
+            return "no single named author"
+        if k in eval_keys:
+            return "eval author"
+        if seen_authors[k] >= 3:  # spread over authors (and so books and readers)
+            return "author cap"
+        if have >= need:
+            return "over the hours budget"
+        return None
+
+    def mp3_in(d):
+        return sorted(f for f in os.listdir(d) if f.endswith(".mp3") and not f.endswith(".part.mp3"))
+
+    # 1. Excerpts already on disk, in identifier order: a re-run keeps the same set, whatever the search returns.
+    #    Ones that can't train (eval author, author cap, over budget) move to librivox_unused/, not deleted.
+    for ident in sorted(os.listdir(out_root)):
+        d = os.path.join(out_root, ident)
+        if not os.path.isdir(d) or not mp3_in(d):
+            continue
+        p = os.path.join(d, mp3_in(d)[0])
+        t = ID3(p)
+        creator = str(t["TPE1"].text[0]) if "TPE1" in t else ""
+        why = refuse(ident, creator)
+        if why:
+            skipped[f"on disk, moved to librivox_unused: {why}"] += 1
+            os.makedirs(unused, exist_ok=True)
+            if os.path.exists(os.path.join(unused, ident)):
+                shutil.rmtree(os.path.join(unused, ident))
+            shutil.move(d, os.path.join(unused, ident))
+            continue
+        if creator != display_name(creator):  # "Twain, Mark" -> "Mark Twain", as train.py's eval match expects
+            t.delall("TPE1")
+            t.add(TPE1(encoding=3, text=display_name(creator)))
+            t.save(p)
+        seen_authors[author_key(creator)] += 1
+        have += a.lv_minutes * 60
+        n_ok += 1
+    print(f"librivox: {n_ok} excerpts already on disk kept, {have / 3600:.1f} h of {a.lv_hours:g}", flush=True)
+
+    # 2. Fill any shortfall from the search, in a fixed order (identifier, then a seeded shuffle).
+    docs = []
+    if have < need:
+        q = urllib.parse.quote("collection:librivoxaudio AND language:eng AND mediatype:audio")
+        docs = get_json(f"https://archive.org/advancedsearch.php?q={q}&fl[]=identifier&fl[]=creator&rows=3000"
+                        f"&sort[]=downloads+desc&output=json")["response"]["docs"]
+        docs.sort(key=lambda d: d["identifier"])
+        random.Random(0).shuffle(docs)
     for d in docs:
         if have >= need:
             break
         ident = d["identifier"]
         creator = d.get("creator", "")
         creator = creator[0] if isinstance(creator, list) else creator
-        au = corpus.norm_artist(creator)
-        if ident in LV_EVAL_ITEMS or au in authors or not au:
-            skipped["eval item or author"] += 1
-            continue
-        if seen_authors.get(au, 0) >= 3:  # spread over authors (and so books and readers)
-            skipped["author cap"] += 1
-            continue
         dest_dir = os.path.join(out_root, ident)
-        done = [f for f in os.listdir(dest_dir) if f.endswith(".mp3")] if os.path.isdir(dest_dir) else []
-        if done:
-            have += a.lv_minutes * 60
-            seen_authors[au] = seen_authors.get(au, 0) + 1
-            n_ok += 1
+        if os.path.isdir(dest_dir) and mp3_in(dest_dir):
+            continue  # already counted above
+        why = refuse(ident, creator)
+        if why:
+            skipped[why] += 1
             continue
+        au = author_key(creator)
+        creator = display_name(creator)
         m = get_json(f"https://archive.org/metadata/{ident}")
         md = m.get("metadata", {})
         text = lv_text(md)
@@ -600,7 +677,14 @@ def stage_librivox(a):
         if a.lv_dry_run:
             print(f"  would take {url} ({creator}; {f.get('length')})", flush=True)
             have += a.lv_minutes * 60
-            seen_authors[au] = seen_authors.get(au, 0) + 1
+            seen_authors[au] += 1
+            n_ok += 1
+            continue
+        old = os.path.join(unused, ident)
+        if os.path.isdir(old) and mp3_in(old):  # fetched by an earlier run and set aside: reuse it
+            shutil.move(old, dest_dir)
+            have += a.lv_minutes * 60
+            seen_authors[au] += 1
             n_ok += 1
             continue
         os.makedirs(dest_dir, exist_ok=True)
@@ -638,7 +722,7 @@ def stage_librivox(a):
             fh.write(f"LibriVox recording: {md.get('title', ident)} by {creator}\n"
                      f"https://archive.org/details/{ident}\nLicence: {lic}\n")
         have += a.lv_minutes * 60
-        seen_authors[au] = seen_authors.get(au, 0) + 1
+        seen_authors[au] += 1
         n_ok += 1
         if n_ok % 10 == 0:
             print(f"  {n_ok} items, {have / 3600:.1f} h of {a.lv_hours:g}", flush=True)
