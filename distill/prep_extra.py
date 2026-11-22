@@ -27,6 +27,7 @@ otherwise fail it.
 Needs ~30 GB free under --root. Options: --stages, --speech-hours, --drum-hours, --piano-hours, --workers.
 """
 import argparse
+import collections
 import io
 import json
 import os
@@ -35,6 +36,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 import zlib
@@ -382,10 +384,162 @@ def stage_hits(a):
     print("  rendered this run:", json.dumps(done), flush=True)
 
 
+# ------------------------------------------------------------------ librivox (optional stage)
+
+# The picotone eval's five speech clips are LibriVox 64 kbps MP3s from these items. Their books, authors and
+# readers never train. (Authors are also left out at train time: train.py drops every eval clip's `artist`.)
+LV_EVAL_ITEMS = ["adventures_holmes", "huck_finn_librivox", "jane_eyre_ver03_0809_librivox",
+                 "peter_pan_0707_librivox", "robinson_crusoe_librivox"]
+# Names after "Read by" / "Reader:" in an item's description (HTML stripped first). Group recordings list no
+# per-chapter readers on archive.org, so for those only the authors and items can be left out.
+READ_BY = re.compile(r"\b(?:[Rr]ead by|[Rr]eaders?:)\s+([A-Z][\w'-]*(?: [A-Z][\w'-]*){0,2})")
+HTML_TAG = re.compile(r"<[^>]+>")
+
+
+def eval_readers(text):
+    import corpus
+    out = {corpus.norm_artist(r) for r in READ_BY.findall(HTML_TAG.sub(" ", text))}
+    return {r for r in out if r and "librivox" not in r and "volunteer" not in r and len(r) > 3}
+
+
+def get_json(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "picotone-distill-fetch/1.0"})
+    for attempt in range(6):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.load(r)
+        except Exception as e:  # noqa: BLE001
+            print(f"  {url}: {e}; retrying", flush=True)
+            time.sleep(10 * (attempt + 1))
+    raise SystemExit(f"failed: {url}")
+
+
+def lv_seconds(s):
+    try:
+        p = [float(v) for v in str(s).split(":")]
+    except ValueError:
+        return 0.0
+    return sum(v * 60 ** i for i, v in enumerate(reversed(p)))
+
+
+def lv_text(md):
+    d = md.get("description", "")
+    return " ".join(d) if isinstance(d, list) else str(d)
+
+
+def stage_librivox(a):
+    """One 64 kbps MP3 chapter excerpt (the first --lv-minutes, fetched as a byte prefix, not re-encoded) from
+    each of many LibriVox books: the same kind of audio as the eval's speech clips, from many readers."""
+    import corpus
+    from mutagen.id3 import ID3, TALB, TIT2, TPE1, WCOP, WOAR, ID3NoHeaderError
+    out_root = os.path.join(a.root, "librivox")
+    os.makedirs(out_root, exist_ok=True)
+    readers, authors = set(), set()
+    for it in LV_EVAL_ITEMS:
+        md = get_json(f"https://archive.org/metadata/{it}/metadata").get("result", {})
+        authors.add(corpus.norm_artist(md.get("creator", "")))
+        readers.update(eval_readers(lv_text(md)))
+    if not readers:
+        raise SystemExit("found no reader names in the eval items' descriptions; check READ_BY")
+    print(f"librivox: leaving out eval items {LV_EVAL_ITEMS}, authors {sorted(authors)}, readers {sorted(readers)}",
+          flush=True)
+    q = urllib.parse.quote("collection:librivoxaudio AND language:eng AND mediatype:audio")
+    docs = get_json(f"https://archive.org/advancedsearch.php?q={q}&fl[]=identifier&fl[]=creator&rows=3000"
+                    f"&sort[]=downloads+desc&output=json")["response"]["docs"]
+    rng = random.Random(0)
+    rng.shuffle(docs)
+    need, have, seen_authors, n_ok, skipped = a.lv_hours * 3600, 0.0, {}, 0, collections.Counter()
+    nbytes = int(a.lv_minutes * 60 * 64000 / 8)
+    for d in docs:
+        if have >= need:
+            break
+        ident = d["identifier"]
+        creator = d.get("creator", "")
+        creator = creator[0] if isinstance(creator, list) else creator
+        au = corpus.norm_artist(creator)
+        if ident in LV_EVAL_ITEMS or au in authors or not au:
+            skipped["eval item or author"] += 1
+            continue
+        if seen_authors.get(au, 0) >= 3:  # spread over authors (and so books and readers)
+            skipped["author cap"] += 1
+            continue
+        dest_dir = os.path.join(out_root, ident)
+        done = [f for f in os.listdir(dest_dir) if f.endswith(".mp3")] if os.path.isdir(dest_dir) else []
+        if done:
+            have += a.lv_minutes * 60
+            seen_authors[au] = seen_authors.get(au, 0) + 1
+            n_ok += 1
+            continue
+        m = get_json(f"https://archive.org/metadata/{ident}")
+        md = m.get("metadata", {})
+        text = lv_text(md)
+        if any(f" {r} " in f" {corpus.norm_artist(HTML_TAG.sub(' ', text))} " for r in readers):
+            skipped["eval reader"] += 1
+            continue
+        mp3s = [f for f in m.get("files", []) if f.get("name", "").endswith("_64kb.mp3")
+                and lv_seconds(f.get("length", 0)) > a.lv_minutes * 60 + 30]
+        if not mp3s:
+            skipped["no long 64kb mp3"] += 1
+            continue
+        f = mp3s[random.Random(ident).randrange(len(mp3s))]
+        url = f"https://archive.org/download/{ident}/{urllib.parse.quote(f['name'])}"
+        if a.lv_dry_run:
+            print(f"  would take {url} ({creator}; {f.get('length')})", flush=True)
+            have += a.lv_minutes * 60
+            seen_authors[au] = seen_authors.get(au, 0) + 1
+            n_ok += 1
+            continue
+        os.makedirs(dest_dir, exist_ok=True)
+        path = os.path.join(dest_dir, f["name"])
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "picotone-distill-fetch/1.0",
+                                                       "Range": f"bytes=0-{nbytes - 1}"})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                data = r.read(nbytes)  # whatever the server sends, keep only the prefix (decoders skip the
+            tmp = path[:-4] + ".part.mp3"  # torn last frame; libsndfile wants the .mp3 name)
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            try:
+                t = ID3(tmp)
+            except ID3NoHeaderError:
+                t = ID3()
+            lic = md.get("licenseurl") or "https://creativecommons.org/publicdomain/mark/1.0/"
+            t.delall("TPE1"), t.delall("TALB"), t.delall("TIT2"), t.delall("WCOP"), t.delall("WOAR")
+            t.add(TPE1(encoding=3, text=creator))
+            t.add(TALB(encoding=3, text=str(md.get("title", ident))))
+            t.add(TIT2(encoding=3, text=f"{md.get('title', ident)} ({f['name']}, first {a.lv_minutes:g} min)"))
+            t.add(WCOP(url=lic))
+            t.add(WOAR(url=f"https://archive.org/details/{ident}"))
+            t.save(tmp)
+            x, sr = sf.read(tmp, frames=10, start=0)  # decodes: a broken prefix is dropped, not kept
+            os.replace(tmp, path)
+        except Exception as e:  # noqa: BLE001
+            skipped[f"fetch/decode error: {type(e).__name__}"] += 1
+            for p in (path[:-4] + ".part.mp3", path):
+                if os.path.exists(p):
+                    os.remove(p)
+            continue
+        with open(os.path.join(dest_dir, "license.txt"), "w", encoding="utf-8") as fh:
+            fh.write(f"LibriVox recording: {md.get('title', ident)} by {creator}\n"
+                     f"https://archive.org/details/{ident}\nLicence: {lic}\n")
+        have += a.lv_minutes * 60
+        seen_authors[au] = seen_authors.get(au, 0) + 1
+        n_ok += 1
+        if n_ok % 10 == 0:
+            print(f"  {n_ok} items, {have / 3600:.1f} h of {a.lv_hours:g}", flush=True)
+    print(f"librivox: {n_ok} items from {len(seen_authors)} authors, ~{have / 3600:.1f} h; skipped {dict(skipped)}",
+          flush=True)
+    if have < need * 0.8:
+        print("WARNING: less LibriVox audio than asked for", flush=True)
+
+
 # ------------------------------------------------------------------ 4. manifests
 
 def stage_manifests(a):
-    for src, extra in (("speech", []), ("hits", ["--heldout-frac", "0"])):
+    known = {"speech": [], "hits": ["--heldout-frac", "0"], "librivox": []}
+    for src in a.sources.split(","):
+        src = src.strip()
+        extra = known[src]
         out = os.path.join(a.data_dir, f"{src}.jsonl")
         cmd = [sys.executable, os.path.join(HERE, "prep_corpus.py"), "--root", os.path.join(a.root, src),
                "--source", src, "--out", out, "--workers", str(a.workers), "--min-bandwidth", "0", *extra]
@@ -408,6 +562,11 @@ def main():
     ap.add_argument("--root", required=True, help="working folder for downloads and outputs (~30 GB)")
     ap.add_argument("--stages", default="download,speech,hits,manifests")
     ap.add_argument("--data-dir", default=os.path.join(HERE, "data"), help="where the manifests go")
+    ap.add_argument("--sources", default="speech,hits", help="manifests stage: which folders to scan "
+                                                             "(speech, hits, librivox)")
+    ap.add_argument("--lv-hours", type=float, default=15, help="librivox stage: total hours")
+    ap.add_argument("--lv-minutes", type=float, default=6, help="librivox stage: minutes kept per book")
+    ap.add_argument("--lv-dry-run", action="store_true", help="librivox stage: list the picks, fetch no audio")
     ap.add_argument("--workers", type=int, default=max(1, min(8, (os.cpu_count() or 2) - 2)))
     ap.add_argument("--speech-hours", type=float, default=20)
     ap.add_argument("--drum-hours", type=float, default=6)
@@ -417,7 +576,7 @@ def main():
     a = ap.parse_args()
     a.root = os.path.abspath(a.root)
     stages = {"download": stage_download, "speech": stage_speech, "hits": stage_hits,
-              "manifests": stage_manifests}
+              "librivox": stage_librivox, "manifests": stage_manifests}
     for s in a.stages.split(","):
         t0 = time.time()
         print(f"== stage {s}", flush=True)
