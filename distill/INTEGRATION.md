@@ -116,8 +116,21 @@ Rough sizes are for one person working with Claude, and they include tests.
   so that peak stays reserved. Stream tensor by tensor into the packed form instead. That takes a decoder
   instance from about 60–100 MB to about 25–40 MB (with the folded input conv), which matters for the
   per-channel workers in M3.
-- Dilated convs: pass per-tap offsets to `PackedMat::mul` instead of copying into a zeroed buffer per tile
-  (`src/nn.rs:525-536`); 48% of the MACs go through it. Probably 2–5%.
+- **Dilated convs** (48% of the MACs) go through an im2col copy today (`src/nn.rs:525-536`). Each tile
+  allocates and zeroes a fresh buffer, then copies 7 taps into it. EnCodec has no dilated convs, so the student
+  is this path's first heavy user. The copy is about 1/cout of the work: 0.2% at width 512, about 3% at
+  stage 4's 32.
+  1. **Reuse a per-thread buffer** instead of `vec![0.0; rows * kc]` per tile, as `TILE_INPUT` does. About
+     ten lines, no risk.
+  2. **Only if the profiler's `im2col` scope shows more than about 3%** of the student's decode: read the 7
+     taps in place. Do it by giving `Block::rows` (`src/kernels.rs:357`) one A offset per tap segment, with
+     the running sums kept in registers across taps. Keep each weight row in the same place in the summing
+     order, so results stay bit-identical. 1–2 days. Not one product per tap: that re-reads and re-writes
+     the output block for every tap, about 7 passes instead of 2 in the 32-channel layers, which cancels the
+     saving where the copy matters.
+
+  The kernel is shared with the EnCodec decoder and LSTM: every existing parity test must still pass,
+  bit-identical.
 - Tests: parity against the M0 fixtures, stage by stage (tolerance about 1e-4), and chunked against
   whole-file decode.
 - Bench single-thread native first: that predicts wasm.
