@@ -20,7 +20,9 @@ better; DAC kbps are raw stereo, before any entropy coding):
 
 By ear (the user, 75k): student and stock DAC are almost impossible to tell apart, and q4 against q9 is very
 subtle. The cost is decode speed: the student is projected at about 1.9× real time in single-thread wasm
-(stereo), against about 5.5× for EnCodec 48 kHz. So picotone keeps two modes:
+(stereo), against about 5.5× for EnCodec 48 kHz. A review (2026-11-21, see "Decode speed" below) thinks
+1.9× is optimistic: picotone's own EnCodec numbers imply 0.9–1.3×. It needs a measurement. So picotone keeps
+two modes:
 
 - **fast**: today's EnCodec presets (music6/12/24, mono);
 - **HQ**: the DAC student at tiers q4–q9.
@@ -64,6 +66,10 @@ Rough sizes are for one person working with Claude, and they include tests.
 
 - `export.py` gains a safetensors output (weight norm folded, plain names) next to the `.pt`. It also exports the
   9 codebooks (8-dim embeddings plus their 1×1 output projections) from the DAC quantiser.
+- **Fold the codebook projections into the input conv.** z is a sum of 9 projected 8-dim vectors, so the
+  k7 1024→512 input conv can take the 72 concatenated embedding values directly (k7 72→512, biases folded).
+  That's 3.7% fewer MACs and 3.4M fewer of the 8.47M parameters, about 40% less to download, and the output
+  is the same up to float rounding.
 - A small `ref_decode.py` writes fixtures for the parity tests: codes, then z, then the output after each
   stage, for 2–3 clips at q4 and q9.
 - Licences: the exported weights carry the DAC MIT notice plus the training-data notice that `export.py`
@@ -77,8 +83,21 @@ Rough sizes are for one person working with Claude, and they include tests.
 - **Snake** is the one new op: `x + sin²(αx)/α`, per channel. Use a degree-3 polynomial with range reduction,
   fused into the conv's input path like ELU is today (`src/nn.rs:602-880`, the `Lazy`/`Input` mechanism). The
   distill study measured it at +0.005 dB log-mel against exact sin.
+- **Before M1, a half-day wasm benchmark** of the conv kernels at the student's ten layer shapes, with
+  random weights, on the table device. It replaces the 1.9× projection with a number and gives the
+  per-stage time split.
 - Chunked decode with the 9-frame context; streaming decode is the same with a 9-frame look-ahead (about
-  105 ms of latency).
+  105 ms of latency). **Don't re-decode the full 9 frames for every page:** at 80-frame pages that wastes
+  22%. Only the input conv and stage 1 need most of the context (about 3 and 5 frames); stages 2–4, which are
+  68% of the MACs, need under one frame. Carry per-layer state between pages for sequential decode (no waste),
+  or trim the context stage by stage (about 5%).
+- **Load weights without extra copies.** Today `Weights::from_bytes` converts every tensor to f32 and
+  `PackedMat::pack` packs it again, so loading peaks at 2–3 copies of the weights. Wasm memory never shrinks,
+  so that peak stays reserved. Stream tensor by tensor into the packed form instead. That takes a decoder
+  instance from about 60–100 MB to about 25–40 MB (with the folded input conv), which matters for the
+  per-channel workers in M3.
+- Dilated convs: pass per-tap offsets to `PackedMat::mul` instead of copying into a zeroed buffer per tile
+  (`src/nn.rs:525-536`); 48% of the MACs go through it. Probably 2–5%.
 - Tests: parity against the M0 fixtures, stage by stage (tolerance about 1e-4), and chunked against
   whole-file decode.
 - Bench single-thread native first: that predicts wasm.
@@ -104,19 +123,33 @@ Rough sizes are for one person working with Claude, and they include tests.
 
 - The same crate, through the existing builds (`pkg-st`, `pkg-st-fma`, `pkg-mt`). Export the decoder weights
   through `wasm/tools/export-models.mjs` (add DAC to its `TABLES` map).
-- Measure the real-time factor single-threaded, at stereo. The projection is about 1.9×. That's enough for
-  plain-HTTP LAN playback, but with less headroom than EnCodec's 5.5×.
-- **Decision point:** if single-thread is under about 1.5× on the table device, use the threaded build (gaim's
-  HTTPS setup allows it), or consider the 384-wide student (projected 3.3×).
+- Measure the real-time factor single-threaded, at stereo. The projection is about 1.9× (possibly
+  0.9–1.3×, see the benchmark in M1).
+- **Parallel decode, by page type** (decided 2026-11-21):
+  - **HTTPS pages** (gaim serves the LAN table over HTTPS with a self-signed certificate): the threaded
+    build. The threads share one copy of the weights, so memory barely grows.
+  - **Plain-HTTP pages:** one Web Worker per channel, each with its own wasm instance. Workers don't need
+    cross-origin isolation; only shared memory does. That's about 2× for stereo on any device with 2 or more
+    cores, for about 25–40 MB more memory (after the M1 loader fix; about 60–100 MB without it). The ±9-frame
+    context makes chunks independent, so more workers can split one channel further.
+- **Decode music loops ahead,** at scene load, into an AudioBuffer (`decodeToAudioBuffer`), so loops depend
+  on load time rather than on real-time speed. That costs about 21 MB per stereo minute (f32).
+- **Decision point:** if the table device is still under about 1.5× after parallel decode, try the model
+  options under "Decode speed" below, starting with bottleneck residual units.
 - gaim integration: a new model in the worker, plus `wasm/INTEGRATION-gaim.md` updated with the files to copy.
   Edits to gaim itself happen only when asked.
 
-### M4: WebGPU (1–1.5 weeks, can wait)
+### M4: WebGPU (1–1.5 weeks, straight after M3)
+
+The fastest option: about 6.8× real time projected for stereo, against about 1.9× in wasm. It needs a secure
+context (`web/src/gpu.ts:23`), which gaim's HTTPS LAN setup provides. Wasm stays as the fallback for
+devices without WebGPU and for plain-HTTP pages.
 
 - WGSL kernels: dilated conv and ConvT (the existing ones mostly cover them), Snake fused into the conv input,
   f16 weights through `web/tools/export-weights.mjs`.
 - Simpler than the EnCodec port: no LSTM and no GroupNorm.
-- Worth doing only if M3 shows wasm is too tight on the devices that matter.
+- With WebGPU or threads giving the headroom, q9 can keep the full 512-wide decoder, with no quality traded
+  for speed.
 
 ### M5: cx2 for DAC codes (1–2 weeks, measure first, maybe skip)
 
@@ -135,8 +168,8 @@ Rough sizes are for one person working with Claude, and they include tests.
 - Parity: codes must match PyTorch's exactly on the fixtures. Near-ties in the VQ argmin may differ by float
   rounding, so the test should allow rare single-code differences and check the audio instead.
 
-**In total:** about 3–4 weeks to an HQ mode that plays in gaim (M0–M3 plus M6). Add 1–1.5 weeks for WebGPU,
-and 1–2 weeks for cx2 if the probe justifies it.
+**In total:** about 3–4 weeks to an HQ mode that plays in gaim (M0–M3 plus M6), plus 1–1.5 weeks for WebGPU
+(M4, planned straight after M3), and 1–2 weeks for cx2 if the probe justifies it.
 
 ## Decisions for you
 
@@ -162,7 +195,7 @@ and 1–2 weeks for cx2 if the probe justifies it.
      full, and count agreement and the score lost on disagreement. Mid/side is the default when the
      encoder doesn't compare (`--stereo ms`);
    - no per-page side codebook counts.
-3. **WebGPU now or later.** I suggest later, after the wasm numbers from M3.
+3. **WebGPU (decided 2026-11-21):** straight after M3. The LAN table runs over HTTPS, so WebGPU works there.
 4. **Raw codes first, cx2 after a probe.** I suggest raw first.
 5. **Python encoder until M6.** It's fine for gaim's offline asset encoding, but it means `uv` and torch on the
    encoding machine until then.
@@ -231,3 +264,47 @@ picotone test clips):
   sound effects, which matters for gaim's SFX.
 - Fitting one gain between the channels (R = g·L) added no files, so that feature isn't needed.
 - An override, `--stereo auto|mono|lr|ms`, covers what the rule gets wrong.
+
+## Decode speed (review, 2026-11-21)
+
+These figures come from counting operations and reading the code; nothing was timed.
+
+**Where the MACs go** (7.91 GMAC per second of audio per channel):
+
+| Part | Rate, channels | Share |
+|---|---|---|
+| Input k7 conv | 86 Hz, 1024→512 | 4.0% |
+| Four ConvT upsamplers | | 13.7% |
+| Stage 1 residual units | 689 Hz, 256 | 13.7% |
+| Stage 2 | 5.5 kHz, 128 | 27.4% |
+| Stage 3 | 22 kHz, 64 | 27.4% |
+| Stage 4 | 44.1 kHz, 32 | 13.7% |
+| Output k7 conv | | 0.1% |
+
+- Residual units are 82% of the cost: their k7 convs 72%, and the dilated ones (3, 9) 48%.
+- Snake is about 3–5% of the time.
+
+**Exact options (same output, no training)** are in M0, M1 and M3:
+- the folded input conv;
+- per-layer context instead of a full 9-frame re-decode per page;
+- a loader that doesn't copy;
+- parallel decode;
+- decoding loops ahead.
+
+**Model options**, each needing a fine-tune. q9 is already 0.05 over its limit, so none is free. The
+quality costs are guesses:
+- bottleneck residual units (k7 C→C/2, Snake, k1 C/2→C): about 1.7×, keeping the full-width residual stream;
+- uniform 384 wide: 1.75×, quality measured in the distill study;
+- trimming only the high-rate stages:
+  - drop dilation 9 at stages 3–4: 1.16×;
+  - k3 instead of k7 at stages 3–4: 1.26×;
+  - widths 96/48 at stages 2–3: 1.38×;
+- a sub-band or iSTFT head in place of stages 3–4: up to 1.9×, but a full retrain and the highest risk.
+
+A q9-specialised fine-tune of the 512 student gives no speed, but may recover the 0.05 and leave room for one
+of these.
+
+**Not worth it now:**
+- f16 weights: download size only, since wasm has no f16 arithmetic;
+- int8: weeks of quantisation-aware training, with a noise-floor risk;
+- unstructured pruning: no gain for dense SIMD.
