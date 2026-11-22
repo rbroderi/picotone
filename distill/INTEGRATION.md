@@ -89,8 +89,16 @@ Rough sizes are for one person working with Claude, and they include tests.
 - Chunked decode with the 9-frame context; streaming decode is the same with a 9-frame look-ahead (about
   105 ms of latency). **Don't re-decode the full 9 frames for every page:** at 80-frame pages that wastes
   22%. Only the input conv and stage 1 need most of the context (about 3 and 5 frames); stages 2–4, which are
-  68% of the MACs, need under one frame. Carry per-layer state between pages for sequential decode (no waste),
-  or trim the context stage by stage (about 5%).
+  68% of the MACs, need under one frame. **Both fixes are planned** (decided 2026-11-21):
+  1. **Trimmed context, stage by stage** (about 5% waste). Each stage computes only the span the next stage
+     needs. Every page stays independently decodable, for seeks, parallel workers and threads, and the
+     first page after a seek.
+  2. **Carried state** (no waste). Each layer keeps the tail of its input from the previous page, so playback
+     in order and loop decode-ahead compute nothing twice. It keeps the 9-frame look-ahead (about 105 ms).
+     After a seek it starts from a page decoded with fix 1.
+
+  Tests: whole-file decode, fix 1 per page and fix 2 in sequence must agree up to float rounding, including
+  across seeks and loop wrap-around.
 - **Load weights without extra copies.** Today `Weights::from_bytes` converts every tensor to f32 and
   `PackedMat::pack` packs it again, so loading peaks at 2–3 copies of the weights. Wasm memory never shrinks,
   so that peak stays reserved. Stream tensor by tensor into the packed form instead. That takes a decoder
