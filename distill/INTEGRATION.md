@@ -42,7 +42,36 @@ clips:
 - **Without speech, every tier is within the 3% target.**
 - **At q9 the music gap is spread out:** the worst 25% of clips carry 62% of it. Piano, sfx, rock and
   electronic are 5–8% behind.
-- **Orchestral is 7–9% better than stock** at every tier. The cost is decode speed: the student is projected at about 1.9× real time in single-thread wasm
+- **Orchestral is 7–9% better than stock** at every tier.
+
+**Fine-tune with extra data (`runs/w512_q9_extra`, 2026-11-22).**
+- **Setup:** resumed from step 107,500. New sources: `speech` (VCTK, 20 h) and `hits` (rendered drums and piano,
+  10 h), made by `prep_extra.py`. Mix `jamendo=0.6,pd=0.15,speech=0.1,hits=0.15`. Tiers `--n-q 4,5,6,7,9,9,9`.
+- **Run:** the plateau rule stopped it at step 137,500. The new data first made the score 0.011 worse, and most of
+  the run won that back.
+
+Same 49 clips, smoothed weights, % vs stock (plain mean over clips, from `clip_gap.py`):
+
+| Tier | All, base → fine-tune | Without speech | Speech |
+|---|---|---|---|
+| q4 | +2.1 → +2.3 | +0.9 → +1.2 | +12.8 → +12.5 |
+| q5 | +2.4 → +2.6 | +1.2 → +1.5 | +13.4 → +12.5 |
+| q6 | +2.8 → +2.9 | +1.4 → +1.6 | +14.7 → +13.6 |
+| q7 | +3.2 → +3.1 | +1.8 → +1.9 | +15.3 → +14.0 |
+| q9 | +4.3 → +3.8 | +2.9 → +2.6 | +16.7 → +14.5 |
+
+- **Overall:** the score is unchanged, 2.7440 → 2.7446.
+- **q9 improved:**
+  - Piano went from +7.0% to +4.4%.
+  - Speech went from +16.7% to +14.5%.
+  - SI-SDR now passes, 9.51 against stock's 9.41.
+- **q4–q6 got slightly worse.**
+- **Orchestral lost most of its lead:** at q9 it went from −7.0% to −1.6%. Two clips are behind it: old_09
+  (+0.22 log-mel) and old_08 (+0.06). old_04_band is +0.14.
+  - The likely cause is the lower `pd` weight: 0.15, against about 0.2 in the baseline's auto mix. That isn't
+    tested.
+- **Speech barely moved.** VCTK is clean studio speech, while the eval speech is LibriVox (home mics, MP3
+  sources). So more speech of the same kind may help less than speech that matches the eval. The cost is decode speed: the student is projected at about 1.9× real time in single-thread wasm
 (stereo), against about 5.5× for EnCodec 48 kHz. A review (2026-11-21, see "Decode speed" below) thinks
 1.9× is optimistic: picotone's own EnCodec numbers imply 0.9–1.3×. It needs a measurement. So picotone keeps
 two modes:
