@@ -31,18 +31,12 @@ def db(x):
     return 10 * math.log10(x) if x > 0 else -math.inf
 
 
-def scan(job):
-    ref, a = job
-    try:
-        x, sr = audio_io.decode(ref, 0.0, a.max_seconds or None)
-    except Exception as e:  # noqa: BLE001
-        return {"ref": ref, "error": str(e)[:200]}
-    if x.ndim == 1 or x.shape[0] == 1:
-        return {"ref": ref, "channels": 1}
+def page_side_db(x, sr, silence_dbfs=-60.0, side_floor_dbfs=-70.0):
+    """x [2, T] -> side_db of every non-silent page (-inf where the side is below the floor)."""
     x = x[:2].astype(np.float64)
     n = int(round(PAGE_S * sr))
-    sil = 10 ** (a.silence_dbfs / 10)
-    floor = 10 ** (a.side_floor_dbfs / 10)
+    sil = 10 ** (silence_dbfs / 10)
+    floor = 10 ** (side_floor_dbfs / 10)
     pages = []
     for i in range(0, x.shape[1] - n // 2, n):
         p = x[:, i:i + n]
@@ -52,6 +46,18 @@ def scan(job):
         m, s = (p[0] + p[1]) / 2, (p[0] - p[1]) / 2
         e_m, e_s = float(np.mean(m ** 2)), float(np.mean(s ** 2))
         pages.append(-math.inf if e_s < floor or e_m <= 0 else db(e_s / e_m))
+    return pages
+
+
+def scan(job):
+    ref, a = job
+    try:
+        x, sr = audio_io.decode(ref, 0.0, a.max_seconds or None)
+    except Exception as e:  # noqa: BLE001
+        return {"ref": ref, "error": str(e)[:200]}
+    if x.ndim == 1 or x.shape[0] == 1:
+        return {"ref": ref, "channels": 1}
+    pages = page_side_db(x, sr, a.silence_dbfs, a.side_floor_dbfs)
     if not pages:
         return {"ref": ref, "channels": 2, "pages": 0}
     v = np.array(pages)
