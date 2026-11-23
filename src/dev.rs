@@ -342,6 +342,7 @@ fn dac_decode(
         y.len(),
         t.elapsed().as_secs_f64()
     );
+    eprint!("{}", picotone::prof::report());
     let bytes: Vec<u8> = y.iter().flat_map(|v| v.to_le_bytes()).collect();
     std::fs::write(output, bytes).with_context(|| format!("writing {}", output.display()))
 }

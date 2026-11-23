@@ -450,20 +450,24 @@ impl DacDecoder {
         );
         ensure!(chunk > 0, "chunk length must be positive");
         let frames = codes.len() / num_codebooks;
-        let mut out = Vec::with_capacity(frames * HOP);
-        let mut start = 0;
-        while start < frames {
-            let end = (start + chunk).min(frames);
-            // Context is clipped at the file's ends, where the whole-file
-            // decode pads with zeros too.
-            let lo = start.saturating_sub(CONTEXT);
-            let hi = (end + CONTEXT).min(frames);
-            let x = self.input_frames(codes, num_codebooks, lo, hi);
-            let y = self.decode_span(&x)?;
-            out.extend_from_slice(&y[(start - lo) * HOP..(end - lo) * HOP]);
-            start = end;
-        }
-        Ok(out)
+        // Chunks run in parallel: much of a chunk's work (Snake, padding,
+        // the transposed convs) is element-wise and runs on one thread, so
+        // splitting only the matrix products leaves most cores idle.
+        let parts = (0..frames.div_ceil(chunk))
+            .into_par_iter()
+            .map(|i| {
+                let start = i * chunk;
+                let end = (start + chunk).min(frames);
+                // Context is clipped at the file's ends, where the whole-file
+                // decode pads with zeros too.
+                let lo = start.saturating_sub(CONTEXT);
+                let hi = (end + CONTEXT).min(frames);
+                let x = self.input_frames(codes, num_codebooks, lo, hi);
+                let y = self.decode_span(&x)?;
+                Ok(y[(start - lo) * HOP..(end - lo) * HOP].to_vec())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(parts.concat())
     }
 }
 

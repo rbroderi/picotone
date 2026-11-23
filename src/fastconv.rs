@@ -1,12 +1,12 @@
 //! Convolutions on faer's matrix product, for the HQ encoder.
 //!
-//! faer's blocked kernel runs DAC's encoder layers 1.2 to 2x faster than
-//! [`crate::nn::ConvKernel`] on all cores, because it keeps the weights in
-//! cache while the packed kernel streams them per tile. Its summation order
-//! differs from PyTorch's and from the packed kernel's, so the encoder's
-//! latent matches PyTorch to rounding (the parity check allows 1e-4) rather
-//! than exactly; the decoders, whose output must match across platforms, keep
-//! the packed kernel.
+//! On one large product faer's blocked kernel is 1.2 to 2x faster than
+//! [`crate::nn::ConvKernel`]'s; inside the encoder (256-row tiles, the laptop
+//! at its power limit) the gain is about 10%, measured with alternating runs.
+//! Elsewhere it gains nothing (EnCodec, the HQ decoder) or loses (the LSTM's
+//! few-row products), so only the encoder uses it. Its summation order
+//! differs from PyTorch's and the packed kernel's, so the encoder's latent
+//! matches PyTorch to rounding (the parity check allows 1e-4).
 
 #![expect(
     clippy::redundant_pub_crate,
