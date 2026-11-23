@@ -74,6 +74,12 @@ pub(crate) fn lanes() -> usize {
     arch().dispatch(Lanes)
 }
 
+/// Runs `pass` compiled for the detected instruction set; plain element-wise
+/// loops in an `#[inline(always)]` `with_simd` vectorise for it.
+pub(crate) fn dispatch<P: WithSimd>(pass: P) -> P::Output {
+    arch().dispatch(pass)
+}
+
 /// High and low parts of pi; the high part (201/64) has few enough bits for
 /// `k * PI_HI` to be exact for any `k` below `2^16`.
 const PI_HI: f32 = 3.140_625;

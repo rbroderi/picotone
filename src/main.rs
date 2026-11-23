@@ -3,6 +3,9 @@
 mod dev;
 mod hq;
 
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 

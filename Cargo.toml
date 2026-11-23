@@ -21,7 +21,7 @@ default = ["cli"]
 # Audio file decoding (Symphonia) and WAV output (hound): the `audio` module.
 audio-io = ["dep:symphonia", "dep:hound"]
 # The command-line program.
-cli = ["audio-io", "dep:clap"]
+cli = ["audio-io", "dep:clap", "dep:mimalloc"]
 # Stage timers, printed by `decode`: see the `prof` module.
 profile = []
 # WebAssembly only: use the relaxed SIMD fused multiply-add when the build
@@ -43,6 +43,10 @@ rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 symphonia = { version = "0.5.4", features = ["all"], optional = true }
+# The command-line program's allocator; MIT. The system allocator on Windows
+# returns big buffers to the OS on free, so every layer's fresh output paid a
+# page fault per 4 KiB on first touch.
+mimalloc = { version = "0.1.52", default-features = false, optional = true }
 
 [dev-dependencies]
 # An independent Ogg reader for the format tests.

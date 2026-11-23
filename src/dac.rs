@@ -26,6 +26,7 @@ use crate::fastconv::FastConv;
 use crate::kernels;
 use crate::nn::{ConvGeometry, ConvKernel, ConvTranspose1d, Seq};
 use crate::weights::Weights;
+use crate::winograd::WinogradConv;
 
 /// Output sample rate.
 pub const SAMPLE_RATE: u32 = 44_100;
@@ -81,6 +82,7 @@ impl Snake {
     }
 
     fn apply(&self, values: &mut [f32]) {
+        let _prof = crate::prof::scope("snake", self.alpha.len(), 0, values.len());
         kernels::snake_in_place(values, &self.alpha, &self.inv);
     }
 }
@@ -101,12 +103,15 @@ enum Backend {
     Fast,
 }
 
-/// The decoder's convs are packed (exact across platforms); the encoder's run
-/// on faer (faster; see [`crate::fastconv`]).
+/// The stride-1 k7 convs run on Winograd in both models. Of the rest, the
+/// decoder's are packed and the encoder's run on faer (faster there; see
+/// [`crate::fastconv`]). All match PyTorch to float rounding.
 #[derive(Debug, Clone)]
 enum Conv {
     Packed(ConvKernel),
     Fast(FastConv),
+    /// The residual units' k7 convs, in both models (see [`crate::winograd`]).
+    Winograd(WinogradConv),
 }
 
 impl Conv {
@@ -114,9 +119,14 @@ impl Conv {
         match self {
             Self::Packed(c) => c.apply(x),
             Self::Fast(c) => c.apply(x),
+            Self::Winograd(c) => c.apply(x),
         }
     }
 }
+
+/// Channels in and out from which a stride-1 k7 conv runs on Winograd; the
+/// narrow ends of the models gain little from it.
+const WINOGRAD_MIN_CHANNELS: usize = 16;
 
 impl SnakeConv {
     /// A stride-1 conv that keeps its input's length.
@@ -170,6 +180,14 @@ impl SnakeConv {
         Ok(Self {
             snake: Snake::load(w, snake, cin)?,
             conv: match backend {
+                _ if kernel == KERNEL && stride == 1 && cin.min(cout) >= WINOGRAD_MIN_CHANNELS => {
+                    Conv::Winograd(WinogradConv::from_torch(
+                        &weight,
+                        &bias,
+                        (cout, cin),
+                        dilation,
+                    )?)
+                }
                 Backend::Packed => Conv::Packed(ConvKernel::from_torch(
                     &weight,
                     &bias,
