@@ -130,6 +130,22 @@ pub(crate) enum DevCommand {
         #[arg(long)]
         chunk: Option<usize>,
     },
+    /// Encode raw little-endian f32 mono 44.1 kHz samples with the HQ encoder
+    /// (DAC's) to a `.npy` of codes `[frames, 9]`, for parity checks.
+    DacEncode {
+        /// The encoder weights (`dac44_encoder.safetensors`).
+        weights: PathBuf,
+        /// Input: raw f32 samples.
+        input: PathBuf,
+        /// Output: codes, `[frames, 9]` u16.
+        output: PathBuf,
+        /// Latent frames per chunk (default: the encoder's own).
+        #[arg(long)]
+        chunk: Option<usize>,
+        /// Also write the latent, `[frames, 1024]` raw f32, here.
+        #[arg(long)]
+        latent: Option<PathBuf>,
+    },
     /// Time each expert and the whole coder on one code bundle.
     Profile {
         /// cx2 table (.ecxm).
@@ -228,6 +244,15 @@ pub(crate) fn run(command: &DevCommand, tables: &Path) -> Result<()> {
             input,
             codec,
         } => profile(&load(table, codec)?, &read_bundle(tables, input)?),
+        DevCommand::DacBench { .. }
+        | DevCommand::DacDecode { .. }
+        | DevCommand::DacEncode { .. } => run_dac(command),
+    }
+}
+
+/// The HQ codec's dev commands.
+fn run_dac(command: &DevCommand) -> Result<()> {
+    match command {
         DevCommand::DacBench {
             weights,
             seconds,
@@ -241,7 +266,50 @@ pub(crate) fn run(command: &DevCommand, tables: &Path) -> Result<()> {
             codebooks,
             chunk,
         } => dac_decode(weights, codes, output, *codebooks, *chunk),
+        DevCommand::DacEncode {
+            weights,
+            input,
+            output,
+            chunk,
+            latent,
+        } => dac_encode(weights, input, output, *chunk, latent.as_deref()),
+        _ => anyhow::bail!("not an HQ codec command"),
     }
+}
+
+/// Encodes raw f32 samples with the HQ encoder to a code array.
+fn dac_encode(
+    weights: &Path,
+    input: &Path,
+    output: &Path,
+    chunk: Option<usize>,
+    latent_out: Option<&Path>,
+) -> Result<()> {
+    use picotone::dac::{CODEBOOKS, DacEncoder, SAMPLE_RATE};
+    let encoder = DacEncoder::load(weights)?;
+    let bytes = read(input)?;
+    let audio: Vec<f32> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&b| f32::from_le_bytes(b))
+        .collect();
+    let t = Instant::now();
+    let latent = encoder.latent_chunked(&audio, chunk.unwrap_or(picotone::dac::CHUNK))?;
+    let took = t.elapsed().as_secs_f64();
+    if let Some(path) = latent_out {
+        let raw: Vec<u8> = latent.data().iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(path, raw).with_context(|| format!("writing {}", path.display()))?;
+    }
+    let t = Instant::now();
+    let codes = encoder.quantize(latent)?;
+    let seconds = to_f64(audio.len()) / f64::from(SAMPLE_RATE);
+    eprintln!(
+        "encoded {seconds:.1} s: encoder {took:.2} s ({:.2}x real time), quantiser {:.3} s",
+        seconds / took,
+        t.elapsed().as_secs_f64()
+    );
+    write_npy(output, &codes, CODEBOOKS)
 }
 
 /// Decodes a code array with the HQ decoder to raw f32 samples.

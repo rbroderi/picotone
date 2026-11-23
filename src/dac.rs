@@ -1,4 +1,5 @@
-//! The HQ decoder: a 512-wide student of DAC 44 kHz's decoder (`dac44-student`).
+//! The HQ codec (`dac44-student`): DAC 44 kHz's own encoder and quantiser
+//! ([`DacEncoder`]), and a 512-wide student of its decoder ([`DacDecoder`]).
 //!
 //! DAC (descript-audio-codec, MIT, Copyright (c) 2023-present, Descript) codes
 //! mono 44.1 kHz audio as 9 codebooks of 1024 entries per latent frame, one
@@ -46,7 +47,7 @@ const KERNEL: usize = 7;
 /// a little under 10 frames each way; the chunking test checks this margin.
 pub const CONTEXT: usize = 12;
 /// Latent frames per chunk, before context (about 3 s).
-const CHUNK: usize = 256;
+pub const CHUNK: usize = 256;
 
 /// Snake's per-channel parameters.
 #[derive(Debug, Clone)]
@@ -78,6 +79,7 @@ struct SnakeConv {
 }
 
 impl SnakeConv {
+    /// A stride-1 conv that keeps its input's length.
     fn load(
         w: &Weights,
         snake: &str,
@@ -85,12 +87,46 @@ impl SnakeConv {
         (cout, cin, kernel): (usize, usize, usize),
         dilation: usize,
     ) -> Result<Self> {
+        Self::build(
+            w,
+            (snake, conv),
+            (cout, cin, kernel),
+            (1, dilation),
+            (kernel - 1) * dilation / 2,
+        )
+    }
+
+    /// The encoder's downsampling conv: kernel `2 * stride`, padding
+    /// `stride / 2`, which divides the length by `stride` exactly.
+    fn load_down(
+        w: &Weights,
+        snake: &str,
+        conv: &str,
+        (cout, cin): (usize, usize),
+        stride: usize,
+    ) -> Result<Self> {
+        Self::build(
+            w,
+            (snake, conv),
+            (cout, cin, 2 * stride),
+            (stride, 1),
+            stride.div_ceil(2),
+        )
+    }
+
+    fn build(
+        w: &Weights,
+        (snake, conv): (&str, &str),
+        (cout, cin, kernel): (usize, usize, usize),
+        (stride, dilation): (usize, usize),
+        pad: usize,
+    ) -> Result<Self> {
         let weight = w.get(&format!("{conv}.weight"), &[cout, cin, kernel])?;
         let bias = w.get(&format!("{conv}.bias"), &[cout])?;
         Ok(Self {
             snake: Snake::load(w, snake, cin)?,
-            conv: ConvKernel::from_torch(&weight, &bias, (cout, cin, kernel), 1, dilation)?,
-            pad: (kernel - 1) * dilation / 2,
+            conv: ConvKernel::from_torch(&weight, &bias, (cout, cin, kernel), stride, dilation)?,
+            pad,
         })
     }
 
@@ -112,6 +148,35 @@ struct Residual {
 }
 
 impl Residual {
+    /// Residual unit `r` of the block at `prefix`, `channels` wide.
+    fn load(w: &Weights, prefix: &str, channels: usize, dilation: usize) -> Result<Self> {
+        Ok(Self {
+            first: SnakeConv::load(
+                w,
+                &format!("{prefix}.snake1.alpha"),
+                &format!("{prefix}.conv1"),
+                (channels, channels, KERNEL),
+                dilation,
+            )?,
+            second: SnakeConv::load(
+                w,
+                &format!("{prefix}.snake2.alpha"),
+                &format!("{prefix}.conv2"),
+                (channels, channels, 1),
+                1,
+            )?,
+        })
+    }
+
+    /// The three residual units of the block at `prefix`.
+    fn load_three(w: &Weights, prefix: &str, channels: usize) -> Result<Vec<Self>> {
+        DILATIONS
+            .iter()
+            .enumerate()
+            .map(|(r, &dilation)| Self::load(w, &format!("{prefix}.res{r}"), channels, dilation))
+            .collect()
+    }
+
     fn forward(&self, x: Seq) -> Result<Seq> {
         let h = self.first.forward(&x)?;
         let y = self.second.forward(&h)?;
@@ -194,29 +259,7 @@ impl DacDecoder {
                 0.0,
                 None,
             )?;
-            let residuals = DILATIONS
-                .iter()
-                .enumerate()
-                .map(|(r, &dilation)| -> Result<Residual> {
-                    let q = format!("{p}.res{r}");
-                    Ok(Residual {
-                        first: SnakeConv::load(
-                            w,
-                            &format!("{q}.snake1.alpha"),
-                            &format!("{q}.conv1"),
-                            (cout, cout, KERNEL),
-                            dilation,
-                        )?,
-                        second: SnakeConv::load(
-                            w,
-                            &format!("{q}.snake2.alpha"),
-                            &format!("{q}.conv2"),
-                            (cout, cout, 1),
-                            1,
-                        )?,
-                    })
-                })
-                .collect::<Result<_>>()?;
+            let residuals = Residual::load_three(w, &p, cout)?;
             blocks.push(Block {
                 snake: Snake::load(w, &format!("{p}.snake.alpha"), c)?,
                 up,
@@ -274,12 +317,7 @@ impl DacDecoder {
 
     /// Decodes one span of frames as if it were the whole file: `[frames * 512]` samples.
     fn decode_span(&self, x: &Seq) -> Result<Vec<f32>> {
-        let c = x.channels();
-        let pad = (KERNEL - 1) / 2;
-        let mut padded = Seq::zeros(x.len() + 2 * pad, c);
-        padded.data_mut()[pad * c..(pad + x.len()) * c].copy_from_slice(x.data());
-        let mut h = self.input.apply(&padded)?;
-        drop(padded);
+        let mut h = conv_same(&self.input, x)?;
         for block in &self.blocks {
             h = block.forward(h)?;
         }
@@ -338,5 +376,259 @@ impl DacDecoder {
             start = end;
         }
         Ok(out)
+    }
+}
+
+/// A plain k7 conv that keeps its input's length (zero padding 3 each side).
+fn conv_same(kernel: &ConvKernel, x: &Seq) -> Result<Seq> {
+    let c = x.channels();
+    let pad = (KERNEL - 1) / 2;
+    let mut padded = Seq::zeros(x.len() + 2 * pad, c);
+    padded.data_mut()[pad * c..(pad + x.len()) * c].copy_from_slice(x.data());
+    kernel.apply(&padded)
+}
+
+/// Downsampling of each encoder block.
+const ENCODER_STRIDES: [usize; 4] = [2, 4, 8, 8];
+/// Channels after the encoder's input conv.
+const ENCODER_DIM: usize = 64;
+/// Channels of the latent the quantiser reads.
+const LATENT_DIM: usize = ENCODER_DIM << ENCODER_STRIDES.len();
+
+/// Three residual units, then Snake and a strided conv that doubles the width.
+#[derive(Debug, Clone)]
+struct EncoderBlock {
+    residuals: Vec<Residual>,
+    down: SnakeConv,
+}
+
+/// One stage of DAC's residual vector quantiser.
+#[derive(Debug, Clone)]
+struct Quantizer {
+    /// 1x1 conv, latent -> 8.
+    in_proj: ConvKernel,
+    /// `[entry][value]`, as stored.
+    codebook: Vec<f32>,
+    /// `[entry][value]`, each entry scaled to unit length.
+    unit: Vec<f32>,
+    /// Squared length of each unit entry (1 up to rounding, kept for parity
+    /// with DAC's distance).
+    unit_sq: Vec<f32>,
+    /// 1x1 conv, 8 -> latent.
+    out_proj: ConvKernel,
+}
+
+impl Quantizer {
+    fn load(w: &Weights, i: usize) -> Result<Self> {
+        let p = format!("quant{i}");
+        let conv = |name: &str, cout: usize, cin: usize| -> Result<ConvKernel> {
+            ConvKernel::from_torch(
+                &w.get(&format!("{p}.{name}.weight"), &[cout, cin, 1])?,
+                &w.get(&format!("{p}.{name}.bias"), &[cout])?,
+                (cout, cin, 1),
+                1,
+                1,
+            )
+        };
+        let shape = [CODEBOOK_SIZE, CODEBOOK_DIM];
+        let unit = w.get(&format!("{p}.codebook_unit"), &shape)?.into_owned();
+        let unit_sq = unit
+            .as_chunks::<CODEBOOK_DIM>()
+            .0
+            .iter()
+            .map(|e| e.iter().map(|v| v * v).sum())
+            .collect();
+        Ok(Self {
+            in_proj: conv("in_proj", CODEBOOK_DIM, LATENT_DIM)?,
+            codebook: w.get(&format!("{p}.codebook"), &shape)?.into_owned(),
+            unit,
+            unit_sq,
+            out_proj: conv("out_proj", LATENT_DIM, CODEBOOK_DIM)?,
+        })
+    }
+
+    /// The nearest entry to each frame of `residual` (by cosine, as DAC
+    /// does), written to `codes[t * stride]`; then subtracts the chosen
+    /// entries' projections from `residual`.
+    fn step(&self, residual: &mut Seq, codes: &mut [u16], stride: usize) -> Result<()> {
+        let projected = self.in_proj.apply(residual)?;
+        let mut chosen = Seq::zeros(residual.len(), CODEBOOK_DIM);
+        for ((e, dst), code) in projected
+            .data()
+            .as_chunks::<CODEBOOK_DIM>()
+            .0
+            .iter()
+            .zip(chosen.data_mut().as_chunks_mut::<CODEBOOK_DIM>().0)
+            .zip(codes.iter_mut().step_by(stride))
+        {
+            let norm = e.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
+            let e = e.map(|v| v / norm);
+            let mut best = (f32::NEG_INFINITY, 0);
+            for (j, (u, &sq)) in self
+                .unit
+                .as_chunks::<CODEBOOK_DIM>()
+                .0
+                .iter()
+                .zip(&self.unit_sq)
+                .enumerate()
+            {
+                let dot: f32 = e.iter().zip(u).map(|(a, b)| a * b).sum();
+                let score = 2.0 * dot - sq;
+                if score > best.0 {
+                    best = (score, j);
+                }
+            }
+            *code = u16::try_from(best.1)?;
+            let entry = best.1 * CODEBOOK_DIM;
+            dst.copy_from_slice(&self.codebook[entry..entry + CODEBOOK_DIM]);
+        }
+        let sub = self.out_proj.apply(&chosen)?;
+        for (r, s) in residual.data_mut().iter_mut().zip(sub.data()) {
+            *r -= s;
+        }
+        Ok(())
+    }
+}
+
+/// DAC 44 kHz's encoder and quantiser (MIT, Descript), as exported by
+/// `distill/export_encoder.py`. The HQ codec's codes are DAC's own: the
+/// student replaces only the decoder.
+///
+/// The encoder is a k7 conv to 64 channels, four blocks (three residual
+/// units like the decoder's, then Snake and a conv of stride 2, 4, 8, 8 that
+/// doubles the width), then Snake and a k3 conv to the 1024-wide latent.
+/// The quantiser is 9 residual stages, each projecting to 8 values and
+/// picking the entry with the largest cosine.
+#[derive(Debug, Clone)]
+pub struct DacEncoder {
+    input: ConvKernel,
+    blocks: Vec<EncoderBlock>,
+    output: SnakeConv,
+    quantizers: Vec<Quantizer>,
+}
+
+impl DacEncoder {
+    /// Builds the encoder from `export_encoder.py`'s tensors.
+    ///
+    /// # Errors
+    /// Fails when a tensor is missing or has the wrong shape.
+    pub fn from_weights(w: &Weights) -> Result<Self> {
+        let input = ConvKernel::from_torch(
+            &w.get("input.weight", &[ENCODER_DIM, 1, KERNEL])?,
+            &w.get("input.bias", &[ENCODER_DIM])?,
+            (ENCODER_DIM, 1, KERNEL),
+            1,
+            1,
+        )?;
+        let mut blocks = Vec::with_capacity(ENCODER_STRIDES.len());
+        let mut c = ENCODER_DIM;
+        for (b, &stride) in ENCODER_STRIDES.iter().enumerate() {
+            let p = format!("block{b}");
+            blocks.push(EncoderBlock {
+                residuals: Residual::load_three(w, &p, c)?,
+                down: SnakeConv::load_down(
+                    w,
+                    &format!("{p}.snake.alpha"),
+                    &format!("{p}.down"),
+                    (2 * c, c),
+                    stride,
+                )?,
+            });
+            c *= 2;
+        }
+        let output = SnakeConv::load(
+            w,
+            "output.snake.alpha",
+            "output.conv",
+            (LATENT_DIM, c, 3),
+            1,
+        )?;
+        let quantizers = (0..CODEBOOKS)
+            .map(|i| Quantizer::load(w, i))
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            input,
+            blocks,
+            output,
+            quantizers,
+        })
+    }
+
+    /// Loads `dac44_encoder.safetensors`.
+    ///
+    /// # Errors
+    /// Fails when the file is missing or invalid.
+    pub fn load(path: &std::path::Path) -> Result<Self> {
+        let w = Weights::load(path)?;
+        Self::from_weights(&w)
+            .with_context(|| format!("building the encoder from {}", path.display()))
+    }
+
+    /// The latent of one span of samples (a whole number of frames) as if it
+    /// were the whole file: `[samples / 512, 1024]`.
+    fn latent_span(&self, x: &Seq) -> Result<Seq> {
+        let mut h = conv_same(&self.input, x)?;
+        for block in &self.blocks {
+            for residual in &block.residuals {
+                h = residual.forward(h)?;
+            }
+            h = block.down.forward(&h)?;
+        }
+        self.output.forward(&h)
+    }
+
+    /// The latent of mono 44.1 kHz `audio`, zero padded at the end to a
+    /// whole number of frames: `[frames, 1024]`, chunk by chunk.
+    ///
+    /// # Errors
+    /// Fails when `chunk` is zero.
+    pub fn latent_chunked(&self, audio: &[f32], chunk: usize) -> Result<Seq> {
+        ensure!(chunk > 0, "chunk length must be positive");
+        let frames = audio.len().div_ceil(HOP);
+        let mut parts = Vec::new();
+        let mut start = 0;
+        while start < frames {
+            let end = (start + chunk).min(frames);
+            let lo = start.saturating_sub(CONTEXT);
+            let hi = (end + CONTEXT).min(frames);
+            let mut x = Seq::zeros((hi - lo) * HOP, 1);
+            let src = &audio[(lo * HOP).min(audio.len())..(hi * HOP).min(audio.len())];
+            x.data_mut()[..src.len()].copy_from_slice(src);
+            let z = self.latent_span(&x)?;
+            parts.push(z.slice_rows(start - lo, end - lo));
+            start = end;
+        }
+        if parts.is_empty() {
+            return Ok(Seq::zeros(0, LATENT_DIM));
+        }
+        Seq::concat(parts)
+    }
+
+    /// Codes of a latent: `[frames][9]`, row-major. A tier's codes are the
+    /// first codebooks of each frame.
+    ///
+    /// # Errors
+    /// Fails when the latent is not 1024 wide.
+    pub fn quantize(&self, latent: Seq) -> Result<Vec<u16>> {
+        ensure!(
+            latent.channels() == LATENT_DIM,
+            "latent is {} wide, expected {LATENT_DIM}",
+            latent.channels()
+        );
+        let mut codes = vec![0; latent.len() * CODEBOOKS];
+        let mut residual = latent;
+        for (i, q) in self.quantizers.iter().enumerate() {
+            q.step(&mut residual, &mut codes[i..], CODEBOOKS)?;
+        }
+        Ok(codes)
+    }
+
+    /// Encodes mono 44.1 kHz `audio` to codes `[frames][9]` (row-major),
+    /// `ceil(len / 512)` frames.
+    ///
+    /// # Errors
+    /// Fails on internal shape mismatches only.
+    pub fn encode(&self, audio: &[f32]) -> Result<Vec<u16>> {
+        self.quantize(self.latent_chunked(audio, CHUNK)?)
     }
 }
