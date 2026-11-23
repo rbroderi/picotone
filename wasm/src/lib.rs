@@ -63,8 +63,9 @@ pub fn thread_count() -> usize {
     rayon::current_num_threads()
 }
 
-/// Parses a `.pico` file's headers and page index and returns them as JSON:
-/// `{"model", "audioLength", "codedLength", "numCodebooks", "stride",
+/// Parses a `.pico` file's headers and page index and returns them as JSON.
+///
+/// The fields: `{"model", "audioLength", "codedLength", "numCodebooks", "stride",
 /// "crossfade", "preSkip", "endTrim", "loop", "tableHash", "pageLength",
 /// "lengthInHeader", "outputGain", "tags"}`. `audioLength` is the playable
 /// length, `codedLength` the coded one; `stride` is null for the causal model.

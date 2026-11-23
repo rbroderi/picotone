@@ -200,11 +200,17 @@ impl Samples {
         let unit = f64::from(1_u32 << frac_bits);
         let mut logits = vec![0_i64; CARD];
         let mut total = 0.0;
-        for (sample, &label) in self.values.chunks_exact(EXPERTS * CARD).zip(&self.labels) {
+        for (sample, &label) in self
+            .values
+            .as_chunks::<{ EXPERTS * CARD }>()
+            .0
+            .iter()
+            .zip(&self.labels)
+        {
             for (l, &b) in logits.iter_mut().zip(&self.bias) {
                 *l = 16 * i64::from(b);
             }
-            for (expert, &weight) in sample.chunks_exact(CARD).zip(weights) {
+            for (expert, &weight) in sample.as_chunks::<CARD>().0.iter().zip(weights) {
                 if weight != 0 {
                     for (l, &v) in logits.iter_mut().zip(expert) {
                         *l += i64::from(weight) * i64::from(v);

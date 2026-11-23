@@ -45,7 +45,7 @@ pub const PAIR_BUCKETS: usize = 8 * PAIR_CONTEXT_BUCKETS;
 #[must_use]
 pub fn half_log2(value: u32) -> usize {
     let value = u64::from(value.max(1));
-    let exponent = 63 - value.leading_zeros();
+    let exponent = value.ilog2();
     let half = u32::from(value * value >= 1_u64 << (2 * exponent + 1));
     usize::try_from(2 * exponent + half).unwrap_or(0)
 }
@@ -53,7 +53,7 @@ pub fn half_log2(value: u32) -> usize {
 /// Bucket of a squared distance: eight logarithmic steps per octave.
 fn geo_bucket(distance: u64) -> u16 {
     let value = distance + 1;
-    let exponent = 63 - value.leading_zeros();
+    let exponent = value.ilog2();
     let mantissa = if exponent >= 3 {
         (value >> (exponent - 3)) & 7
     } else {
@@ -153,8 +153,10 @@ impl Centroids {
             );
             data.extend(
                 tensors[start..end]
-                    .chunks_exact(4)
-                    .map(|b| to_fixed(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))),
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&b| to_fixed(f32::from_le_bytes(b))),
             );
         }
         Ok(Self::from_values(data, codebooks))
@@ -181,12 +183,14 @@ impl Centroids {
 
     fn from_values(data: Vec<i16>, codebooks: usize) -> Self {
         let norms = data
-            .chunks_exact(DIM)
+            .as_chunks::<DIM>()
+            .0
+            .iter()
             .map(|row| row.iter().map(|&v| i64::from(v) * i64::from(v)).sum())
             .collect();
         let mut columns = vec![0; data.len()];
-        for (k, book) in data.chunks_exact(CARD * DIM).enumerate() {
-            for (code, row) in book.chunks_exact(DIM).enumerate() {
+        for (k, book) in data.as_chunks::<{ CARD * DIM }>().0.iter().enumerate() {
+            for (code, row) in book.as_chunks::<DIM>().0.iter().enumerate() {
                 for (d, &value) in row.iter().enumerate() {
                     columns[(k * DIM + d) * CARD + code] = value;
                 }

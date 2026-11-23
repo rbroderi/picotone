@@ -78,6 +78,11 @@ nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 # Duplicate transitive crate versions come from upstream dependencies.
 multiple_crate_versions = "allow"
+# `mul_add` rounds differently from a multiply then an add, and the outputs are
+# pinned bit for bit (parity tests, chunked against whole decodes, cx2). It is
+# also a slow library call on targets without FMA (WebAssembly without relaxed
+# SIMD). The SIMD kernels choose fused operations explicitly where they want them.
+suboptimal_flops = "allow"
 # Selected restriction lints.
 allow_attributes = "deny"
 allow_attributes_without_reason = "deny"

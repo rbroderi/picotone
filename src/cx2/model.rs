@@ -150,24 +150,30 @@ impl<'a> Cursor<'a> {
     fn u16s(&mut self, n: usize) -> Result<Vec<u16>> {
         Ok(self
             .take(n * 2)?
-            .chunks_exact(2)
-            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&b| u16::from_le_bytes(b))
             .collect())
     }
 
     fn i16s(&mut self, n: usize) -> Result<Vec<i16>> {
         Ok(self
             .take(n * 2)?
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&b| i16::from_le_bytes(b))
             .collect())
     }
 
     fn u32s(&mut self, n: usize) -> Result<Vec<u32>> {
         Ok(self
             .take(n * 4)?
-            .chunks_exact(4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&b| u32::from_le_bytes(b))
             .collect())
     }
 
@@ -175,8 +181,10 @@ impl<'a> Cursor<'a> {
     fn logits(&mut self, n: usize) -> Result<Vec<i32>> {
         let values: Vec<i32> = self
             .take(n * 4)?
-            .chunks_exact(4)
-            .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&b| i32::from_le_bytes(b))
             .collect();
         ensure!(
             values.iter().all(|v| v.unsigned_abs() <= LOGIT_LIMIT),
@@ -483,7 +491,13 @@ impl Predictor<'_> {
         if let Some(net) = &mut self.net {
             net.reset();
         }
-        for (k, values) in self.rec_values.chunks_exact_mut(CARD).enumerate() {
+        for (k, values) in self
+            .rec_values
+            .as_chunks_mut::<CARD>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
             let never = self.model.layers[k]
                 .rec
                 .as_ref()

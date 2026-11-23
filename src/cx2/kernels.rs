@@ -152,7 +152,7 @@ fn multiply_add(acc: &mut [i32], matrix: &Matrix, active: &[(usize, i16, i16)]) 
             let Some(block) = blocks.get(pair) else {
                 continue;
             };
-            for (sum, entries) in sums.iter_mut().zip(block.chunks_exact(2)) {
+            for (sum, entries) in sums.iter_mut().zip(block.as_chunks::<2>().0) {
                 *sum = sum.wrapping_add(
                     (i32::from(entries[0]) * i32::from(left))
                         .wrapping_add(i32::from(entries[1]) * i32::from(right)),
@@ -187,7 +187,7 @@ fn multiply_add_v3(
                 continue;
             };
             let mut weights = [0_i16; 16];
-            for both in weights.chunks_exact_mut(2) {
+            for both in weights.as_chunks_mut::<2>().0 {
                 both[0] = left;
                 both[1] = right;
             }

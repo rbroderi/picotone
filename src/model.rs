@@ -1901,7 +1901,7 @@ mod tests {
             halo: pre.halo - 1,
             ..pre
         };
-        assert!(run_chunked(&encoder.pre, &audio, short)? != whole);
+        assert_ne!(run_chunked(&encoder.pre, &audio, short)?, whole);
 
         let features = encoder.lstm.forward(&whole)?;
         let whole = run(&decoder.post, features.clone())?;
@@ -1924,12 +1924,12 @@ mod tests {
 
             let encoder = real_model(name, LoadOptions::encoder_only(Some(count)))?
                 .context("weights disappeared")?;
-            assert!(encoder.encode(&audio, bandwidth)? == frames);
+            assert_eq!(encoder.encode(&audio, bandwidth)?, frames);
             assert!(encoder.decode(&frames, audio.len()).is_err());
 
             let decoder = real_model(name, LoadOptions::decoder_only(Some(count)))?
                 .context("weights disappeared")?;
-            assert!(decoder.decode(&frames, audio.len())? == reference);
+            assert_eq!(decoder.decode(&frames, audio.len())?, reference);
             assert!(decoder.encode(&audio, bandwidth).is_err());
         }
         Ok(())
