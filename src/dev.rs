@@ -30,7 +30,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Subcommand)]
 pub(crate) enum DevCommand {
     /// Write a .pico file's codes as .npy (`[frames, codebooks]`, u16) plus a .json
-    /// sidecar with the layout and the segment scales.
+    /// sidecar with the layout and the segment scales. An HQ stream with two
+    /// coded channels writes one .npy per channel, `<output>.0.npy` and `<output>.1.npy`.
     Codes {
         /// Input .pico file.
         input: PathBuf,
@@ -162,6 +163,10 @@ pub(crate) enum DevCommand {
 pub(crate) fn run(command: &DevCommand, tables: &Path) -> Result<()> {
     match command {
         DevCommand::Codes { input, output } => {
+            let bytes = read(input)?;
+            if pico::codec_of(&bytes)? == pico::Codec::Dac44 {
+                return write_dac_codes(&bytes, output);
+            }
             let bundle = read_pico(tables, &input.to_string_lossy())?;
             write_npy(output, &bundle.codes, bundle.num_codebooks)?;
             let sidecar = bundle.sidecar.context("a .pico file always has a layout")?;
@@ -473,6 +478,34 @@ fn table_for(dir: &Path, hash: u64) -> Result<Model> {
         }
     }
     bail!("no cx2 table with hash {hash:016x} in {}", dir.display())
+}
+
+/// `dev codes` for an HQ stream: each coded channel's codes, and a sidecar
+/// with the layout and lengths.
+fn write_dac_codes(bytes: &[u8], output: &Path) -> Result<()> {
+    let stream = pico::DacStream::parse(bytes)?;
+    let channels = stream.decode_all()?;
+    let info = &stream.info;
+    for (c, (codes, &n)) in channels.iter().zip(&info.codebooks).enumerate() {
+        let path = if channels.len() == 1 {
+            output.to_path_buf()
+        } else {
+            output.with_extension(format!("{c}.npy"))
+        };
+        write_npy(&path, codes, n)?;
+    }
+    let sidecar = serde_json::json!({
+        "model": "dac44",
+        "layout": format!("{:?}", info.layout),
+        "codebooks": info.codebooks,
+        "audio_length": info.audio_length,
+        "pre_skip": info.pre_skip,
+        "end_trim": info.end_trim,
+        "looped": info.looped,
+    });
+    let path = output.with_extension("json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&sidecar)?)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 fn read_pico(tables: &Path, path: &str) -> Result<Bundle> {
