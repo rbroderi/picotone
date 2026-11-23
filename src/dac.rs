@@ -22,6 +22,7 @@
 use anyhow::{Context as _, Result, ensure};
 use rayon::prelude::*;
 
+use crate::fastconv::FastConv;
 use crate::kernels;
 use crate::nn::{ConvGeometry, ConvKernel, ConvTranspose1d, Seq};
 use crate::weights::Weights;
@@ -89,8 +90,32 @@ impl Snake {
 #[derive(Debug, Clone)]
 struct SnakeConv {
     snake: Snake,
-    conv: ConvKernel,
+    conv: Conv,
     pad: usize,
+}
+
+/// Which kernel a conv runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    Packed,
+    Fast,
+}
+
+/// The decoder's convs are packed (exact across platforms); the encoder's run
+/// on faer (faster; see [`crate::fastconv`]).
+#[derive(Debug, Clone)]
+enum Conv {
+    Packed(ConvKernel),
+    Fast(FastConv),
+}
+
+impl Conv {
+    fn apply(&self, x: &Seq) -> Result<Seq> {
+        match self {
+            Self::Packed(c) => c.apply(x),
+            Self::Fast(c) => c.apply(x),
+        }
+    }
 }
 
 impl SnakeConv {
@@ -101,6 +126,7 @@ impl SnakeConv {
         conv: &str,
         (cout, cin, kernel): (usize, usize, usize),
         dilation: usize,
+        backend: Backend,
     ) -> Result<Self> {
         Self::build(
             w,
@@ -108,6 +134,7 @@ impl SnakeConv {
             (cout, cin, kernel),
             (1, dilation),
             (kernel - 1) * dilation / 2,
+            backend,
         )
     }
 
@@ -126,6 +153,7 @@ impl SnakeConv {
             (cout, cin, 2 * stride),
             (stride, 1),
             stride.div_ceil(2),
+            Backend::Fast,
         )
     }
 
@@ -135,12 +163,28 @@ impl SnakeConv {
         (cout, cin, kernel): (usize, usize, usize),
         (stride, dilation): (usize, usize),
         pad: usize,
+        backend: Backend,
     ) -> Result<Self> {
         let weight = w.get(&format!("{conv}.weight"), &[cout, cin, kernel])?;
         let bias = w.get(&format!("{conv}.bias"), &[cout])?;
         Ok(Self {
             snake: Snake::load(w, snake, cin)?,
-            conv: ConvKernel::from_torch(&weight, &bias, (cout, cin, kernel), stride, dilation)?,
+            conv: match backend {
+                Backend::Packed => Conv::Packed(ConvKernel::from_torch(
+                    &weight,
+                    &bias,
+                    (cout, cin, kernel),
+                    stride,
+                    dilation,
+                )?),
+                Backend::Fast => Conv::Fast(FastConv::from_torch(
+                    &weight,
+                    &bias,
+                    (cout, cin, kernel),
+                    stride,
+                    dilation,
+                )?),
+            },
             pad,
         })
     }
@@ -164,7 +208,13 @@ struct Residual {
 
 impl Residual {
     /// Residual unit `r` of the block at `prefix`, `channels` wide.
-    fn load(w: &Weights, prefix: &str, channels: usize, dilation: usize) -> Result<Self> {
+    fn load(
+        w: &Weights,
+        prefix: &str,
+        channels: usize,
+        dilation: usize,
+        backend: Backend,
+    ) -> Result<Self> {
         Ok(Self {
             first: SnakeConv::load(
                 w,
@@ -172,6 +222,7 @@ impl Residual {
                 &format!("{prefix}.conv1"),
                 (channels, channels, KERNEL),
                 dilation,
+                backend,
             )?,
             second: SnakeConv::load(
                 w,
@@ -179,16 +230,24 @@ impl Residual {
                 &format!("{prefix}.conv2"),
                 (channels, channels, 1),
                 1,
+                backend,
             )?,
         })
     }
 
     /// The three residual units of the block at `prefix`.
-    fn load_three(w: &Weights, prefix: &str, channels: usize) -> Result<Vec<Self>> {
+    fn load_three(
+        w: &Weights,
+        prefix: &str,
+        channels: usize,
+        backend: Backend,
+    ) -> Result<Vec<Self>> {
         DILATIONS
             .iter()
             .enumerate()
-            .map(|(r, &dilation)| Self::load(w, &format!("{prefix}.res{r}"), channels, dilation))
+            .map(|(r, &dilation)| {
+                Self::load(w, &format!("{prefix}.res{r}"), channels, dilation, backend)
+            })
             .collect()
     }
 
@@ -274,7 +333,7 @@ impl DacDecoder {
                 0.0,
                 None,
             )?;
-            let residuals = Residual::load_three(w, &p, cout)?;
+            let residuals = Residual::load_three(w, &p, cout, Backend::Packed)?;
             blocks.push(Block {
                 snake: Snake::load(w, &format!("{p}.snake.alpha"), c)?,
                 up,
@@ -282,7 +341,14 @@ impl DacDecoder {
             });
             c = cout;
         }
-        let output = SnakeConv::load(w, "output.snake.alpha", "output.conv", (1, c, KERNEL), 1)?;
+        let output = SnakeConv::load(
+            w,
+            "output.snake.alpha",
+            "output.conv",
+            (1, c, KERNEL),
+            1,
+            Backend::Packed,
+        )?;
         Ok(Self {
             width,
             codebooks,
@@ -547,7 +613,7 @@ impl DacEncoder {
         for (b, &stride) in ENCODER_STRIDES.iter().enumerate() {
             let p = format!("block{b}");
             blocks.push(EncoderBlock {
-                residuals: Residual::load_three(w, &p, c)?,
+                residuals: Residual::load_three(w, &p, c, Backend::Fast)?,
                 down: SnakeConv::load_down(
                     w,
                     &format!("{p}.snake.alpha"),
@@ -564,6 +630,7 @@ impl DacEncoder {
             "output.conv",
             (LATENT_DIM, c, 3),
             1,
+            Backend::Fast,
         )?;
         let quantizers = (0..CODEBOOKS)
             .map(|i| Quantizer::load(w, i))

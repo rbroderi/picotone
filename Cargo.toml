@@ -31,6 +31,8 @@ relaxed-simd = ["pulp/relaxed-simd"]
 
 [dependencies]
 anyhow = "1.0.104"
+# The HQ encoder's matrix products (src/fastconv.rs); MIT.
+faer = { version = "0.22.6", default-features = false, features = ["std"] }
 clap = { version = "4.6.8", features = ["derive"], optional = true }
 hound = { version = "3.5.1", optional = true }
 ndarray = "0.17.2"
