@@ -54,7 +54,7 @@ for index, f in enumerate(files):
         w.setframerate(48000)
         w.writeframes(scratch.tobytes())
     r = subprocess.run([EXE, "--weights", WEIGHTS, "--threads", "2", "encode", tmp_wav, tmp_ecdc,
-                        "-m", "stereo", "-b", "24"], capture_output=True, text=True)
+                        "--model", "encodec-48k", "-b", "24"], capture_output=True, text=True)
     if r.returncode != 0:
         print("FAILED", name, r.stderr[-200:], flush=True)
         continue

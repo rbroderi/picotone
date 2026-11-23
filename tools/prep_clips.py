@@ -83,7 +83,7 @@ elif ORDER == "mid":
     clips = clips[len(clips) // 2:] + clips[:len(clips) // 2]
 for c in clips:
     wav = os.path.join(WORK, "wav", c["name"] + ".wav")
-    for model, tag in (("mono", "24k"), ("stereo", "48k")):
+    for model, tag in (("encodec-24k", "24k"), ("encodec-48k", "48k")):
         out = os.path.join(WORK, "ecdc", f"{c['name']}.{tag}.ecdc")
         if os.path.exists(out):
             continue
@@ -94,7 +94,7 @@ for c in clips:
                         src]):
                 continue
         tmp = out + ".tmp" + ORDER
-        if run([EXE, "--weights", WEIGHTS, "encode", src, tmp, "-m", model, "-b", "24"]):
+        if run([EXE, "--weights", WEIGHTS, "encode", src, tmp, "--model", model, "-b", "24"]):
             os.replace(tmp, out)
             print("encoded", os.path.basename(out), os.path.getsize(out), flush=True)
 print("prep done")

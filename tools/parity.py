@@ -117,7 +117,7 @@ for name, rate, ch, seconds, bw in [("encodec_24khz", 24000, 1, 4.3, 6.0),
     x = write_wav16(wav_in, signal(rate, seconds, ch, 1), rate)
     pico = os.path.join(work, f"{name}.pico")
     wav_out = os.path.join(work, f"{name}_out.wav")
-    subprocess.run([exe, "--weights", weights, "encode", wav_in, pico, "-m", "mono" if ch == 1 else "stereo",
+    subprocess.run([exe, "--weights", weights, "encode", wav_in, pico, "--model", "encodec-24k" if ch == 1 else "encodec-48k",
                     "-b", str(bw), "--beam", "1", "--crossfade", "triangle"], check=True)
     subprocess.run([exe, "--weights", weights, "decode", pico, wav_out, "--float"], check=True)
     side, ours = read_codes(pico, os.path.join(work, f"{name}.npy"))

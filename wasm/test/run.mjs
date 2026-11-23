@@ -203,7 +203,7 @@ for (const c of CASES) {
   if (stale || !existsSync(ref) || !existsSync(pico) || process.argv.includes("--fresh")) {
     if (c.src) copyFileSync(c.src, wav);
     else writeWav16(wav, c.rate, c.make());
-    run(["encode", wav, pico, "-m", c.mode, ...args]);
+    run(["encode", wav, pico, "--model", c.mode === "mono" ? "encodec-24k" : "encodec-48k", ...args]);
     writeFileSync(stamp, args.join(" "));
     run(["decode", pico, ref, "--float"]);
     console.log(`made ${c.name}: ${statSync(pico).size} bytes .pico`);

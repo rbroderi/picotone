@@ -229,7 +229,7 @@ files. The codes, and so the archive, are the same whichever container carried t
 on 48 kHz and 24 kHz clips packed both ways with `picotone dev pack`).
 
 To add audio: clip it to 48 kHz stereo WAV, encode it with
-`picotone encode in.wav fit3__<genre>__<name>.48k.pico -m stereo -b 24 --beam 1` (no preset, so
+`picotone encode in.wav fit3__<genre>__<name>.48k.pico --model encodec-48k -b 24 --beam 1` (no preset, so
 it keeps the stock stride and 16 codebooks like the rest of the set), add it to
 `DATA_SOURCES.json`, and pass it to `--fit` beside the `.ecdc` patterns. Then re-run the
 command above. Test streams must stay out of `--fit`. Each clip is stored

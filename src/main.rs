@@ -1,30 +1,32 @@
 //! `picotone`: encode audio to `.pico` files and decode them back.
 
 mod dev;
+mod hq;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use picotone::audio::{self, Audio, WavFormat};
 use picotone::config::Config;
 use picotone::layout::{self, Crossfade, Segmenting, Trimmer};
 use picotone::model::{EncodeParams, Encodec, EncodedFrame, LoadOptions};
 use picotone::nn::Seq;
-use picotone::pico::{self, Info, Stream};
+use picotone::pico::{self, Codec, Info, Stream};
 use picotone::{ModelKind, cx2};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "picotone",
     version,
-    about = "picotone: EnCodec audio in .pico files (24 kHz mono / 48 kHz stereo)"
+    about = "picotone: neural audio in .pico files (HQ 44.1 kHz by default; EnCodec with --fast)"
 )]
 struct Cli {
-    /// Directory holding `encodec_24khz.{json,safetensors}` and `encodec_48khz.{json,safetensors}`.
-    /// Defaults to `$PICOTONE_WEIGHTS` (or the older `$ENCODEC_WEIGHTS`), then `weights/` next to
-    /// the executable, then the project.
+    /// Directory holding the model weights: `dac44_encoder.safetensors` and
+    /// `dac44_student.safetensors` (HQ), `encodec_24khz.{json,safetensors}` and
+    /// `encodec_48khz.{json,safetensors}`. Defaults to `$PICOTONE_WEIGHTS` (or the older
+    /// `$ENCODEC_WEIGHTS`), then `weights/` next to the executable, then the project.
     #[arg(long, global = true)]
     weights: Option<PathBuf>,
 
@@ -82,17 +84,114 @@ enum Command {
     Dev(dev::DevCommand),
 }
 
+/// The models `--model` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum ModelChoice {
-    /// Stereo model for multi-channel input, mono model otherwise.
-    Auto,
-    /// `encodec_24khz`: 24 kHz mono, bandwidths 1.5, 3, 6, 12, 24 kbps.
-    #[value(alias = "24khz")]
-    Mono,
+enum ModelName {
+    /// HQ (the default): DAC 44 kHz's encoder and picotone's distilled decoder; 44.1 kHz, mono
+    /// or stereo, 1 to 9 codebooks per channel (0.86 kbps each).
+    #[value(name = "dac44-student")]
+    Dac44Student,
     /// `encodec_48khz`: 48 kHz stereo, bandwidths 3, 6, 12, 24 kbps.
-    #[value(alias = "48khz")]
+    #[value(name = "encodec-48k")]
+    Encodec48k,
+    /// `encodec_24khz`: 24 kHz mono, bandwidths 1.5, 3, 6, 12, 24 kbps.
+    #[value(name = "encodec-24k")]
+    Encodec24k,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ChannelFormat {
+    /// Follow the input. For HQ, a stereo input that is mono in all but name (its side over
+    /// 40 dB under its mid) is coded as one channel.
+    Auto,
+    /// One channel (a down-mix).
+    Mono,
+    /// Two channels.
     Stereo,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum StereoChoice {
+    /// Compare left/right and mid/side on sampled excerpts and keep the better.
+    Pick,
+    /// Mid/side: (L+R)/2 and (L-R)/2.
+    Ms,
+    /// Left/right.
+    Lr,
+}
+
+/// What an encode runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Plan {
+    /// HQ with this many channels; `auto_mono` codes a mono-like stereo input as one.
+    Hq { channels: usize, auto_mono: bool },
+    /// An EnCodec model.
+    Encodec(ModelKind),
+}
+
+/// Resolves `--model`, `--fast`, `--preset` and `--channel-format` for an
+/// input with `input_channels` channels.
+fn plan(options: &EncodeOptions, input_channels: usize) -> Result<Plan> {
+    let format = options.channel_format;
+    let stereo_input = options.preset.is_some() || input_channels >= 2;
+    let model = options.model.unwrap_or_else(|| {
+        if !options.fast && options.preset.is_none() {
+            ModelName::Dac44Student
+        } else if format == ChannelFormat::Stereo || (format == ChannelFormat::Auto && stereo_input)
+        {
+            ModelName::Encodec48k
+        } else {
+            ModelName::Encodec24k
+        }
+    });
+    let plan = match (model, format) {
+        (ModelName::Dac44Student, ChannelFormat::Mono) => Plan::Hq {
+            channels: 1,
+            auto_mono: false,
+        },
+        (ModelName::Dac44Student, ChannelFormat::Stereo) => Plan::Hq {
+            channels: 2,
+            auto_mono: false,
+        },
+        (ModelName::Dac44Student, ChannelFormat::Auto) => Plan::Hq {
+            channels: if input_channels >= 2 { 2 } else { 1 },
+            auto_mono: true,
+        },
+        (ModelName::Encodec48k, ChannelFormat::Mono) => {
+            bail!("encodec-48k is a stereo model; use encodec-24k (or --fast) for mono")
+        }
+        (ModelName::Encodec24k, ChannelFormat::Stereo) => {
+            bail!("encodec-24k is a mono model; use encodec-48k (or --fast) for stereo")
+        }
+        (ModelName::Encodec48k, _) => Plan::Encodec(ModelKind::Stereo48k),
+        (ModelName::Encodec24k, _) => Plan::Encodec(ModelKind::Mono24k),
+    };
+    match plan {
+        Plan::Hq { .. } => {
+            let encodec_only = [
+                (options.preset.is_some(), "--preset"),
+                (options.bandwidth.is_some(), "--bandwidth"),
+                (options.stride.is_some(), "--stride"),
+                (options.crossfade.is_some(), "--crossfade"),
+                (options.beam.is_some(), "--beam"),
+                (options.table.is_some(), "--table"),
+            ];
+            if let Some((_, flag)) = encodec_only.iter().find(|(set, _)| *set) {
+                bail!("{flag} is for the EnCodec models (--fast); HQ takes --codebooks");
+            }
+        }
+        Plan::Encodec(_) => {
+            ensure!(
+                options.side_codebooks.is_none() && options.stereo.is_none(),
+                "--stereo and --side-codebooks are for the HQ model"
+            );
+        }
+    }
+    Ok(plan)
+}
+
+/// EnCodec bandwidth in kbps when neither `--bandwidth` nor `--codebooks` sets one.
+const DEFAULT_BANDWIDTH: f64 = 6.0;
 
 /// Beam width used when neither `--beam` nor a preset sets one.
 const DEFAULT_BEAM: usize = 8;
@@ -134,18 +233,32 @@ enum CrossfadeChoice {
 
 #[derive(Debug, Args)]
 struct EncodeOptions {
-    /// Model to encode with.
-    #[arg(short, long, value_enum, default_value_t = ModelChoice::Auto)]
-    model: ModelChoice,
-    /// Target bandwidth in kbps (sets the codebook count).
-    #[arg(short, long, default_value_t = 6.0)]
-    bandwidth: f64,
-    /// Recommended 48 kHz music settings; explicit flags below override them.
+    /// Use EnCodec instead of the HQ model: encodec-24k for mono, encodec-48k for stereo.
+    #[arg(long)]
+    fast: bool,
+    /// The exact model to encode with; overrides `--fast` and `--preset`'s choice.
+    #[arg(long, value_enum)]
+    model: Option<ModelName>,
+    /// Channels to code, separately from the model.
+    #[arg(long, value_enum, default_value_t = ChannelFormat::Auto)]
+    channel_format: ChannelFormat,
+    /// HQ stereo layout (default: pick).
+    #[arg(long, value_enum)]
+    stereo: Option<StereoChoice>,
+    /// EnCodec target bandwidth in kbps (sets the codebook count; default 6).
+    #[arg(short, long)]
+    bandwidth: Option<f64>,
+    /// Recommended EnCodec 48 kHz music settings; implies encodec-48k. Explicit flags below
+    /// override them.
     #[arg(long, value_enum)]
     preset: Option<Preset>,
-    /// Codebooks per frame, instead of the count `--bandwidth` implies.
+    /// Codebooks per frame. HQ: per channel (the mid for mid/side), 1 to 9, default 9. EnCodec:
+    /// instead of the count `--bandwidth` implies.
     #[arg(long)]
     codebooks: Option<usize>,
+    /// HQ mid/side: codebooks per frame of the side (default: the same as `--codebooks`).
+    #[arg(long)]
+    side_codebooks: Option<usize>,
     /// Segment stride in samples (48 kHz model: 24000..=48000; EnCodec's own 47520).
     #[arg(long)]
     stride: Option<usize>,
@@ -166,7 +279,7 @@ struct EncodeOptions {
     /// cx2 table to code with, instead of the model's default in the tables directory.
     #[arg(long)]
     table: Option<PathBuf>,
-    /// Segments per Ogg page (24 kHz model: frames); default from the bitrate.
+    /// Segments per Ogg page (encodec-24k and HQ: frames); default from the bitrate (HQ: 80).
     #[arg(long, hide = true)]
     page_length: Option<usize>,
     /// Leave the length out of the header, as a streaming encoder would.
@@ -203,15 +316,15 @@ fn main() -> Result<()> {
             output,
             options,
         } => {
-            let (model, info, bytes) = encode_file(&weights(), &tables(), input, options, false)?;
-            std::fs::write(output, &bytes)
+            let encoded = encode_file(&weights(), &tables(), input, options, false)?;
+            let bytes = encoded.bytes();
+            std::fs::write(output, bytes)
                 .with_context(|| format!("writing {}", output.display()))?;
-            let seconds = config_seconds(&model, info.playable_samples());
             eprintln!(
                 "wrote {} ({} bytes, {:.2} kbps)",
                 output.display(),
                 bytes.len(),
-                kbps(bytes.len(), seconds)
+                kbps(bytes.len(), encoded.seconds())
             );
         }
         Command::Decode {
@@ -221,28 +334,45 @@ fn main() -> Result<()> {
         } => {
             let bytes =
                 std::fs::read(input).with_context(|| format!("reading {}", input.display()))?;
-            let stream = Stream::parse(&bytes)?;
-            let table = find_table(&tables(), options.table.as_deref(), &stream.info)?;
-            // Only the decoder and the codebooks this file uses are read.
-            let parts = LoadOptions::decoder_only(Some(stream.info.num_codebooks));
-            let model = load(&weights(), stream.info.model, parts)?;
-            decode_to_wav(&model, &table, &stream, output, options)?;
+            match pico::codec_of(&bytes)? {
+                Codec::Dac44 => {
+                    ensure!(options.table.is_none(), "HQ files have no cx2 table");
+                    let audio = hq::decode(&weights(), &hq::parse(&bytes)?)?;
+                    write_wav(output, &audio, options)?;
+                }
+                Codec::Encodec(_) => {
+                    let stream = Stream::parse(&bytes)?;
+                    let table = find_table(&tables(), options.table.as_deref(), &stream.info)?;
+                    // Only the decoder and the codebooks this file uses are read.
+                    let parts = LoadOptions::decoder_only(Some(stream.info.num_codebooks));
+                    let model = load(&weights(), stream.info.model, parts)?;
+                    decode_to_wav(&model, &table, &stream, output, options)?;
+                }
+            }
         }
         Command::Roundtrip {
             input,
             output,
             encode,
             wav,
-        } => {
-            let (model, _, bytes) = encode_file(&weights(), &tables(), input, encode, true)?;
-            let stream = Stream::parse(&bytes)?;
-            let table = find_table(&tables(), wav.table.as_deref(), &stream.info)?;
-            decode_to_wav(&model, &table, &stream, output, wav)?;
-        }
+        } => match encode_file(&weights(), &tables(), input, encode, true)? {
+            Encoded::Hq { bytes, .. } => {
+                let audio = hq::decode(&weights(), &hq::parse(&bytes)?)?;
+                write_wav(output, &audio, wav)?;
+            }
+            Encoded::Encodec { model, bytes, .. } => {
+                let stream = Stream::parse(&bytes)?;
+                let table = find_table(&tables(), wav.table.as_deref(), &stream.info)?;
+                decode_to_wav(&model, &table, &stream, output, wav)?;
+            }
+        },
         Command::Info { input } => {
             let bytes =
                 std::fs::read(input).with_context(|| format!("reading {}", input.display()))?;
-            print_info(&Stream::parse(&bytes)?, bytes.len())?;
+            match pico::codec_of(&bytes)? {
+                Codec::Dac44 => hq::print_info(&hq::parse(&bytes)?, bytes.len()),
+                Codec::Encodec(_) => print_info(&Stream::parse(&bytes)?, bytes.len())?,
+            }
         }
         Command::Dev(command) => dev::run(command, &tables())?,
     }
@@ -290,13 +420,71 @@ fn print_info(stream: &Stream, size: usize) -> Result<()> {
     Ok(())
 }
 
+/// An encoded file.
+enum Encoded {
+    /// An HQ stream.
+    Hq { info: pico::DacInfo, bytes: Vec<u8> },
+    /// An EnCodec stream, with the model that coded it.
+    Encodec {
+        model: Box<Encodec>,
+        info: Info,
+        bytes: Vec<u8>,
+    },
+}
+
+impl Encoded {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Hq { bytes, .. } | Self::Encodec { bytes, .. } => bytes,
+        }
+    }
+
+    /// Playable seconds.
+    fn seconds(&self) -> f64 {
+        match self {
+            Self::Hq { info, .. } => {
+                picotone::config::to_f64(info.playable_samples())
+                    / f64::from(picotone::dac::SAMPLE_RATE)
+            }
+            Self::Encodec { model, info, .. } => config_seconds(model, info.playable_samples()),
+        }
+    }
+}
+
+fn encode_hq(
+    weights: &Path,
+    source: &Audio,
+    options: &EncodeOptions,
+    channels: usize,
+    auto_mono: bool,
+) -> Result<Encoded> {
+    let codebooks = options.codebooks.unwrap_or(picotone::dac::CODEBOOKS);
+    let settings = hq::Settings {
+        channels,
+        auto_mono,
+        stereo: match options.stereo {
+            Some(StereoChoice::Ms) => hq::StereoMode::MidSide,
+            Some(StereoChoice::Lr) => hq::StereoMode::LeftRight,
+            Some(StereoChoice::Pick) | None => hq::StereoMode::Pick,
+        },
+        codebooks,
+        side_codebooks: options.side_codebooks.unwrap_or(codebooks),
+        looped: options.looped,
+        tags: &options.tags,
+        page_length: options.page_length,
+        no_length: options.no_length,
+    };
+    let (info, bytes) = hq::encode(weights, source, &settings)?;
+    Ok(Encoded::Hq { info, bytes })
+}
+
 fn encode_file(
     weights: &Path,
     tables: &Path,
     input: &Path,
     options: &EncodeOptions,
     with_decoder: bool,
-) -> Result<(Encodec, Info, Vec<u8>)> {
+) -> Result<Encoded> {
     let source = audio::read(input)?;
     eprintln!(
         "read {}: {} Hz, {} channel(s), {:.2} s",
@@ -305,15 +493,16 @@ fn encode_file(
         source.channels.len(),
         source.seconds()
     );
-    let kind = match options.model {
-        ModelChoice::Stereo => ModelKind::Stereo48k,
-        ModelChoice::Auto if options.preset.is_some() => ModelKind::Stereo48k,
-        ModelChoice::Auto if source.channels.len() >= 2 => ModelKind::Stereo48k,
-        ModelChoice::Mono | ModelChoice::Auto => ModelKind::Mono24k,
-    };
     for tag in &options.tags {
         ensure!(tag.contains('='), "--tag {tag} is not KEY=value");
     }
+    let kind = match plan(options, source.channels.len())? {
+        Plan::Encodec(kind) => kind,
+        Plan::Hq {
+            channels,
+            auto_mono,
+        } => return encode_hq(weights, &source, options, channels, auto_mono),
+    };
     let table_path = options
         .table
         .clone()
@@ -379,7 +568,11 @@ fn encode_file(
         if options.looped { ", loop" } else { "" },
         start.elapsed().as_secs_f64()
     );
-    Ok((model, info, bytes))
+    Ok(Encoded::Encodec {
+        model: Box::new(model),
+        info,
+        bytes,
+    })
 }
 
 /// Resolves the preset and explicit flags into encoder settings.
@@ -397,7 +590,7 @@ fn encode_params(
     }
     let num_codebooks = match options.codebooks.or_else(|| preset.map(|(n, ..)| n)) {
         Some(n) => n,
-        None => config.codebooks_for_bandwidth(options.bandwidth)?,
+        None => config.codebooks_for_bandwidth(options.bandwidth.unwrap_or(DEFAULT_BANDWIDTH))?,
     };
     let total = config.total_codebooks()?;
     ensure!(
@@ -449,12 +642,16 @@ fn decode_to_wav(
         model.name(),
         start.elapsed().as_secs_f64()
     );
+    write_wav(output, &out, options)
+}
+
+fn write_wav(output: &Path, out: &Audio, options: &WavOptions) -> Result<()> {
     let format = if options.float {
         WavFormat::Float32
     } else {
         WavFormat::Pcm16
     };
-    audio::write_wav(output, &out, format, options.rescale)?;
+    audio::write_wav(output, out, format, options.rescale)?;
     eprintln!("wrote {}", output.display());
     Ok(())
 }
@@ -576,7 +773,8 @@ fn weights_dir(explicit: Option<&Path>) -> PathBuf {
     }
     let marker = ModelKind::Mono24k.files(Path::new("")).1;
     let found = data_candidates("weights").into_iter().find(|d| {
-        d.join(&marker).is_file()
+        d.join(hq::DECODER_FILE).is_file()
+            || d.join(&marker).is_file()
             || d.join(ModelKind::Stereo48k.files(Path::new("")).1)
                 .is_file()
     });

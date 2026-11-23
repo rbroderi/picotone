@@ -1,7 +1,21 @@
 # HQ mode: integrating the DAC student into picotone
 
-Status: plan, nothing built (2026-11-21). The full run (`runs/w512_tiers`, `--n-q 4,5,6,7,9`) is still
-training; this plan starts from its `ckpt_best.pt`.
+Status (2026-11-23): M0, M1, M2 and M6 are built; `picotone encode` defaults to HQ. The shipped decoder is the
+45 h speech fine-tune at step 172,500 (`weights/dac44_student.*`). Next: M3 (wasm and gaim), then M4.
+
+- **M1:** `src/dac.rs`, `DacDecoder`; parity with PyTorch (`ref_decode.py`) passes.
+- **M6 (done before M2's Python tool was needed):** `DacEncoder` in `src/dac.rs`, exported by
+  `export_encoder.py`; `ref_encode.py` checks the latent (relative error under 1e-4) and codebook 0 (over
+  99.5% agreement), whole and in 16-frame chunks. About 4x real time per mono channel on this laptop, so about
+  2x for stereo. No `encode_dac.py` or `picotone pack` was needed.
+- **M2:** the format is in FORMAT.md ("HQ streams"), `src/pico/dac.rs`. The CLI follows the design below
+  (`src/main.rs`, `src/hq.rs`, `src/stereo.rs`). `ref_stereo.py` checks `picotone encode` + `decode`
+  against the PyTorch pipeline for left/right 9+9, mid/side 9+9 and 7+3: they agree to under 1e-6.
+  **One change from the plan:** the header hashes DAC's quantiser codebooks, not the decoder's weight file.
+  The codes depend only on the encoder and quantiser, so any decoder of DAC's codes (a later student, or DAC's
+  own) plays existing files, and retraining the student needs no re-encode.
+- Not done yet in M2: the two TypeScript header parsers, and the 9-frame wrapped-latent loop decode (loops
+  use EnCodec's `wrap_loop` padding today, which works but costs 200 ms of extra coded audio per loop).
 
 ## Why
 

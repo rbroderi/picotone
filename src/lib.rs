@@ -27,6 +27,7 @@ pub mod pico;
 mod pool;
 pub mod prof;
 pub mod scale;
+pub mod stereo;
 pub mod weights;
 
 use std::path::{Path, PathBuf};

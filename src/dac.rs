@@ -49,6 +49,20 @@ pub const CONTEXT: usize = 12;
 /// Latent frames per chunk, before context (about 3 s).
 pub const CHUNK: usize = 256;
 
+/// FNV-1a 64 of codebook values as little-endian f32, `[codebook][entry][value]`.
+///
+/// A stream stores this hash of the codebooks its codes index. It names DAC's
+/// quantiser, not a decoder, so any decoder of DAC codes plays the stream; the
+/// encoder and decoder files each carry a copy of the codebooks.
+fn codebook_hash<'a>(books: impl IntoIterator<Item = &'a f32>) -> u64 {
+    books
+        .into_iter()
+        .flat_map(|v| v.to_le_bytes())
+        .fold(0xcbf2_9ce4_8422_2325, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+}
+
 /// Snake's per-channel parameters.
 #[derive(Debug, Clone)]
 struct Snake {
@@ -291,6 +305,13 @@ impl DacDecoder {
     #[must_use]
     pub const fn width(&self) -> usize {
         self.width
+    }
+
+    /// Hash of the codebooks the decoder reads codes with; a stream must name
+    /// the same.
+    #[must_use]
+    pub fn codebook_hash(&self) -> u64 {
+        codebook_hash(&self.codebooks)
     }
 
     /// The folded input of frames `start..end`: `[frames, 81]`.
@@ -562,6 +583,12 @@ impl DacEncoder {
         let w = Weights::load(path)?;
         Self::from_weights(&w)
             .with_context(|| format!("building the encoder from {}", path.display()))
+    }
+
+    /// Hash of the codebooks the codes index (the same as the decoder's).
+    #[must_use]
+    pub fn codebook_hash(&self) -> u64 {
+        codebook_hash(self.quantizers.iter().flat_map(|q| &q.codebook))
     }
 
     /// The latent of one span of samples (a whole number of frames) as if it

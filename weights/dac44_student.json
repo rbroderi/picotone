@@ -1,0 +1,26 @@
+{
+ "model": "dac44-student",
+ "width": 512,
+ "rates": [
+  8,
+  8,
+  4,
+  2
+ ],
+ "sample_rate": 44100,
+ "hop": 512,
+ "codebooks": 9,
+ "codebook_size": 1024,
+ "codebook_dim": 8,
+ "input_per_codebook": 9,
+ "receptive_frames": 9,
+ "params": 5156129,
+ "step": 172500,
+ "licences": "sharealike",
+ "teacher": "descript-audio-codec 1.0.0, 44khz 8kbps weights (MIT, Copyright (c) 2023-present, Descript)",
+ "source_sha256": {
+  "student": "1d680093188317c84d92d8ebd66f81014b6ba855bbd04943dcc2c61b9087cc8e",
+  "dac": "a88eed82a7024ccc1facdb1e605c4c2f99281c8118c22c9895ffa846d8fb61aa"
+ },
+ "fold_max_abs_dev": 3.5762786865234375e-07
+}

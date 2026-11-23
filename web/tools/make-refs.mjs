@@ -136,7 +136,7 @@ for (const [name, model, rate, channels, seconds, bw, seed, extra, source] of CA
   if (force || stale || !existsSync(ref) || !existsSync(pico)) {
     if (source) copyFileSync(source, wav);
     else writeWav16(wav, rate, synth(rate, seconds, channels, seed));
-    execFileSync(exe, ['--weights', weights, 'encode', wav, pico, '-m', model, ...encodeArgs], { stdio: 'inherit' });
+    execFileSync(exe, ['--weights', weights, 'encode', wav, pico, '--model', model === 'mono' ? 'encodec-24k' : 'encodec-48k', ...encodeArgs], { stdio: 'inherit' });
     writeFileSync(stamp, encodeArgs.join(' '));
     execFileSync(exe, ['--weights', weights, 'decode', pico, ref, '--float'], { stdio: 'inherit' });
     console.log(`made ${name}`);

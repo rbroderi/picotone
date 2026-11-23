@@ -1,6 +1,7 @@
 # The `.pico` format
 
-How picotone stores EnCodec codes. A `.pico` file is plain Ogg (RFC 3533) with one logical stream, and its
+How picotone stores codec codes: EnCodec's (models 0 and 1, below) and the HQ codec's (model 2, in
+[HQ streams](#hq-streams-model-2)). A `.pico` file is plain Ogg (RFC 3533) with one logical stream, and its
 mapping follows Ogg Opus (RFC 7845) wherever it can: pre-skip, granule positions, an end trim through the final
 granule position, and Vorbis-style comments. The implementation is `src/pico.rs`; `tests/pico.rs` covers round
 trips, seeking, loops, streams without a length, damage and an independent Ogg reader (the `ogg` crate, and
@@ -33,7 +34,7 @@ end-of-stream flag. Header pages have granule position 0.
 | 1 | version | 1 |
 | varint | fixed length | bytes in the fixed part that follows |
 | | **fixed part** | |
-| 1 | model | 0 = `encodec_24khz` (24 kHz mono), 1 = `encodec_48khz` (48 kHz stereo) |
+| 1 | model | 0 = `encodec_24khz` (24 kHz mono), 1 = `encodec_48khz` (48 kHz stereo), 2 = HQ (its own fixed part, [below](#hq-streams-model-2)) |
 | 1 | scheme | 2 = `cx2` |
 | 8 | table hash | the cx2 table (`.ecxm`) the stream was coded with: FNV-1a 64 of the table file |
 | 1 | codebooks | codes per frame (1 to 64) |
@@ -155,6 +156,57 @@ length in its header needs an intact last page; a player that streams can instea
 - Lost pages are inferred from gaps in page sequence numbers, but never more of them than the file's size allows
   (27 bytes per page).
 - Comment counts and lengths larger than the packet are rejected.
+
+## HQ streams (model 2)
+
+The HQ codec (`dac44-student`, the encoder's default) codes 44.1 kHz audio with DAC 44 kHz's encoder and
+residual quantiser: one frame per 512 samples, up to 9 codebooks of 1024 entries per frame, a lower codebook
+count being a prefix of the full one. picotone decodes it with a distilled student of DAC's decoder. Ogg
+framing, the comment header, extensions (TLVs), pre-skip, granules, damage handling and loops work as for
+EnCodec; only the fixed part and the audio packets differ. The implementation is `src/pico/dac.rs`.
+
+### Fixed part
+
+| size | field | meaning |
+|---|---|---|
+| 1 | model | 2 |
+| 1 | scheme | 1 = raw: 10 bits per code, no entropy coding |
+| 8 | codebook hash | FNV-1a 64 over DAC's 9 x 1024 x 8 quantiser codebooks (`f32`, little-endian, stage by stage) |
+| 1 | layout | 0 = mono, 1 = left/right, 2 = mid/side (M = (L+R)/2, S = (L-R)/2; L = M+S, R = M-S) |
+| 1 per channel | codebooks | codes per frame for each coded channel (1 to 9); for mid/side, the mid's then the side's |
+| 1 | flags | bit 0: loop; bit 1: a comment header follows; bit 2: the length is stored. Other bits must be 0 |
+| varint | pre-skip | decoded samples a player drops at the start |
+| varint | page length | frames per page (the encoder writes 80, about 0.93 s); 0 = the stream is one page |
+| varint | playable length | samples after trimming; only with flag bit 2 |
+| varint | end trim | decoded samples after the playable end that are padding; only with flag bit 2 |
+
+The hash names the code space, not a decoder: any decoder of DAC 44 kHz's codes (the student, a later student,
+or DAC's own decoder) can play the stream, and a decoder must refuse a stream whose hash differs from its own
+codebooks.
+
+### Audio packets
+
+| size | field |
+|---|---|
+| varint | end trim: **only in the last packet, and only when the length is not in the header** |
+| rest | the page's codes: channel 0's frames, then channel 1's; within a frame, codebook 0 first |
+
+Each code is 10 bits, packed low bits first into one bit stream per page that is padded with zeros to a whole
+byte. A page holds `page length` frames (the last may hold fewer), so its size in bytes is fixed by the header,
+and a reader refuses a packet of any other size.
+
+### Length and granules
+
+The coded audio is `ceil(samples / 512)` frames; the encoder zero-pads the last frame, and that padding is
+implicit (it is not part of the end trim). A page's granule position is `frames so far x 512`, capped at the end
+of the audio. Every page decodes on its own (the codes need no state), but the decoder is a convolution
+network, so a player seeking to a page decodes from a few frames earlier for an exact result.
+
+### Stereo
+
+The encoder codes a stereo input as left/right or mid/side, whichever scores better (log-mel distance, on up to
+4 loud 3 s excerpts), unless `--stereo` says which. A stereo input whose side stays more than 40 dB under its
+mid is coded as mono with `--channel-format auto`.
 
 ## Enhancement layers (`.picol`), reserved
 

@@ -49,13 +49,21 @@ with Meta's licence notice in `weights/EnCodec-MIT.txt`). To use another folder,
 when `PICOTONE_WEIGHTS` is not set). The cx2 tables are read from `models/` (or `--tables` /
 `PICOTONE_TABLES`).
 
-Encode music for the game (48 kHz stereo):
+The HQ codec's weights sit beside them: `dac44_encoder.safetensors` (DAC 44 kHz's encoder and quantiser) and
+`dac44_student.safetensors` (picotone's distilled decoder), with DAC's licence in `weights/DAC-MIT.txt` and the
+decoder's training-data notice and credits in `weights/dac44_student.NOTICE.txt` and `.credits.jsonl`.
+
+Encode with the HQ codec (the default: 44.1 kHz, about 8 kbps per channel at its full 9 codebooks), or with
+EnCodec (`--fast`, or a preset):
 
 ```powershell
+target\release\picotone encode song.flac song.pico
 target\release\picotone encode song.flac song.pico --preset music24
 target\release\picotone decode song.pico song.wav
 target\release\picotone info song.pico
 ```
+
+The browser decoders (`web/`, `wasm/`) play EnCodec files only for now; HQ support there is in progress.
 
 Encode a seamless loop, so the end joins the start with no click:
 
@@ -73,7 +81,8 @@ to the model automatically.
 | `music24` | 15 | 24.1 kbps | about 17.5 kbps | Background music (recommended) |
 | `music12` | 8 | 12.9 kbps | about 8 kbps | Music where size matters more |
 | `music6` | 4 | 6.4 kbps | about 3.2–4 kbps | Ambience, long beds; clearly lower quality |
-| `-m mono -b 6` | 8 | 6 kbps | | Speech and sound effects (24 kHz mono model) |
+| `--fast --channel-format mono -b 6` | 8 | 6 kbps | | Speech and sound effects (24 kHz mono model) |
+| (none: HQ) | 9 per channel | 7.75 kbps per channel | about 8 / 16 kbps mono / stereo | HQ 44.1 kHz; no cx2 yet |
 
 "Typical file" is the whole `.pico` file (headers and Ogg framing included) for two 120 s music clips.
 
@@ -85,11 +94,15 @@ search in the quantiser, which gives slightly better quality at no decode cost.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `-m, --model` | `auto` | `mono` (24 kHz) or `stereo` (48 kHz). `auto` picks stereo for stereo input or any preset |
-| `-b, --bandwidth` | `6` | Target kbps; sets the number of codebooks |
-| `--preset` | none | `music24`, `music12` or `music6`; the flags below override it |
-| `--codebooks` | from `-b` | Codebooks per frame, set directly |
-| `--stride` | 47520 | Samples between segment starts (48 kHz model, 24000–48000) |
+| `--fast` | off | EnCodec instead of HQ: `encodec-24k` for mono, `encodec-48k` for stereo |
+| `--model` | HQ | The exact model: `dac44-student`, `encodec-48k` or `encodec-24k`; overrides `--fast` and presets |
+| `--channel-format` | `auto` | `auto` (follow the input), `mono` or `stereo`. With HQ, `auto` codes a stereo input whose side is over 40 dB under its mid as mono. A model that can't give the format is an error |
+| `--stereo` | `pick` | HQ only: `lr`, `ms` (mid/side), or `pick` the better on sampled excerpts |
+| `--codebooks` | HQ: 9; EnCodec: from `-b` | Codebooks per frame (HQ: per channel, 1–9, 0.86 kbps each) |
+| `--side-codebooks` | `--codebooks` | HQ mid/side: codebooks for the side |
+| `-b, --bandwidth` | `6` | EnCodec only: target kbps; sets the number of codebooks |
+| `--preset` | none | EnCodec only: `music24`, `music12` or `music6` (implies `encodec-48k`); the flags below override it |
+| `--stride` | 47520 | EnCodec 48 kHz only (as are `--crossfade`, `--beam` and `--table`): samples between segment starts, 24000–48000 |
 | `--crossfade` | `triangle` | `triangle` (EnCodec's) or `edge` (skips the damaged segment edges; helps with short overlaps) |
 | `--beam` | `8` | Quantiser beam width. `--beam 1` gives the reference implementation's greedy codes |
 | `--loop` | off | Encode as a gapless loop |

@@ -295,7 +295,10 @@ Do not pad loops by hand any more. Short effects need nothing.
 | `--preset music24` | about 17.5 kbps (260 KB) | background music |
 | `--preset music12` | about 8 kbps (120 KB) | music where size matters |
 | `--preset music6` | about 3.2–4 kbps (55 KB) | ambience beds |
-| `-m mono -b 6` | | effects, speech (24 kHz mono) |
+| `--fast --channel-format mono -b 6` | | effects, speech (24 kHz mono) |
+
+`picotone encode` with no preset or `--fast` now writes the HQ codec (44.1 kHz, model 2), which this
+decoder cannot play yet. Until it can, encode gaim's assets with a preset or `--fast`.
 
 ## 5. Performance and caveats
 

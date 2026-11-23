@@ -1,0 +1,578 @@
+//! HQ streams (model 2, `dac44`): DAC 44 kHz codes, 10 bits each, bit-packed
+//! one page at a time, in the same Ogg framing as the EnCodec streams.
+//!
+//! Each coded channel is an independent mono stream of DAC frames (512
+//! samples at 44.1 kHz). A page holds the same frame range of every coded
+//! channel: channel 0's frames, then channel 1's, each frame codebook 0
+//! first. Stereo is coded as left/right or as mid/side, `(L + R) / 2` and
+//! `(L - R) / 2`, chosen per file; the two may use different codebook counts.
+
+use std::ops::Range;
+
+use anyhow::{Context as _, Result, bail, ensure};
+
+use super::{
+    Extent, Fields, HEAD_COMMENTS, HEAD_LENGTH, HEAD_LOOP, PageWriter, SERIAL, head_from_fixed,
+    packets, parse_tags, put_size, read_audio, read_extensions, read_length, split_head,
+    tags_packet,
+};
+use crate::dac::{CODEBOOK_SIZE, CODEBOOKS, HOP};
+
+/// Model byte of the HQ codec.
+pub(super) const MODEL_DAC44: u8 = 2;
+/// Scheme byte of raw codes: 10 bits each, bit-packed.
+const SCHEME_RAW: u8 = 1;
+/// Bits per code.
+const BITS: u32 = 10;
+/// Flags an HQ stream may set (no cross-fade: it is not segmented).
+const DAC_KNOWN: u8 = HEAD_LOOP | HEAD_COMMENTS | HEAD_LENGTH;
+/// Frames per page the encoder uses: 80 frames, 40,960 samples, about 0.93 s.
+pub const DEFAULT_PAGE_FRAMES: usize = 80;
+
+/// How a stream's coded channels make up its output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelLayout {
+    /// One channel.
+    Mono,
+    /// Two channels, left then right.
+    LeftRight,
+    /// Two channels, mid `(L + R) / 2` then side `(L - R) / 2`.
+    MidSide,
+}
+
+impl ChannelLayout {
+    /// Coded (and output) channels.
+    #[must_use]
+    pub const fn channels(self) -> usize {
+        match self {
+            Self::Mono => 1,
+            Self::LeftRight | Self::MidSide => 2,
+        }
+    }
+
+    /// Name for messages: `mono`, `left/right` or `mid/side`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Mono => "mono",
+            Self::LeftRight => "left/right",
+            Self::MidSide => "mid/side",
+        }
+    }
+
+    const fn code(self) -> u8 {
+        match self {
+            Self::Mono => 0,
+            Self::LeftRight => 1,
+            Self::MidSide => 2,
+        }
+    }
+
+    fn from_code(code: u8) -> Result<Self> {
+        match code {
+            0 => Ok(Self::Mono),
+            1 => Ok(Self::LeftRight),
+            2 => Ok(Self::MidSide),
+            other => bail!("unknown channel layout {other}"),
+        }
+    }
+}
+
+/// Parameters of an HQ stream, as stored in its identification header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DacInfo {
+    /// FNV-1a 64 of the DAC codebooks the codes index
+    /// ([`crate::dac::DacDecoder::codebook_hash`]).
+    pub codebook_hash: u64,
+    /// How the coded channels make up the output.
+    pub layout: ChannelLayout,
+    /// Codebooks per frame of each coded channel, 1 to 9.
+    pub codebooks: Vec<usize>,
+    /// Whether the trimmed audio loops seamlessly.
+    pub looped: bool,
+    /// Decoded samples to drop at the start.
+    pub pre_skip: usize,
+    /// Frames per page; zero means one page.
+    pub page_length: usize,
+    /// Coded samples per channel, the pre-skip and end trim included. The
+    /// last frame is padded to 512 samples; a player drops the padding along
+    /// with everything else past the final granule.
+    pub audio_length: usize,
+    /// Coded samples to drop at the end (a loop's post-roll).
+    pub end_trim: usize,
+    /// Whether the length is in the identification header.
+    pub length_in_header: bool,
+    /// Playback gain in dB, Q7.8 fixed point.
+    pub output_gain: i16,
+    /// `KEY=value` comments.
+    pub tags: Vec<String>,
+}
+
+impl DacInfo {
+    /// Frames per coded channel.
+    #[must_use]
+    pub const fn frames(&self) -> usize {
+        self.audio_length.div_ceil(HOP)
+    }
+
+    /// Samples per channel a player outputs.
+    #[must_use]
+    pub const fn playable_samples(&self) -> usize {
+        self.audio_length
+            .saturating_sub(self.pre_skip)
+            .saturating_sub(self.end_trim)
+    }
+
+    /// The frame range of each page.
+    #[must_use]
+    pub fn pages(&self) -> Vec<Range<usize>> {
+        let frames = self.frames();
+        let per = if self.page_length == 0 {
+            frames.max(1)
+        } else {
+            self.page_length
+        };
+        (0..frames)
+            .step_by(per)
+            .map(|start| start..(start + per).min(frames))
+            .collect()
+    }
+
+    /// Bits per frame, over all coded channels.
+    fn frame_bits(&self) -> usize {
+        self.codebooks.iter().sum::<usize>() * BITS as usize
+    }
+
+    fn check(&self) -> Result<()> {
+        ensure!(
+            self.codebooks.len() == self.layout.channels(),
+            "{} codebook counts for {} channels",
+            self.codebooks.len(),
+            self.layout.channels()
+        );
+        for &n in &self.codebooks {
+            ensure!(
+                (1..=CODEBOOKS).contains(&n),
+                "{n} codebooks; the HQ codec has 1 to {CODEBOOKS}"
+            );
+        }
+        let trims = self.pre_skip.saturating_add(self.end_trim);
+        ensure!(
+            trims < self.audio_length || (trims == 0 && self.audio_length == 0),
+            "pre-skip and end trim ({trims} samples) leave none of the {} samples",
+            self.audio_length
+        );
+        Ok(())
+    }
+
+    /// Final granule of each page.
+    fn granules(&self, spans: &[Range<usize>]) -> Vec<u64> {
+        let end = self.audio_length - self.end_trim;
+        spans
+            .iter()
+            .enumerate()
+            .map(|(index, span)| {
+                let granule = if index + 1 == spans.len() {
+                    end
+                } else {
+                    (span.end * HOP).min(end)
+                };
+                u64::try_from(granule).unwrap_or(u64::MAX)
+            })
+            .collect()
+    }
+}
+
+fn head_packet(info: &DacInfo) -> Result<Vec<u8>> {
+    let mut fixed = vec![MODEL_DAC44, SCHEME_RAW];
+    fixed.extend_from_slice(&info.codebook_hash.to_le_bytes());
+    fixed.push(info.layout.code());
+    for &n in &info.codebooks {
+        fixed.push(u8::try_from(n)?);
+    }
+    let mut flags = 0;
+    if info.looped {
+        flags |= HEAD_LOOP;
+    }
+    if !info.tags.is_empty() {
+        flags |= HEAD_COMMENTS;
+    }
+    if info.length_in_header {
+        flags |= HEAD_LENGTH;
+    }
+    fixed.push(flags);
+    put_size(&mut fixed, info.pre_skip)?;
+    put_size(&mut fixed, info.page_length)?;
+    if info.length_in_header {
+        put_size(&mut fixed, info.playable_samples())?;
+        put_size(&mut fixed, info.end_trim)?;
+    }
+    head_from_fixed(&fixed, info.output_gain)
+}
+
+/// Parses an HQ identification header; returns it and whether comments follow.
+fn parse_head(packet: &[u8]) -> Result<(DacInfo, bool)> {
+    let (fixed, mut f) = split_head(packet)?;
+    let mut h = Fields::new(fixed);
+    ensure!(h.u8()? == MODEL_DAC44, "not an HQ (dac44) stream");
+    let scheme = h.u8()?;
+    ensure!(scheme == SCHEME_RAW, "unknown HQ code scheme {scheme}");
+    let mut hash = [0; 8];
+    hash.copy_from_slice(h.take(8)?);
+    let layout = ChannelLayout::from_code(h.u8()?)?;
+    let codebooks = (0..layout.channels())
+        .map(|_| h.u8().map(usize::from))
+        .collect::<Result<Vec<_>>>()?;
+    let flags = h.u8()?;
+    ensure!(flags & !DAC_KNOWN == 0, "unknown header flags {flags:#04x}");
+    let pre_skip = h.size()?;
+    let page_length = h.size()?;
+    let length_in_header = flags & HEAD_LENGTH != 0;
+    let (audio_length, end_trim) = if length_in_header {
+        read_length(&mut h, pre_skip)?
+    } else {
+        (0, 0)
+    };
+    let output_gain = read_extensions(&mut f)?;
+    let info = DacInfo {
+        codebook_hash: u64::from_le_bytes(hash),
+        layout,
+        codebooks,
+        looped: flags & HEAD_LOOP != 0,
+        pre_skip,
+        page_length,
+        audio_length,
+        end_trim,
+        length_in_header,
+        output_gain,
+        tags: Vec::new(),
+    };
+    for &n in &info.codebooks {
+        ensure!(
+            (1..=CODEBOOKS).contains(&n),
+            "implausible codebook count {n}"
+        );
+    }
+    Ok((info, flags & HEAD_COMMENTS != 0))
+}
+
+/// Packs `values` codes of `BITS` bits, low bits first.
+struct BitWriter {
+    out: Vec<u8>,
+    acc: u32,
+    bits: u32,
+}
+
+impl BitWriter {
+    fn put(&mut self, code: u16) {
+        self.acc |= u32::from(code) << self.bits;
+        self.bits += BITS;
+        while self.bits >= 8 {
+            self.out.push(self.acc.to_le_bytes()[0]);
+            self.acc >>= 8;
+            self.bits -= 8;
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.bits > 0 {
+            self.out.push(self.acc.to_le_bytes()[0]);
+        }
+        self.out
+    }
+}
+
+/// Writes an HQ stream. `channels` holds each coded channel's codes,
+/// `[frame][codebook]` row-major, with `info.codebooks[c]` codes per frame
+/// and [`DacInfo::frames`] frames.
+///
+/// # Errors
+/// Fails when the codes do not match `info`.
+pub fn write_dac(info: &DacInfo, channels: &[Vec<u16>]) -> Result<Vec<u8>> {
+    info.check()?;
+    let frames = info.frames();
+    ensure!(
+        channels.len() == info.layout.channels(),
+        "{} coded channels given, the layout has {}",
+        channels.len(),
+        info.layout.channels()
+    );
+    for (codes, &n) in channels.iter().zip(&info.codebooks) {
+        ensure!(
+            codes.len() == frames * n,
+            "a channel has {} codes, expected {frames} frames x {n}",
+            codes.len()
+        );
+        ensure!(
+            codes.iter().all(|&c| usize::from(c) < CODEBOOK_SIZE),
+            "a code is out of range"
+        );
+    }
+    let pages = info.pages();
+    let mut writer = PageWriter {
+        out: Vec::new(),
+        serial: SERIAL,
+        sequence: 0,
+    };
+    let with_tags = !info.tags.is_empty();
+    writer.packet(&head_packet(info)?, 0, true, pages.is_empty() && !with_tags);
+    if with_tags {
+        writer.packet(&tags_packet(&info.tags)?, 0, false, pages.is_empty());
+    }
+    let granules = info.granules(&pages);
+    for (index, (span, &granule)) in pages.iter().zip(&granules).enumerate() {
+        let last = index + 1 == pages.len();
+        let mut bits = BitWriter {
+            out: Vec::with_capacity((span.len() * info.frame_bits()).div_ceil(8) + 4),
+            acc: 0,
+            bits: 0,
+        };
+        if last && !info.length_in_header {
+            put_size(&mut bits.out, info.end_trim)?;
+        }
+        for (codes, &n) in channels.iter().zip(&info.codebooks) {
+            for &code in &codes[span.start * n..span.end * n] {
+                bits.put(code);
+            }
+        }
+        writer.packet(&bits.finish(), granule, false, last);
+    }
+    Ok(writer.out)
+}
+
+/// A parsed HQ stream.
+#[derive(Debug)]
+pub struct DacStream {
+    /// Identification header and comments, with the length filled in.
+    pub info: DacInfo,
+    /// Frames of each page.
+    pub spans: Vec<Range<usize>>,
+    /// Per page: the packed codes, or `None` when the page was damaged or missing.
+    pub pages: Vec<Option<Vec<u8>>>,
+    /// Per page: decoded samples that are final once it is decoded.
+    pub granules: Vec<u64>,
+}
+
+impl DacStream {
+    /// Parses a stream, verifying every page's CRC.
+    ///
+    /// # Errors
+    /// Fails when the headers or the length of the stream cannot be read.
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        let mut found = packets(bytes).into_iter();
+        let head = found.next().and_then(|p| p.data);
+        let (mut info, comments) =
+            parse_head(&head.context("identification header is missing or damaged")?)?;
+        if comments {
+            let tags = found.next().and_then(|p| p.data);
+            info.tags = parse_tags(&tags.context("comment header is missing or damaged")?)?;
+        }
+        let mut length = Extent {
+            in_header: info.length_in_header,
+            audio_length: info.audio_length,
+            end_trim: info.end_trim,
+        };
+        let mut chunks = read_audio(&found.collect::<Vec<_>>(), bytes, &mut length)?;
+        info.audio_length = length.audio_length;
+        info.end_trim = length.end_trim;
+        info.check()?;
+        // Every frame costs at least 10 bits, so an honest file has at least
+        // one byte per frame; the bound keeps damaged lengths from sizing
+        // allocations.
+        ensure!(
+            info.frames() <= bytes.len(),
+            "stream length does not match its size"
+        );
+        let spans = info.pages();
+        ensure!(
+            chunks.len() <= spans.len(),
+            "stream has more pages than its length allows"
+        );
+        chunks.resize(spans.len(), None);
+        let granules = info.granules(&spans);
+        Ok(Self {
+            info,
+            spans,
+            pages: chunks,
+            granules,
+        })
+    }
+
+    /// Samples per channel a player outputs.
+    #[must_use]
+    pub const fn playable_samples(&self) -> usize {
+        self.info.playable_samples()
+    }
+
+    /// Index of the page holding playable sample `sample`.
+    #[must_use]
+    pub fn page_for_sample(&self, sample: u64) -> usize {
+        let position = sample.saturating_add(u64::try_from(self.info.pre_skip).unwrap_or(0));
+        self.granules
+            .partition_point(|&g| g <= position)
+            .min(self.pages.len().saturating_sub(1))
+    }
+
+    /// The codes of page `index`: per coded channel, `[frame][codebook]`.
+    ///
+    /// # Errors
+    /// Fails when the page is damaged, missing or the wrong size.
+    pub fn decode_page(&self, index: usize) -> Result<Vec<Vec<u16>>> {
+        let span = self
+            .spans
+            .get(index)
+            .context("page index is out of range")?;
+        let Some(Some(data)) = self.pages.get(index) else {
+            bail!("page {index} is damaged or missing");
+        };
+        let bits = span.len() * self.info.frame_bits();
+        ensure!(
+            data.len() == bits.div_ceil(8),
+            "page {index} has {} bytes, its frames need {}",
+            data.len(),
+            bits.div_ceil(8)
+        );
+        let mask = (1_u32 << BITS) - 1;
+        let (mut acc, mut held, mut pos) = (0_u32, 0_u32, 0);
+        let mut out = Vec::with_capacity(self.info.codebooks.len());
+        for &n in &self.info.codebooks {
+            let mut codes = Vec::with_capacity(span.len() * n);
+            for _ in 0..span.len() * n {
+                while held < BITS {
+                    acc |= u32::from(data[pos]) << held;
+                    pos += 1;
+                    held += 8;
+                }
+                codes.push(u16::try_from(acc & mask)?);
+                acc >>= BITS;
+                held -= BITS;
+            }
+            out.push(codes);
+        }
+        Ok(out)
+    }
+
+    /// The codes of every page, joined: per coded channel, `[frame][codebook]`.
+    ///
+    /// # Errors
+    /// Fails when a page is damaged or missing.
+    pub fn decode_all(&self) -> Result<Vec<Vec<u16>>> {
+        let mut out: Vec<Vec<u16>> = self
+            .info
+            .codebooks
+            .iter()
+            .map(|&n| Vec::with_capacity(self.info.frames() * n))
+            .collect();
+        for index in 0..self.pages.len() {
+            for (all, page) in out.iter_mut().zip(self.decode_page(index)?) {
+                all.extend_from_slice(&page);
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(layout: ChannelLayout, codebooks: Vec<usize>, audio_length: usize) -> DacInfo {
+        DacInfo {
+            codebook_hash: 0x0123_4567_89ab_cdef,
+            layout,
+            codebooks,
+            looped: false,
+            pre_skip: 0,
+            page_length: DEFAULT_PAGE_FRAMES,
+            audio_length,
+            end_trim: 0,
+            length_in_header: true,
+            output_gain: 0,
+            tags: Vec::new(),
+        }
+    }
+
+    fn codes(frames: usize, n: usize, seed: u32) -> Vec<u16> {
+        let mut state = seed;
+        (0..frames * n)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                u16::try_from(state >> 22).unwrap_or(0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn streams_round_trip() -> Result<()> {
+        for (layout, books, length, with_length, tags) in [
+            (ChannelLayout::Mono, vec![9], 44_100 * 3 + 7, true, false),
+            (ChannelLayout::LeftRight, vec![9, 9], 512 * 80, true, true),
+            (
+                ChannelLayout::MidSide,
+                vec![7, 3],
+                512 * 161 - 1,
+                false,
+                true,
+            ),
+            (ChannelLayout::MidSide, vec![1, 9], 1, false, false),
+        ] {
+            let mut i = info(layout, books, length);
+            i.length_in_header = with_length;
+            if tags {
+                i.tags = vec!["TITLE=x".to_owned()];
+            }
+            let frames = i.frames();
+            let channels: Vec<Vec<u16>> = i
+                .codebooks
+                .iter()
+                .zip(1..)
+                .map(|(&n, seed)| codes(frames, n, seed))
+                .collect();
+            let bytes = write_dac(&i, &channels)?;
+            assert_eq!(super::super::codec_of(&bytes)?, super::super::Codec::Dac44);
+            let stream = DacStream::parse(&bytes)?;
+            assert_eq!(stream.info, i);
+            assert_eq!(stream.decode_all()?, channels);
+            assert_eq!(
+                stream.granules.last().copied(),
+                u64::try_from(i.playable_samples()).ok()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_damaged_page_costs_only_itself() -> Result<()> {
+        let i = info(ChannelLayout::LeftRight, vec![4, 4], 512 * 400);
+        let channels = vec![codes(400, 4, 1), codes(400, 4, 2)];
+        let mut bytes = write_dac(&i, &channels)?;
+        // Flip a byte in the middle of the file: inside one audio page.
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0x55;
+        let stream = DacStream::parse(&bytes)?;
+        let damaged: Vec<usize> = (0..stream.pages.len())
+            .filter(|&p| stream.pages[p].is_none())
+            .collect();
+        assert_eq!(damaged.len(), 1);
+        for page in 0..stream.pages.len() {
+            if damaged.contains(&page) {
+                assert!(stream.decode_page(page).is_err());
+            } else {
+                let got = stream.decode_page(page)?;
+                let span = &stream.spans[page];
+                assert_eq!(got[1], channels[1][span.start * 4..span.end * 4]);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bad_headers_are_refused() {
+        let mut i = info(ChannelLayout::LeftRight, vec![9], 1000);
+        assert!(write_dac(&i, &[codes(2, 9, 1)]).is_err());
+        i.codebooks = vec![9, 10];
+        assert!(write_dac(&i, &[codes(2, 9, 1), codes(2, 10, 1)]).is_err());
+        i.codebooks = vec![9, 0];
+        assert!(write_dac(&i, &[codes(2, 9, 1), Vec::new()]).is_err());
+    }
+}

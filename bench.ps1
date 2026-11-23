@@ -53,7 +53,7 @@ function Measure-Run([string[]]$Arguments) {
 foreach ($m in @(@{Name = "mono"; Rate = 24000; Ch = 1; Bw = "6"}, @{Name = "stereo"; Rate = 48000; Ch = 2; Bw = "6"})) {
     $wav = "$Work\$($m.Name).wav"
     if (-not (Test-Path $wav)) { New-TestWav $wav $m.Rate $m.Ch }
-    $enc = Measure-Run @("encode", "`"$wav`"", "`"$Work\$($m.Name).ecdc`"", "-m", $m.Name, "-b", $m.Bw)
+    $enc = Measure-Run @("encode", "`"$wav`"", "`"$Work\$($m.Name).ecdc`"", "--model", $(if ($m.Ch -eq 1) { "encodec-24k" } else { "encodec-48k" }), "-b", $m.Bw)
     $dec = Measure-Run @("decode", "`"$Work\$($m.Name).ecdc`"", "`"$Work\$($m.Name)_out.wav`"")
     "{0,-7} encode {1,6} s {2,6} MB peak | decode {3,6} s {4,6} MB peak  ({5} s of audio)" -f `
         $m.Name, $enc.Seconds, $enc.PeakMB, $dec.Seconds, $dec.PeakMB, $Seconds

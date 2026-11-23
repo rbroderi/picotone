@@ -8,5 +8,6 @@
 *.wasm binary
 *.ps1 text eol=crlf
 
-# Meta's EnCodec model weights (MIT; see weights/EnCodec-MIT.txt) are stored with Git LFS.
+# Model weights are stored with Git LFS: Meta's EnCodec (MIT; weights/EnCodec-MIT.txt), DAC 44 kHz's
+# encoder and the distilled HQ decoder (MIT; weights/DAC-MIT.txt and weights/dac44_student.NOTICE.txt).
 weights/*.safetensors filter=lfs diff=lfs merge=lfs -text

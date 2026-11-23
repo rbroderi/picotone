@@ -18,6 +18,15 @@
 //! everything from the final granule position on, as in Ogg Opus; with the
 //! loop flag set, what remains repeats seamlessly. `FORMAT.md` in the
 //! repository describes every field.
+//!
+//! The HQ codec's streams (model 2, DAC codes, bit-packed) share the Ogg
+//! framing, the comment header and the length rules; they are read and
+//! written by [`DacStream`] and [`write_dac`]. [`codec_of`] tells the two
+//! apart.
+
+mod dac;
+
+pub use dac::{ChannelLayout, DEFAULT_PAGE_FRAMES, DacInfo, DacStream, write_dac};
 
 use std::ops::Range;
 
@@ -614,23 +623,27 @@ fn head_packet(info: &Info) -> Result<Vec<u8>> {
         put_size(&mut fixed, info.playable_samples())?;
         put_size(&mut fixed, info.end_trim)?;
     }
+    head_from_fixed(&fixed, info.output_gain)
+}
+
+/// The identification packet around a fixed part: magic, version, the fixed
+/// part's length, the fixed part, then the extensions.
+fn head_from_fixed(fixed: &[u8], output_gain: i16) -> Result<Vec<u8>> {
     let mut out = HEAD_MAGIC.to_vec();
     out.push(VERSION);
     put_size(&mut out, fixed.len())?;
-    out.extend_from_slice(&fixed);
-    if info.output_gain != 0 {
+    out.extend_from_slice(fixed);
+    if output_gain != 0 {
         put_varint(&mut out, TLV_OUTPUT_GAIN);
         put_varint(&mut out, 2);
-        out.extend_from_slice(&info.output_gain.to_le_bytes());
+        out.extend_from_slice(&output_gain.to_le_bytes());
     }
     Ok(out)
 }
 
-/// Parses the identification header; returns it and whether comments follow.
-///
-/// Without the length flag, `audio_length` and `end_trim` are zero until the
-/// last page is read.
-fn parse_head(packet: &[u8]) -> Result<(Info, bool)> {
+/// Checks the magic and version of an identification packet; returns its
+/// fixed part and a cursor at the extensions.
+fn split_head(packet: &[u8]) -> Result<(&[u8], Fields<'_>)> {
     let mut f = Fields::new(packet);
     ensure!(f.take(4)? == HEAD_MAGIC, "not a .pico stream");
     let version = f.u8()?;
@@ -640,49 +653,11 @@ fn parse_head(packet: &[u8]) -> Result<(Info, bool)> {
     );
     let fixed_len = f.size()?;
     let fixed = f.take(fixed_len)?;
-    let mut h = Fields::new(fixed);
-    let model = match h.u8()? {
-        0 => ModelKind::Mono24k,
-        1 => ModelKind::Stereo48k,
-        other => bail!("unknown model {other}"),
-    };
-    let scheme = h.u8()?;
-    ensure!(scheme == SCHEME_CX2, "unknown entropy coder {scheme}");
-    let mut hash = [0; 8];
-    hash.copy_from_slice(h.take(8)?);
-    let num_codebooks = usize::from(h.u8()?);
-    ensure!(
-        (1..=MAX_CODEBOOKS).contains(&num_codebooks),
-        "implausible codebook count {num_codebooks}"
-    );
-    let flags = h.u8()?;
-    ensure!(
-        flags & !HEAD_KNOWN == 0,
-        "unknown header flags {flags:#04x}"
-    );
-    let pre_skip = h.size()?;
-    let segmented = Layout {
-        model,
-        stride: None,
-    }
-    .segment_length()
-    .is_some();
-    let stride = if segmented { Some(h.size()?) } else { None };
-    let page_length = h.size()?;
-    let length_in_header = flags & HEAD_LENGTH != 0;
-    let (audio_length, end_trim) = if length_in_header {
-        let playable = h.size()?;
-        let end_trim = h.size()?;
-        let total = pre_skip
-            .checked_add(playable)
-            .and_then(|t| t.checked_add(end_trim))
-            .filter(|&t| u64::try_from(t).is_ok_and(|t| t <= MAX_AUDIO_LENGTH))
-            .context("stream has an implausible length")?;
-        (total, end_trim)
-    } else {
-        (0, 0)
-    };
-    // Fixed fields past the ones known here belong to later minor revisions; skip them.
+    Ok((fixed, f))
+}
+
+/// Reads the extensions to the end of the packet; returns the output gain.
+fn read_extensions(f: &mut Fields<'_>) -> Result<i16> {
     let mut output_gain = 0;
     while f.remaining() > 0 {
         let kind = f.varint()?;
@@ -710,6 +685,79 @@ fn parse_head(packet: &[u8]) -> Result<(Info, bool)> {
             _ => {}
         }
     }
+    Ok(output_gain)
+}
+
+/// The two families of `.pico` stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Codec {
+    /// EnCodec codes, cx2-coded ([`Stream`]).
+    Encodec(ModelKind),
+    /// The HQ codec's DAC codes, bit-packed ([`DacStream`]).
+    Dac44,
+}
+
+/// Which codec a `.pico` file holds, from its identification header.
+///
+/// # Errors
+/// Fails when the first page is not a `.pico` identification header or names
+/// an unknown model.
+pub fn codec_of(bytes: &[u8]) -> Result<Codec> {
+    let (page, _) = read_page(bytes, 0).context("identification header is missing or damaged")?;
+    let (fixed, _) = split_head(page.body)?;
+    match fixed.first().copied() {
+        Some(0) => Ok(Codec::Encodec(ModelKind::Mono24k)),
+        Some(1) => Ok(Codec::Encodec(ModelKind::Stereo48k)),
+        Some(dac::MODEL_DAC44) => Ok(Codec::Dac44),
+        Some(other) => bail!("unknown model {other}"),
+        None => bail!("identification header is truncated"),
+    }
+}
+
+/// Parses the identification header; returns it and whether comments follow.
+///
+/// Without the length flag, `audio_length` and `end_trim` are zero until the
+/// last page is read.
+fn parse_head(packet: &[u8]) -> Result<(Info, bool)> {
+    let (fixed, mut f) = split_head(packet)?;
+    let mut h = Fields::new(fixed);
+    let model = match h.u8()? {
+        0 => ModelKind::Mono24k,
+        1 => ModelKind::Stereo48k,
+        dac::MODEL_DAC44 => bail!("this is an HQ (dac44) stream, not an EnCodec one"),
+        other => bail!("unknown model {other}"),
+    };
+    let scheme = h.u8()?;
+    ensure!(scheme == SCHEME_CX2, "unknown entropy coder {scheme}");
+    let mut hash = [0; 8];
+    hash.copy_from_slice(h.take(8)?);
+    let num_codebooks = usize::from(h.u8()?);
+    ensure!(
+        (1..=MAX_CODEBOOKS).contains(&num_codebooks),
+        "implausible codebook count {num_codebooks}"
+    );
+    let flags = h.u8()?;
+    ensure!(
+        flags & !HEAD_KNOWN == 0,
+        "unknown header flags {flags:#04x}"
+    );
+    let pre_skip = h.size()?;
+    let segmented = Layout {
+        model,
+        stride: None,
+    }
+    .segment_length()
+    .is_some();
+    let stride = if segmented { Some(h.size()?) } else { None };
+    let page_length = h.size()?;
+    let length_in_header = flags & HEAD_LENGTH != 0;
+    let (audio_length, end_trim) = if length_in_header {
+        read_length(&mut h, pre_skip)?
+    } else {
+        (0, 0)
+    };
+    // Fixed fields past the ones known here belong to later minor revisions; skip them.
+    let output_gain = read_extensions(&mut f)?;
     let info = Info {
         model,
         table_hash: u64::from_le_bytes(hash),
@@ -889,42 +937,14 @@ impl Stream {
             let tags = found.next().and_then(|p| p.data);
             info.tags = parse_tags(&tags.context("comment header is missing or damaged")?)?;
         }
-        let audio: Vec<Packet> = found.collect();
-        let mut chunks = Vec::with_capacity(audio.len());
-        let mut final_page = None;
-        for (index, packet) in audio.iter().enumerate() {
-            let mut data = packet.data.as_deref();
-            if packet.last && index + 1 == audio.len() {
-                final_page = Some(packet.granule);
-                if !info.length_in_header {
-                    let mut f =
-                        Fields::new(data.context("the final page of the stream is damaged")?);
-                    info.end_trim = f.size()?;
-                    data = data.map(|d| &d[f.pos..]);
-                }
-            }
-            chunks.push(data.map(<[u8]>::to_vec));
-        }
-        if info.length_in_header {
-            if let Some(granule) = final_page {
-                ensure!(
-                    u64::try_from(info.audio_length - info.end_trim)? == granule,
-                    "the final page does not end where the header says"
-                );
-            }
-        } else if audio.is_empty() {
-            ensure!(packets_end_stream(bytes), "stream has no intact final page");
-        } else {
-            let granule = final_page.context("stream has no intact final page")?;
-            ensure!(
-                granule <= MAX_AUDIO_LENGTH,
-                "stream has an implausible length"
-            );
-            info.audio_length = usize::try_from(granule)?
-                .checked_add(info.end_trim)
-                .filter(|&t| u64::try_from(t).is_ok_and(|t| t <= MAX_AUDIO_LENGTH))
-                .context("stream has an implausible length")?;
-        }
+        let mut length = Extent {
+            in_header: info.length_in_header,
+            audio_length: info.audio_length,
+            end_trim: info.end_trim,
+        };
+        let mut chunks = read_audio(&found.collect::<Vec<_>>(), bytes, &mut length)?;
+        info.audio_length = length.audio_length;
+        info.end_trim = length.end_trim;
         info.check_trims()?;
         let layout = info.layout()?;
         // Every segment costs at least 12 bits of scale (and every page 27 bytes), so an
@@ -1055,6 +1075,68 @@ impl Stream {
         }
         Ok(out)
     }
+}
+
+/// A stream's length fields: from the header, or filled in from the last page.
+#[derive(Debug, Clone, Copy)]
+struct Extent {
+    in_header: bool,
+    audio_length: usize,
+    end_trim: usize,
+}
+
+/// The audio packets' payloads (`None` where damaged or missing), with the
+/// end trim taken off the last one when the header has no length; checks
+/// the final granule against the header, or sets the length from it.
+fn read_audio(audio: &[Packet], bytes: &[u8], length: &mut Extent) -> Result<Vec<Option<Vec<u8>>>> {
+    let mut chunks = Vec::with_capacity(audio.len());
+    let mut final_page = None;
+    for (index, packet) in audio.iter().enumerate() {
+        let mut data = packet.data.as_deref();
+        if packet.last && index + 1 == audio.len() {
+            final_page = Some(packet.granule);
+            if !length.in_header {
+                let mut f = Fields::new(data.context("the final page of the stream is damaged")?);
+                length.end_trim = f.size()?;
+                data = data.map(|d| &d[f.pos..]);
+            }
+        }
+        chunks.push(data.map(<[u8]>::to_vec));
+    }
+    if length.in_header {
+        if let Some(granule) = final_page {
+            ensure!(
+                u64::try_from(length.audio_length - length.end_trim)? == granule,
+                "the final page does not end where the header says"
+            );
+        }
+    } else if audio.is_empty() {
+        ensure!(packets_end_stream(bytes), "stream has no intact final page");
+    } else {
+        let granule = final_page.context("stream has no intact final page")?;
+        ensure!(
+            granule <= MAX_AUDIO_LENGTH,
+            "stream has an implausible length"
+        );
+        length.audio_length = usize::try_from(granule)?
+            .checked_add(length.end_trim)
+            .filter(|&t| u64::try_from(t).is_ok_and(|t| t <= MAX_AUDIO_LENGTH))
+            .context("stream has an implausible length")?;
+    }
+    Ok(chunks)
+}
+
+/// Reads the header's length fields (with the length flag): returns the
+/// coded length and the end trim.
+fn read_length(h: &mut Fields<'_>, pre_skip: usize) -> Result<(usize, usize)> {
+    let playable = h.size()?;
+    let end_trim = h.size()?;
+    let total = pre_skip
+        .checked_add(playable)
+        .and_then(|t| t.checked_add(end_trim))
+        .filter(|&t| u64::try_from(t).is_ok_and(|t| t <= MAX_AUDIO_LENGTH))
+        .context("stream has an implausible length")?;
+    Ok((total, end_trim))
 }
 
 /// Whether the last intact page of a header-only stream ends it.

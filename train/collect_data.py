@@ -8,7 +8,7 @@
 Inputs are encoded at the model's highest bandwidth (16 codebooks for the 48 kHz model, 32
 for the 24 kHz one); lower bandwidths are prefixes of the same codes. Each input is one of:
 
-- a `.pico` file (`picotone encode in.wav out.pico -m stereo -b 24 --beam 1`); its codes are
+- a `.pico` file (`picotone encode in.wav out.pico --model encodec-48k -b 24 --beam 1`); its codes are
   read with `picotone dev codes` (the binary is `$PICOTONE_EXE`, else
   `../target/release/picotone[.exe]`, else `picotone` on the PATH);
 - a code bundle `.npy` (`[frames, codebooks]`, as `picotone dev codes` writes it);
