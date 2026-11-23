@@ -74,6 +74,65 @@ pub(crate) fn lanes() -> usize {
     arch().dispatch(Lanes)
 }
 
+/// High and low parts of pi; the high part (201/64) has few enough bits for
+/// `k * PI_HI` to be exact for any `k` below `2^16`.
+const PI_HI: f32 = 3.140_625;
+const PI_LO: f32 = 9.676_536e-4;
+/// Taylor coefficients of `sin(r)`, odd terms 3 to 11. On `|r| <= pi/2` the
+/// truncation error is below `6e-8`.
+const SIN_C3: f32 = -1.0 / 6.0;
+const SIN_C5: f32 = 1.0 / 120.0;
+const SIN_C7: f32 = -1.0 / 5040.0;
+const SIN_C9: f32 = 1.0 / 362_880.0;
+const SIN_C11: f32 = -1.0 / 39_916_800.0;
+
+/// DAC's Snake activation for one value: `x + sin²(a x) / a`, with `inv`
+/// the precomputed `1 / (a + 1e-9)`.
+///
+/// `sin²` has period pi, so `a x` is reduced to `[-pi/2, pi/2]` (round to the
+/// nearest multiple of pi, two-part subtraction) before the polynomial. The
+/// rounding is exact while `|a x| < 2^22`.
+#[inline(always)]
+fn snake_value(x: f32, a: f32, inv: f32) -> f32 {
+    let y = a * x;
+    let k = (y * std::f32::consts::FRAC_1_PI + ROUND_MAGIC) - ROUND_MAGIC;
+    let r = (y - k * PI_HI) - k * PI_LO;
+    let r2 = r * r;
+    let s =
+        r * (1.0 + r2 * (SIN_C3 + r2 * (SIN_C5 + r2 * (SIN_C7 + r2 * (SIN_C9 + r2 * SIN_C11)))));
+    x + s * s * inv
+}
+
+/// Snake in place over time-major frames of `alpha.len()` channels.
+///
+/// Plain element-wise code, compiled for the detected instruction set so it
+/// vectorises across channels. Every value goes through the same operations
+/// wherever it sits, so results do not depend on chunking.
+pub(crate) fn snake_in_place(values: &mut [f32], alpha: &[f32], inv: &[f32]) {
+    struct SnakePass<'a> {
+        values: &'a mut [f32],
+        alpha: &'a [f32],
+        inv: &'a [f32],
+    }
+    impl WithSimd for SnakePass<'_> {
+        type Output = ();
+
+        #[inline(always)]
+        fn with_simd<S: Simd>(self, _simd: S) {
+            let channels = self.alpha.len();
+            for frame in self.values.chunks_exact_mut(channels) {
+                for ((v, &a), &inv) in frame.iter_mut().zip(self.alpha).zip(self.inv) {
+                    *v = snake_value(*v, a, inv);
+                }
+            }
+        }
+    }
+    if alpha.is_empty() {
+        return;
+    }
+    arch().dispatch(SnakePass { values, alpha, inv });
+}
+
 /// `out[m, n] += a · b`, where row `r` of `a` is `a[r * a_stride..][..k]` (rows
 /// may overlap) and `b`, `out` are row-major. Portable, without SIMD of ours.
 pub(crate) fn gemm_acc(
@@ -873,6 +932,25 @@ impl WithSimd for Gates<'_> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snake_matches_exact_sine() {
+        // x from -60 to 60 and alphas from 0.05 to 20: |a x| up to 1200.
+        let alpha = [0.05_f32, 0.7, 1.0, 3.3, 20.0];
+        let inv: Vec<f32> = alpha.iter().map(|a| 1.0 / (a + 1e-9)).collect();
+        let xs: Vec<f32> = (0..24_001).map(|i| (i as f32 - 12_000.0) * 0.005).collect();
+        let mut values: Vec<f32> = xs.iter().flat_map(|&x| [x; 5]).collect();
+        snake_in_place(&mut values, &alpha, &inv);
+        let mut worst = 0.0_f64;
+        for (frame, &x) in values.as_chunks::<5>().0.iter().zip(&xs) {
+            for ((&got, &a), &i) in frame.iter().zip(&alpha).zip(&inv) {
+                let ax = f64::from(a * x);
+                let exact = f64::from(x) + ax.sin().powi(2) * f64::from(i);
+                worst = worst.max((f64::from(got) - exact).abs() / (1.0 + exact.abs()));
+            }
+        }
+        assert!(worst < 2e-6, "worst relative error {worst:e}");
+    }
 
     fn pattern(len: usize, seed: f32) -> Vec<f32> {
         (0..len)

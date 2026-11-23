@@ -18,6 +18,7 @@
 pub mod audio;
 pub mod config;
 pub mod cx2;
+pub mod dac;
 mod kernels;
 pub mod layout;
 pub mod model;

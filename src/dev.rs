@@ -100,6 +100,36 @@ pub(crate) enum DevCommand {
         #[arg(required = true)]
         files: Vec<String>,
     },
+    /// Time the HQ decoder (`dac44-student`) on random codes; prints the real-time factor.
+    DacBench {
+        /// The decoder weights (`dac44_student.safetensors`).
+        weights: PathBuf,
+        /// Seconds of audio to decode, per channel.
+        #[arg(long, default_value_t = 30.0)]
+        seconds: f64,
+        /// Codebooks per frame (the tier).
+        #[arg(long, default_value_t = 9)]
+        codebooks: usize,
+        /// Channels to decode one after the other (2 = stereo).
+        #[arg(long, default_value_t = 2)]
+        channels: usize,
+    },
+    /// Decode a `.npy` of DAC codes (`[frames, 9]`) with the HQ decoder to raw
+    /// little-endian f32 samples, for parity checks against PyTorch.
+    DacDecode {
+        /// The decoder weights (`dac44_student.safetensors`).
+        weights: PathBuf,
+        /// Codes, `[frames, codebooks]` u16.
+        codes: PathBuf,
+        /// Output: raw f32 samples.
+        output: PathBuf,
+        /// Use the first N codebooks (the tier).
+        #[arg(long, default_value_t = 9)]
+        codebooks: usize,
+        /// Latent frames per chunk (default: the decoder's own).
+        #[arg(long)]
+        chunk: Option<usize>,
+    },
     /// Time each expert and the whole coder on one code bundle.
     Profile {
         /// cx2 table (.ecxm).
@@ -198,7 +228,90 @@ pub(crate) fn run(command: &DevCommand, tables: &Path) -> Result<()> {
             input,
             codec,
         } => profile(&load(table, codec)?, &read_bundle(tables, input)?),
+        DevCommand::DacBench {
+            weights,
+            seconds,
+            codebooks,
+            channels,
+        } => dac_bench(weights, *seconds, *codebooks, *channels),
+        DevCommand::DacDecode {
+            weights,
+            codes,
+            output,
+            codebooks,
+            chunk,
+        } => dac_decode(weights, codes, output, *codebooks, *chunk),
     }
+}
+
+/// Decodes a code array with the HQ decoder to raw f32 samples.
+fn dac_decode(
+    weights: &Path,
+    codes: &Path,
+    output: &Path,
+    codebooks: usize,
+    chunk: Option<usize>,
+) -> Result<()> {
+    let decoder = picotone::dac::DacDecoder::load(weights)?;
+    let (all, columns) = read_npy(codes)?;
+    ensure!(
+        (1..=columns).contains(&codebooks),
+        "{} has {columns} codebooks, {codebooks} asked for",
+        codes.display()
+    );
+    let tier: Vec<u16> = all
+        .chunks_exact(columns)
+        .flat_map(|frame| frame[..codebooks].iter().copied())
+        .collect();
+    let t = Instant::now();
+    let y = match chunk {
+        Some(n) => decoder.decode_chunked(&tier, codebooks, n)?,
+        None => decoder.decode(&tier, codebooks)?,
+    };
+    eprintln!(
+        "decoded {} samples in {:.2} s",
+        y.len(),
+        t.elapsed().as_secs_f64()
+    );
+    let bytes: Vec<u8> = y.iter().flat_map(|v| v.to_le_bytes()).collect();
+    std::fs::write(output, bytes).with_context(|| format!("writing {}", output.display()))
+}
+
+/// Decodes random codes with the HQ decoder and reports the real-time factor.
+fn dac_bench(weights: &Path, seconds: f64, codebooks: usize, channels: usize) -> Result<()> {
+    use picotone::dac::{CODEBOOK_SIZE, DacDecoder, HOP, SAMPLE_RATE};
+    let start = Instant::now();
+    let decoder = DacDecoder::load(weights)?;
+    eprintln!(
+        "loaded {} in {:.2} s",
+        weights.display(),
+        start.elapsed().as_secs_f64()
+    );
+    let frames = picotone::config::floor_to_usize(seconds * f64::from(SAMPLE_RATE) / to_f64(HOP))?;
+    // A fixed linear congruential sequence: the same codes every run.
+    let mut state = 0x2545_f491_u32;
+    let mut codes = vec![0_u16; frames * codebooks];
+    for code in &mut codes {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *code = u16::try_from(usize::try_from(state >> 16)? % CODEBOOK_SIZE)?;
+    }
+    let audio = to_f64(frames * HOP) / f64::from(SAMPLE_RATE);
+    let mut best = f64::INFINITY;
+    for run in 0..3 {
+        let t = Instant::now();
+        for _ in 0..channels {
+            let y = decoder.decode(&codes, codebooks)?;
+            ensure!(y.len() == frames * HOP, "decoded length is wrong");
+        }
+        let took = t.elapsed().as_secs_f64();
+        best = best.min(took);
+        eprintln!(
+            "run {run}: {audio:.1} s x {channels} channel(s) at q{codebooks} in {took:.2} s ({:.2}x real time)",
+            audio / took
+        );
+    }
+    eprintln!("best: {:.2}x real time", audio / best);
+    Ok(())
 }
 
 fn read(path: &Path) -> Result<Vec<u8>> {
