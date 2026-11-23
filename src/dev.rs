@@ -309,6 +309,7 @@ fn dac_encode(
         seconds / took,
         t.elapsed().as_secs_f64()
     );
+    eprint!("{}", picotone::prof::report());
     write_npy(output, &codes, CODEBOOKS)
 }
 

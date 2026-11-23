@@ -121,7 +121,7 @@ fn encode_signals(
     codebooks: &[usize],
 ) -> Result<Vec<Vec<u16>>> {
     signals
-        .iter()
+        .par_iter()
         .zip(codebooks)
         .map(|(signal, &n)| {
             let all = encoder.encode(signal)?;
@@ -230,7 +230,7 @@ fn pick(
         let excerpt = [l.to_vec(), r.to_vec()];
         let codes = encode_signals(encoder, &coded_signals(&excerpt, layout), &books)?;
         let signals = codes
-            .iter()
+            .par_iter()
             .zip(books)
             .map(|(c, n)| {
                 let mut y = decoder.decode(c, n)?;

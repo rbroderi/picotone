@@ -20,6 +20,7 @@
 //!   side, which gives the same output as one whole-file decode.
 
 use anyhow::{Context as _, Result, ensure};
+use rayon::prelude::*;
 
 use crate::kernels;
 use crate::nn::{ConvGeometry, ConvKernel, ConvTranspose1d, Seq};
@@ -612,19 +613,22 @@ impl DacEncoder {
     pub fn latent_chunked(&self, audio: &[f32], chunk: usize) -> Result<Seq> {
         ensure!(chunk > 0, "chunk length must be positive");
         let frames = audio.len().div_ceil(HOP);
-        let mut parts = Vec::new();
-        let mut start = 0;
-        while start < frames {
-            let end = (start + chunk).min(frames);
-            let lo = start.saturating_sub(CONTEXT);
-            let hi = (end + CONTEXT).min(frames);
-            let mut x = Seq::zeros((hi - lo) * HOP, 1);
-            let src = &audio[(lo * HOP).min(audio.len())..(hi * HOP).min(audio.len())];
-            x.data_mut()[..src.len()].copy_from_slice(src);
-            let z = self.latent_span(&x)?;
-            parts.push(z.slice_rows(start - lo, end - lo));
-            start = end;
-        }
+        // Chunks are independent, so they run in parallel: one chunk's
+        // activations then stay in a core's cache, where a single chunk
+        // split across all cores would wait on memory.
+        let parts = (0..frames.div_ceil(chunk))
+            .into_par_iter()
+            .map(|i| {
+                let start = i * chunk;
+                let end = (start + chunk).min(frames);
+                let lo = start.saturating_sub(CONTEXT);
+                let hi = (end + CONTEXT).min(frames);
+                let mut x = Seq::zeros((hi - lo) * HOP, 1);
+                let src = &audio[(lo * HOP).min(audio.len())..(hi * HOP).min(audio.len())];
+                x.data_mut()[..src.len()].copy_from_slice(src);
+                Ok(self.latent_span(&x)?.slice_rows(start - lo, end - lo))
+            })
+            .collect::<Result<Vec<_>>>()?;
         if parts.is_empty() {
             return Ok(Seq::zeros(0, LATENT_DIM));
         }

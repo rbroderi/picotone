@@ -240,8 +240,10 @@ impl LogMel {
 const EXCERPTS: usize = 4;
 /// Samples per excerpt (3 s, whole frames).
 const EXCERPT: usize = 3 * RATE / 512 * 512;
-/// Context on each side of an excerpt (1 s, whole frames).
-const CONTEXT: usize = RATE / 512 * 512;
+/// Context on each side of an excerpt: 24 frames (0.28 s), more than the
+/// encoder's 12 and the decoder's 9, so the excerpt codes and decodes as it
+/// would inside the whole file.
+const CONTEXT: usize = 24 * 512;
 /// Excerpts scored before the early exit may stop.
 const MIN_EXCERPTS: usize = 2;
 /// Relative margin that ends sampling early.
@@ -296,27 +298,24 @@ pub struct PickScores {
 /// Picks the stereo layout.
 ///
 /// `roundtrip(left, right, layout)` codes a stereo excerpt in `layout` and
-/// returns the decoded left and right, the same length as the input. Files
-/// shorter than the excerpts with their context are compared whole.
+/// returns the decoded left and right, the same length as the input; the two
+/// layouts' round trips run in parallel. Files shorter than the excerpts with
+/// their context are compared whole.
 ///
 /// # Errors
 /// Fails when `roundtrip` does, or returns the wrong length.
 pub fn pick_layout<F>(
     left: &[f32],
     right: &[f32],
-    mut roundtrip: F,
+    roundtrip: F,
 ) -> Result<(ChannelLayout, PickScores)>
 where
-    F: FnMut(&[f32], &[f32], ChannelLayout) -> Result<[Vec<f32>; 2]>,
+    F: Fn(&[f32], &[f32], ChannelLayout) -> Result<[Vec<f32>; 2]> + Sync,
 {
     let mel = LogMel::new();
     let n = left.len().min(right.len());
-    let mut score = |lo: usize, hi: usize, start: usize, end: usize| -> Result<(f64, f64)> {
-        let mut out = [0.0; 2];
-        for (slot, layout) in out
-            .iter_mut()
-            .zip([ChannelLayout::LeftRight, ChannelLayout::MidSide])
-        {
+    let score = |lo: usize, hi: usize, start: usize, end: usize| -> Result<(f64, f64)> {
+        let one = |layout: ChannelLayout| -> Result<f64> {
             let [l, r] = roundtrip(&left[lo..hi], &right[lo..hi], layout)?;
             ensure!(
                 l.len() == hi - lo && r.len() == hi - lo,
@@ -328,12 +327,16 @@ where
                     .map(|x| x.clamp(-1.0, 1.0))
                     .collect()
             };
-            *slot = mel.stereo_score(
+            Ok(mel.stereo_score(
                 [&left[start..end], &right[start..end]],
                 [&clip(&l), &clip(&r)],
-            );
-        }
-        Ok(out.into())
+            ))
+        };
+        let (lr, ms) = rayon::join(
+            || one(ChannelLayout::LeftRight),
+            || one(ChannelLayout::MidSide),
+        );
+        Ok((lr?, ms?))
     };
     let pick = |s: &PickScores| {
         if s.left_right <= s.mid_side {
