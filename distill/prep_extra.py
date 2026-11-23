@@ -519,7 +519,13 @@ def corpus_norm(s):
 
 def author_key(creator):
     """(surname, first initial), after display_name and without honorifics: "Sir Arthur Conan Doyle",
-    "Doyle, Arthur Conan" and "Doyle, A. C." all give ('doyle', 'a'). ('', '') for no single named author."""
+    "Doyle, Arthur Conan" and "Doyle, A. C." all give ('doyle', 'a'). ('', '') for no single named author,
+    including several creators (a list, or names joined with ';', '&' or ' and ': anthologies)."""
+    if isinstance(creator, list) and len(creator) > 1:
+        return ("", "")
+    raw = str(creator[0] if isinstance(creator, list) and creator else creator or "")
+    if re.search(r";|&| and ", raw, re.I):
+        return ("", "")
     toks = [t for t in corpus_norm(display_name(creator)).split() if t not in HONORIFICS]
     if not toks or " ".join(toks) in NOT_ONE_AUTHOR or toks[0] in NOT_ONE_AUTHOR:
         return ("", "")

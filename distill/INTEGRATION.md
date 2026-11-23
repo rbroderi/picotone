@@ -71,7 +71,38 @@ Same 49 clips, smoothed weights, % vs stock (plain mean over clips, from `clip_g
   - The likely cause is the lower `pd` weight: 0.15, against about 0.2 in the baseline's auto mix. That isn't
     tested.
 - **Speech barely moved.** VCTK is clean studio speech, while the eval speech is LibriVox (home mics, MP3
-  sources). So more speech of the same kind may help less than speech that matches the eval. The cost is decode speed: the student is projected at about 1.9× real time in single-thread wasm
+  sources). So more speech of the same kind may help less than speech that matches the eval.
+
+**Second fine-tune: LibriVox speech (`runs/w512_q9_lv`, 2026-11-22). Every tier passes.**
+
+Setup:
+- Resumed from step 137,500 with 15 h of LibriVox 64 kbps excerpts added (`prep_extra.py --stages librivox`).
+  The eval books, authors and named readers are left out.
+- Mix `jamendo=0.5,pd=0.2,librivox=0.1,speech=0.05,hits=0.15`.
+- `--stop-when-pass` stopped it at step 152,500. The checkpoint is protected as `ckpt_best_152500_smoothed.pt`
+  (sha256 7960fcf7…).
+
+| Tier | Log-mel / limit | vs stock | SI-SDR / limit |
+|---|---|---|---|
+| q4 | 3.098 / 3.132 | +1.9% | 4.86 / 4.58 |
+| q5 | 2.882 / 2.909 | +2.1% | 6.02 / 5.75 |
+| q6 | 2.717 / 2.739 | +2.2% | 6.97 / 6.73 |
+| q7 | 2.573 / 2.589 | +2.4% | 7.87 / 7.64 |
+| q9 | 2.334 / 2.335 | +3.0% | 9.58 / 9.42 |
+
+The score is 2.7209, against 2.7440 for the baseline.
+
+- **Speech, eval clips:** speech is still the largest gap, but about half the size. At q9 the ratio to stock went
+  from 1.167 to 1.082, and at q4 from 1.128 to 1.080.
+- **Speech, held-out VCTK speakers:** the gap fell from 23–32% to 8–9%, and SI-SDR rose by about 1.6 dB at every
+  tier. This is only 2 clips and 20 s, so it doesn't prove much, but these are unseen speakers on a different
+  recording chain. That suggests the gain isn't only "LibriVox MP3 sound".
+- **Music, q4–q6:** jazz and pop now beat stock.
+- **Orchestral** recovered only a little, 0.984 → 0.976 at q9.
+- **Left at q9, besides speech:** new_06_electronic (+13%, almost the whole electronic gap; to be listened to
+  before any data change), new_15_game, new_25_rock and old_14_piano.
+
+The cost is decode speed: the student is projected at about 1.9× real time in single-thread wasm
 (stereo), against about 5.5× for EnCodec 48 kHz. A review (2026-11-21, see "Decode speed" below) thinks
 1.9× is optimistic: picotone's own EnCodec numbers imply 0.9–1.3×. It needs a measurement. So picotone keeps
 two modes:
