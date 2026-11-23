@@ -260,8 +260,21 @@ Rough sizes are for one person working with Claude, and they include tests.
   - a raw code scheme (10 bits per code, bit-packed) so nothing waits on cx2; see M5.
 - **Encoding, first version:** an offline `encode_dac.py` in `distill/` that runs DAC's stock encoder and
   quantiser (resampling to 44.1 kHz) and writes codes. `picotone pack` turns them into a `.pico`.
-- **The CLI:** `picotone decode` reads model 2 files. Encode gets an HQ flag (for example `--hq q5`) that calls
-  the Python tool until M6 lands.
+- **The CLI (decided 2026-11-23):**
+  - `picotone encode` defaults to the DAC student (HQ), provided its decode runs faster than real time on
+    the user's laptop. It calls the Python tool until M6 lands.
+  - `--fast` selects EnCodec instead.
+  - `--model <name>` names the exact model and overrides both. Names: `dac44-student`, `encodec-48k`,
+    `encodec-24k`. Any future model joins the same list.
+  - `--channel-format auto|mono|stereo` sets the channel count, separately from the model. `auto` follows
+    the input.
+    - DAC student: mono is one downmixed stream; stereo is two streams.
+    - With `--fast`: mono gives `encodec-24k`, stereo gives `encodec-48k`.
+    - A model that can't do the requested format is an error, for example `--model encodec-48k
+      --channel-format mono`.
+  - The stereo layout stays its own flag, `--stereo ms|lr|pick`. The default is to pick from sampled excerpts;
+    see decision 2.
+  - `picotone decode` needs no model flag, because the file's header names the model.
 - **Loops** (gaim's music loops): decode with the latent wrapped around, 9 frames each side, so the loop point
   has no seam. This reuses the loop flag and `wrap_loop`.
 
