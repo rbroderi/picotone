@@ -102,6 +102,36 @@ The score is 2.7209, against 2.7440 for the baseline.
 - **Left at q9, besides speech:** new_06_electronic (+13%, almost the whole electronic gap; to be listened to
   before any data change), new_15_game, new_25_rock and old_14_piano.
 
+**Third fine-tune: more speech (`runs/w512_q9_lv45`, 2026-11-23). This is the shipping candidate.**
+
+Setup:
+- Resumed from step 152,500. LibriVox went from 15 h to 45 h (`data/lv45/librivox.jsonl`, which includes the
+  old 150 excerpts).
+- Mix `jamendo=0.45,pd=0.2,librivox=0.15,speech=0.05,hits=0.15`, run to step 172,500 with no stop rules.
+- Two held-out speech sets were logged but don't count toward the score: 2 VCTK clips, and 4 LibriVox clips by
+  authors with no training rows.
+- The last eval was the best. It is protected as `ckpt_best_172500_smoothed.pt` (sha256 f9bb9294…), and
+  `ckpt_last_172500.pt` (5414c699…) is kept as well.
+
+| Tier | Log-mel / limit | vs stock | SI-SDR / limit |
+|---|---|---|---|
+| q4 | 3.093 / 3.131 | +1.7% | 4.89 / 4.58 |
+| q5 | 2.878 / 2.909 | +1.9% | 6.04 / 5.75 |
+| q6 | 2.712 / 2.739 | +2.0% | 7.00 / 6.73 |
+| q7 | 2.567 / 2.589 | +2.2% | 7.91 / 7.64 |
+| q9 | 2.328 / 2.335 | +2.7% | 9.62 / 9.41 |
+
+The score is 2.7157, against 2.7209 at 152.5k. q9 now passes with a margin of 0.007, up from 0.001.
+
+The adoption criteria, set before the run, all pass:
+1. **Every tier passes,** and the score is better.
+2. **Held-out speech is better,** at q4 2.731 → 2.685 and at q9 1.992 → 1.942. That's −0.06 on the 4 LibriVox
+   clips and −0.018 on the 2 VCTK clips. VCTK improved steadily and levelled off after about 167.5k.
+3. **No music type is more than 1 point worse at q9.** The worst is band at +0.24. Ambient (−0.49), orchestral
+   (−0.24) and rock (−0.21) improved. Speech on the eval clips went from 8.3% to 6.5% behind stock.
+
+The scores were still falling at the end, so more training would likely gain a little more.
+
 The cost is decode speed: the student is projected at about 1.9× real time in single-thread wasm
 (stereo), against about 5.5× for EnCodec 48 kHz. A review (2026-11-21, see "Decode speed" below) thinks
 1.9× is optimistic: picotone's own EnCodec numbers imply 0.9–1.3×. It needs a measurement. So picotone keeps
