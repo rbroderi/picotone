@@ -115,12 +115,17 @@ enum ChannelFormat {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum StereoChoice {
-    /// Compare left/right and mid/side on sampled excerpts and keep the better.
+    /// Compare left/right and mid/side on sampled excerpts and keep the better; at 2 codebooks
+    /// or fewer per channel, also parametric stereo with a mid of 2 x codebooks - 1.
     Pick,
     /// Mid/side: (L+R)/2 and (L-R)/2.
     Ms,
     /// Left/right.
     Lr,
+    /// Parametric stereo: the mid (--codebooks) plus per-band level and coherence parameters
+    /// (about 1 kbps); the decoder rebuilds the stereo. For low bitrates.
+    #[value(alias = "ps")]
+    Parametric,
 }
 
 /// What an encode runs.
@@ -185,8 +190,11 @@ fn plan(options: &EncodeOptions, input_channels: usize) -> Result<Plan> {
         }
         Plan::Encodec(_) => {
             ensure!(
-                options.side_codebooks.is_none() && options.stereo.is_none(),
-                "--stereo and --side-codebooks are for the HQ model"
+                options.side_codebooks.is_none()
+                    && options.stereo.is_none()
+                    && options.ps_bands.is_none()
+                    && options.ps_frames.is_none(),
+                "--stereo, --side-codebooks, --ps-bands and --ps-frames are for the HQ model"
             );
         }
     }
@@ -262,6 +270,13 @@ struct EncodeOptions {
     /// HQ mid/side: codebooks per frame of the side (default: the same as `--codebooks`).
     #[arg(long)]
     side_codebooks: Option<usize>,
+    /// HQ parametric stereo: parameter bands, 20 (default) or 10 (about half the rate).
+    #[arg(long)]
+    ps_bands: Option<usize>,
+    /// HQ parametric stereo: frames per parameter set, 1, 2, 4, 8 (default, 10.8 sets/s) or 16.
+    /// The rate is about inversely proportional.
+    #[arg(long)]
+    ps_frames: Option<usize>,
     /// Segment stride in samples (48 kHz model: 24000..=48000; EnCodec's own 47520).
     #[arg(long)]
     stride: Option<usize>,
@@ -468,8 +483,15 @@ fn encode_hq(
         stereo: match options.stereo {
             Some(StereoChoice::Ms) => hq::StereoMode::MidSide,
             Some(StereoChoice::Lr) => hq::StereoMode::LeftRight,
+            Some(StereoChoice::Parametric) => hq::StereoMode::Parametric,
             Some(StereoChoice::Pick) | None => hq::StereoMode::Pick,
         },
+        parametric: picotone::pstereo::Config::new(
+            options.ps_bands.unwrap_or(20),
+            options
+                .ps_frames
+                .unwrap_or(picotone::pstereo::Config::DEFAULT.frames),
+        )?,
         codebooks,
         side_codebooks: options.side_codebooks.unwrap_or(codebooks),
         looped: options.looped,

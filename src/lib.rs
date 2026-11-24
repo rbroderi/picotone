@@ -27,6 +27,7 @@ pub mod nn;
 pub mod pico;
 mod pool;
 pub mod prof;
+pub mod pstereo;
 pub mod scale;
 pub mod stereo;
 pub mod weights;

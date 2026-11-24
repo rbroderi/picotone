@@ -15,7 +15,8 @@
 //!   Checked against coding whole tracks both ways: 35 of 36 tracks agreed,
 //!   and the miss cost 0.001.
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
+use rayon::prelude::*;
 
 use crate::config::to_f64;
 use crate::pico::ChannelLayout;
@@ -284,37 +285,64 @@ fn excerpt_starts(left: &[f32], right: &[f32]) -> Vec<usize> {
         .collect()
 }
 
-/// Mean left/right and mid/side scores so far.
-#[derive(Debug, Clone, Copy, Default)]
+/// Mean scores so far of each layout compared.
+#[derive(Debug, Clone, Default)]
 pub struct PickScores {
-    /// Mean score coding left/right.
-    pub left_right: f64,
-    /// Mean score coding mid/side.
-    pub mid_side: f64,
+    /// Each candidate layout and its mean score, in the order given.
+    pub layouts: Vec<(ChannelLayout, f64)>,
     /// Excerpts scored (0: the whole file was compared).
     pub excerpts: usize,
 }
 
-/// Picks the stereo layout.
+impl PickScores {
+    /// The best-scoring layout (the first on ties).
+    #[must_use]
+    pub fn best(&self) -> Option<ChannelLayout> {
+        let mut best: Option<(ChannelLayout, f64)> = None;
+        for &(layout, score) in &self.layouts {
+            if best.is_none_or(|(_, b)| score < b) {
+                best = Some((layout, score));
+            }
+        }
+        best.map(|(layout, _)| layout)
+    }
+
+    /// The best and second-best scores.
+    fn top_two(&self) -> (f64, f64) {
+        let mut s: Vec<f64> = self.layouts.iter().map(|&(_, v)| v).collect();
+        s.sort_by(f64::total_cmp);
+        (
+            s.first().copied().unwrap_or(0.0),
+            s.get(1).copied().unwrap_or(f64::INFINITY),
+        )
+    }
+}
+
+/// Picks the stereo layout among `candidates` (left/right and mid/side, and
+/// possibly parametric).
 ///
 /// `roundtrip(left, right, layout)` codes a stereo excerpt in `layout` and
-/// returns the decoded left and right, the same length as the input; the two
+/// returns the decoded left and right, the same length as the input; the
 /// layouts' round trips run in parallel. Files shorter than the excerpts with
-/// their context are compared whole.
+/// their context are compared whole. Sampling stops early when the best
+/// layout leads the next by more than 5%.
 ///
 /// # Errors
-/// Fails when `roundtrip` does, or returns the wrong length.
+/// Fails when `candidates` is empty, or `roundtrip` fails or returns the
+/// wrong length.
 pub fn pick_layout<F>(
     left: &[f32],
     right: &[f32],
+    candidates: &[ChannelLayout],
     roundtrip: F,
 ) -> Result<(ChannelLayout, PickScores)>
 where
     F: Fn(&[f32], &[f32], ChannelLayout) -> Result<[Vec<f32>; 2]> + Sync,
 {
+    ensure!(!candidates.is_empty(), "no stereo layouts to pick from");
     let mel = LogMel::new();
     let n = left.len().min(right.len());
-    let score = |lo: usize, hi: usize, start: usize, end: usize| -> Result<(f64, f64)> {
+    let score = |lo: usize, hi: usize, start: usize, end: usize| -> Result<Vec<f64>> {
         let one = |layout: ChannelLayout| -> Result<f64> {
             let [l, r] = roundtrip(&left[lo..hi], &right[lo..hi], layout)?;
             ensure!(
@@ -332,55 +360,46 @@ where
                 [&clip(&l), &clip(&r)],
             ))
         };
-        let (lr, ms) = rayon::join(
-            || one(ChannelLayout::LeftRight),
-            || one(ChannelLayout::MidSide),
-        );
-        Ok((lr?, ms?))
+        candidates.par_iter().map(|&layout| one(layout)).collect()
     };
-    let pick = |s: &PickScores| {
-        if s.left_right <= s.mid_side {
-            ChannelLayout::LeftRight
-        } else {
-            ChannelLayout::MidSide
-        }
+    let scores = |sums: &[f64], count: usize, excerpts: usize| PickScores {
+        layouts: candidates
+            .iter()
+            .zip(sums)
+            .map(|(&layout, &sum)| (layout, sum / to_f64(count)))
+            .collect(),
+        excerpts,
+    };
+    let finish = |s: PickScores| -> Result<(ChannelLayout, PickScores)> {
+        let best = s.best().context("no stereo layout scored")?;
+        Ok((best, s))
     };
     if n <= EXCERPTS * (EXCERPT + 2 * CONTEXT) {
-        let (lr, ms) = score(0, n, 0, n)?;
-        let s = PickScores {
-            left_right: lr,
-            mid_side: ms,
-            excerpts: 0,
-        };
-        return Ok((pick(&s), s));
+        return finish(scores(&score(0, n, 0, n)?, 1, 0));
     }
-    let (mut sum_lr, mut sum_ms) = (0.0, 0.0);
+    let mut sums = vec![0.0; candidates.len()];
     let mut s = PickScores::default();
     for (k, start) in excerpt_starts(&left[..n], &right[..n])
         .into_iter()
         .enumerate()
     {
         let end = (start + EXCERPT).min(n);
-        let (lr, ms) = score(
+        let got = score(
             start.saturating_sub(CONTEXT),
             (end + CONTEXT).min(n),
             start,
             end,
         )?;
-        sum_lr += lr;
-        sum_ms += ms;
-        s = PickScores {
-            left_right: sum_lr / to_f64(k + 1),
-            mid_side: sum_ms / to_f64(k + 1),
-            excerpts: k + 1,
-        };
-        let best = s.left_right.min(s.mid_side);
-        if k + 1 >= MIN_EXCERPTS && best > 0.0 && (s.left_right - s.mid_side).abs() / best > MARGIN
-        {
+        for (sum, v) in sums.iter_mut().zip(got) {
+            *sum += v;
+        }
+        s = scores(&sums, k + 1, k + 1);
+        let (best, second) = s.top_two();
+        if k + 1 >= MIN_EXCERPTS && best > 0.0 && (second - best) / best > MARGIN {
             break;
         }
     }
-    Ok((pick(&s), s))
+    finish(s)
 }
 
 #[cfg(test)]

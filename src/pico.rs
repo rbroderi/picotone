@@ -26,7 +26,9 @@
 
 mod dac;
 
-pub use dac::{ChannelLayout, DEFAULT_PAGE_FRAMES, DacInfo, DacStream, write_dac};
+pub use dac::{
+    ChannelLayout, DEFAULT_PAGE_FRAMES, DacInfo, DacStream, write_dac, write_dac_parametric,
+};
 
 use std::ops::Range;
 

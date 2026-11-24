@@ -172,8 +172,9 @@ EnCodec; only the fixed part and the audio packets differ. The implementation is
 | 1 | model | 2 |
 | 1 | scheme | 1 = raw: 10 bits per code, no entropy coding |
 | 8 | codebook hash | FNV-1a 64 over DAC's 9 x 1024 x 8 quantiser codebooks (`f32`, little-endian, stage by stage) |
-| 1 | layout | 0 = mono, 1 = left/right, 2 = mid/side (M = (L+R)/2, S = (L-R)/2; L = M+S, R = M-S) |
-| 1 per channel | codebooks | codes per frame for each coded channel (1 to 9); for mid/side, the mid's then the side's |
+| 1 | layout | 0 = mono, 1 = left/right, 2 = mid/side (M = (L+R)/2, S = (L-R)/2; L = M+S, R = M-S), 3 = parametric stereo (the mid M alone, plus stereo parameters per page) |
+| 1 | parametric settings | **only for layout 3**: bits 0-1 the band layout (0 = 20 bands, 1 = 10), bits 2-4 log2 of the frames per parameter set (1 to 16); other bits 0 |
+| 1 per coded channel | codebooks | codes per frame for each coded channel (1 to 9); for mid/side, the mid's then the side's; for parametric stereo, the mid's |
 | 1 | flags | bit 0: loop; bit 1: a comment header follows; bit 2: the length is stored. Other bits must be 0 |
 | varint | pre-skip | decoded samples a player drops at the start |
 | varint | page length | frames per page (the encoder writes 80, about 0.93 s); 0 = the stream is one page |
@@ -189,6 +190,7 @@ codebooks.
 | size | field |
 |---|---|
 | varint | end trim: **only in the last packet, and only when the length is not in the header** |
+| varint, then that many bytes | **only for layout 3**: the size of the page's stereo parameters, then the parameters (below) |
 | rest | the page's codes: channel 0's frames, then channel 1's; within a frame, codebook 0 first |
 
 Each code is 10 bits, packed low bits first into one bit stream per page that is padded with zeros to a whole
@@ -205,8 +207,42 @@ network, so a player seeking to a page decodes from a few frames earlier for an 
 ### Stereo
 
 The encoder codes a stereo input as left/right or mid/side, whichever scores better (log-mel distance, on up to
-4 loud 3 s excerpts), unless `--stereo` says which. A stereo input whose side stays more than 40 dB under its
-mid is coded as mono with `--channel-format auto`.
+4 loud 3 s excerpts), unless `--stereo` says which. At 2 codebooks per channel or fewer it also tries parametric
+stereo, with a mid of `2 x codebooks - 1` (about the same total rate). A stereo input whose side stays more than
+40 dB under its mid is coded as mono with `--channel-format auto`.
+
+### Parametric stereo (layout 3)
+
+The implementation is `src/pstereo.rs`; the measurements behind it are in `tools/pstereo_proto.py` and
+`distill/INTEGRATION.md` (M8).
+
+- **Parameter sets.** Each page's frames are split into sets of `k` frames (the header's frames per set; the
+  last set of a page may be shorter). A set holds, per band, an IID level (index into the dB grid -25, -18, -14,
+  -10, -7, -4, -2, 0, 2, 4, 7, 10, 14, 18, 25; L over R in power) and an ICC level (index into 1, 0.997, 0.99,
+  0.97, 0.937, 0.84118, 0.60092, 0.36764, 0, -0.589, -1).
+- **Bands.** They are ranges of the bins of a 1024-point STFT (43.07 Hz per bin): 20 bands with edges 0, 3, 6, 9,
+  12, 15, 18, 21, 24, 32, 40, 48, 56, 64, 72, 88, 112, 144, 184, 280, 513; or 10 bands with edges 0, 6, 12, 18,
+  24, 40, 56, 72, 112, 184, 513.
+- **Bits.** The parameters are read low bit of each byte first, as Huffman codes. For each set in order, the
+  IID row then the ICC row:
+  - in the page's first set, frequency deltas: band 0 against the grid's centre (IID 7, ICC 0), each later band
+    against the band before;
+  - in later sets, one bit first: 1 = time deltas (each band against the same band of the previous set),
+    0 = frequency deltas.
+
+  Deltas are coded with four static canonical Huffman codes (IID or ICC, frequency or time), whose code
+  lengths are in `src/pstereo.rs`. The parameters are zero-padded to a whole byte. A reader refuses data that
+  is truncated, has extra bytes, or decodes a level out of range. The parameters need nothing from other pages.
+- **Upmix.** Run a 1024-point sine-window STFT, hop 512, on the decoded mid M and on D, the mid through the
+  velvet-noise FIR in `src/pstereo.rs`. STFT frame `t` covers samples `[(t-1) x 512, (t+1) x 512)` and uses the
+  set holding frame `min(t, frames - 1)`. Per band:
+  - D is scaled by `min(1, sqrt(E_M / E_D))`, from the band's energies in that frame;
+  - with `c = 10^(IID/20)`, `a = c^2 + 1`, `p = max(a + 2 ICC c, 0.1 a)`, `g = (c^2 - 1) / p` and
+    `h = sqrt(max(0, (a - 2 ICC c) / p - g^2))`, the side is `S = g M + h D`.
+
+  The decoder then computes `L = M + S` and `R = M - S`, which keeps `(L + R) / 2 = M`. Output near a page
+  edge (within 512 samples) uses the neighbouring page's parameters, and D reaches 54 ms back into the mid.
+  So, as with the codes, a player seeking to a page decodes from a little earlier.
 
 ## Enhancement layers (`.picol`), reserved
 

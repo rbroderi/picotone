@@ -6,6 +6,8 @@
 //! channel: channel 0's frames, then channel 1's, each frame codebook 0
 //! first. Stereo is coded as left/right or as mid/side, `(L + R) / 2` and
 //! `(L - R) / 2`, chosen per file; the two may use different codebook counts.
+//! Parametric stereo codes the mid alone, and each packet starts with that
+//! page's stereo parameters ([`crate::pstereo`]).
 
 use std::ops::Range;
 
@@ -17,6 +19,7 @@ use super::{
     tags_packet,
 };
 use crate::dac::{CODEBOOK_SIZE, CODEBOOKS, HOP};
+use crate::pstereo;
 
 /// Model byte of the HQ codec.
 pub(super) const MODEL_DAC44: u8 = 2;
@@ -38,41 +41,56 @@ pub enum ChannelLayout {
     LeftRight,
     /// Two channels, mid `(L + R) / 2` then side `(L - R) / 2`.
     MidSide,
+    /// The mid alone, and stereo parameters per page: two output channels.
+    Parametric(pstereo::Config),
 }
 
 impl ChannelLayout {
-    /// Coded (and output) channels.
+    /// Coded channels.
     #[must_use]
     pub const fn channels(self) -> usize {
         match self {
-            Self::Mono => 1,
+            Self::Mono | Self::Parametric(_) => 1,
             Self::LeftRight | Self::MidSide => 2,
         }
     }
 
-    /// Name for messages: `mono`, `left/right` or `mid/side`.
+    /// Output channels.
+    #[must_use]
+    pub const fn output_channels(self) -> usize {
+        match self {
+            Self::Mono => 1,
+            Self::LeftRight | Self::MidSide | Self::Parametric(_) => 2,
+        }
+    }
+
+    /// Name for messages: `mono`, `left/right`, `mid/side` or `parametric`.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Mono => "mono",
             Self::LeftRight => "left/right",
             Self::MidSide => "mid/side",
+            Self::Parametric(_) => "parametric",
         }
     }
 
-    const fn code(self) -> u8 {
+    /// The layout byte, and for parametric stereo its settings byte.
+    fn write(self, out: &mut Vec<u8>) {
         match self {
-            Self::Mono => 0,
-            Self::LeftRight => 1,
-            Self::MidSide => 2,
+            Self::Mono => out.push(0),
+            Self::LeftRight => out.push(1),
+            Self::MidSide => out.push(2),
+            Self::Parametric(config) => out.extend([3, config.to_byte()]),
         }
     }
 
-    fn from_code(code: u8) -> Result<Self> {
-        match code {
+    fn read(h: &mut Fields<'_>) -> Result<Self> {
+        match h.u8()? {
             0 => Ok(Self::Mono),
             1 => Ok(Self::LeftRight),
             2 => Ok(Self::MidSide),
+            3 => Ok(Self::Parametric(pstereo::Config::from_byte(h.u8()?)?)),
             other => bail!("unknown channel layout {other}"),
         }
     }
@@ -186,7 +204,7 @@ impl DacInfo {
 fn head_packet(info: &DacInfo) -> Result<Vec<u8>> {
     let mut fixed = vec![MODEL_DAC44, SCHEME_RAW];
     fixed.extend_from_slice(&info.codebook_hash.to_le_bytes());
-    fixed.push(info.layout.code());
+    info.layout.write(&mut fixed);
     for &n in &info.codebooks {
         fixed.push(u8::try_from(n)?);
     }
@@ -219,7 +237,7 @@ fn parse_head(packet: &[u8]) -> Result<(DacInfo, bool)> {
     ensure!(scheme == SCHEME_RAW, "unknown HQ code scheme {scheme}");
     let mut hash = [0; 8];
     hash.copy_from_slice(h.take(8)?);
-    let layout = ChannelLayout::from_code(h.u8()?)?;
+    let layout = ChannelLayout::read(&mut h)?;
     let codebooks = (0..layout.channels())
         .map(|_| h.u8().map(usize::from))
         .collect::<Result<Vec<_>>>()?;
@@ -287,8 +305,23 @@ impl BitWriter {
 /// and [`DacInfo::frames`] frames.
 ///
 /// # Errors
-/// Fails when the codes do not match `info`.
+/// Fails when the codes do not match `info`, or the layout is parametric
+/// (see [`write_dac_parametric`]).
 pub fn write_dac(info: &DacInfo, channels: &[Vec<u16>]) -> Result<Vec<u8>> {
+    write_dac_parametric(info, channels, &[])
+}
+
+/// Writes an HQ stream like [`write_dac`], with each page's parametric
+/// stereo data ([`crate::pstereo::write_pages`]) for that layout; `parameters`
+/// must be empty for the others.
+///
+/// # Errors
+/// Fails when the codes or the parameters do not match `info`.
+pub fn write_dac_parametric(
+    info: &DacInfo,
+    channels: &[Vec<u16>],
+    parameters: &[Vec<u8>],
+) -> Result<Vec<u8>> {
     info.check()?;
     let frames = info.frames();
     ensure!(
@@ -309,6 +342,13 @@ pub fn write_dac(info: &DacInfo, channels: &[Vec<u16>]) -> Result<Vec<u8>> {
         );
     }
     let pages = info.pages();
+    let parametric = matches!(info.layout, ChannelLayout::Parametric(_));
+    ensure!(
+        parameters.len() == if parametric { pages.len() } else { 0 },
+        "parametric stereo data for {} of {} pages",
+        parameters.len(),
+        pages.len()
+    );
     let mut writer = PageWriter {
         out: Vec::new(),
         serial: SERIAL,
@@ -329,6 +369,10 @@ pub fn write_dac(info: &DacInfo, channels: &[Vec<u16>]) -> Result<Vec<u8>> {
         };
         if last && !info.length_in_header {
             put_size(&mut bits.out, info.end_trim)?;
+        }
+        if let Some(data) = parameters.get(index) {
+            put_size(&mut bits.out, data.len())?;
+            bits.out.extend_from_slice(data);
         }
         for (codes, &n) in channels.iter().zip(&info.codebooks) {
             for &code in &codes[span.start * n..span.end * n] {
@@ -413,6 +457,32 @@ impl DacStream {
             .min(self.pages.len().saturating_sub(1))
     }
 
+    /// A page's packet split into its parametric stereo data (empty for the
+    /// other layouts) and its codes. Parametric packets start with the
+    /// data's size in bytes (a varint), so the codes may have any size.
+    fn split_packet(&self, index: usize) -> Result<(&[u8], &[u8])> {
+        let Some(Some(data)) = self.pages.get(index) else {
+            bail!("page {index} is damaged or missing");
+        };
+        if !matches!(self.info.layout, ChannelLayout::Parametric(_)) {
+            return Ok((&[], data));
+        }
+        let mut f = Fields::new(data);
+        let size = f.size()?;
+        let parameters = f
+            .take(size)
+            .with_context(|| format!("page {index}'s stereo data is truncated"))?;
+        Ok((parameters, &data[f.pos..]))
+    }
+
+    /// Page `index`'s parametric stereo data (empty for the other layouts).
+    ///
+    /// # Errors
+    /// Fails when the page is damaged, missing or truncated.
+    pub fn page_parameters(&self, index: usize) -> Result<&[u8]> {
+        Ok(self.split_packet(index)?.0)
+    }
+
     /// The codes of page `index`: per coded channel, `[frame][codebook]`.
     ///
     /// # Errors
@@ -422,9 +492,7 @@ impl DacStream {
             .spans
             .get(index)
             .context("page index is out of range")?;
-        let Some(Some(data)) = self.pages.get(index) else {
-            bail!("page {index} is damaged or missing");
-        };
+        let data = self.split_packet(index)?.1;
         let bits = span.len() * self.info.frame_bits();
         ensure!(
             data.len() == bits.div_ceil(8),
@@ -538,6 +606,41 @@ mod tests {
                 u64::try_from(i.playable_samples()).ok()
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn parametric_streams_round_trip() -> Result<()> {
+        let config = pstereo::Config::new(10, 4)?;
+        for (length, with_length) in [(512 * 200 + 3, true), (512 * 80, false), (5, true)] {
+            let mut i = info(ChannelLayout::Parametric(config), vec![3], length);
+            i.length_in_header = with_length;
+            let frames = i.frames();
+            let channels = vec![codes(frames, 3, 7)];
+            let parameters: Vec<Vec<u8>> = (0..i.pages().len())
+                .map(|p| {
+                    (0..p * 37 % 200)
+                        .map(|b| u8::try_from(b % 256).unwrap_or(0))
+                        .collect()
+                })
+                .collect();
+            assert!(write_dac(&i, &channels).is_err());
+            let bytes = write_dac_parametric(&i, &channels, &parameters)?;
+            let stream = DacStream::parse(&bytes)?;
+            assert_eq!(stream.info, i);
+            assert_eq!(stream.decode_all()?, channels);
+            for (p, want) in parameters.iter().enumerate() {
+                assert_eq!(stream.page_parameters(p)?, want.as_slice());
+            }
+        }
+        let i = info(ChannelLayout::LeftRight, vec![2, 2], 512 * 10);
+        let two = vec![codes(10, 2, 1), codes(10, 2, 2)];
+        assert!(write_dac_parametric(&i, &two, &[vec![1]]).is_err());
+        let none: &[u8] = &[];
+        assert_eq!(
+            DacStream::parse(&write_dac(&i, &two)?)?.page_parameters(0)?,
+            none
+        );
         Ok(())
     }
 
