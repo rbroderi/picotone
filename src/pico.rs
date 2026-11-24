@@ -19,7 +19,7 @@
 //! loop flag set, what remains repeats seamlessly. `FORMAT.md` in the
 //! repository describes every field.
 //!
-//! The HQ codec's streams (model 2, DAC codes, bit-packed) share the Ogg
+//! The HQ codec's streams (model 2, DAC codes coded with cx2) share the Ogg
 //! framing, the comment header and the length rules; they are read and
 //! written by [`DacStream`] and [`write_dac`]. [`codec_of`] tells the two
 //! apart.
@@ -695,7 +695,7 @@ fn read_extensions(f: &mut Fields<'_>) -> Result<i16> {
 pub enum Codec {
     /// EnCodec codes, cx2-coded ([`Stream`]).
     Encodec(ModelKind),
-    /// The HQ codec's DAC codes, bit-packed ([`DacStream`]).
+    /// The HQ codec's DAC codes, coded with cx2 ([`DacStream`]).
     Dac44,
 }
 

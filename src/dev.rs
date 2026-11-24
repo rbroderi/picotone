@@ -165,7 +165,7 @@ pub(crate) fn run(command: &DevCommand, tables: &Path) -> Result<()> {
         DevCommand::Codes { input, output } => {
             let bytes = read(input)?;
             if pico::codec_of(&bytes)? == pico::Codec::Dac44 {
-                return write_dac_codes(&bytes, output);
+                return write_dac_codes(tables, &bytes, output);
             }
             let bundle = read_pico(tables, &input.to_string_lossy())?;
             write_npy(output, &bundle.codes, bundle.num_codebooks)?;
@@ -482,9 +482,10 @@ fn table_for(dir: &Path, hash: u64) -> Result<Model> {
 
 /// `dev codes` for an HQ stream: each coded channel's codes, and a sidecar
 /// with the layout and lengths.
-fn write_dac_codes(bytes: &[u8], output: &Path) -> Result<()> {
+fn write_dac_codes(tables: &Path, bytes: &[u8], output: &Path) -> Result<()> {
     let stream = pico::DacStream::parse(bytes)?;
-    let channels = stream.decode_all()?;
+    let table = crate::hq::find_table(tables, None, stream.info.table_hash)?;
+    let channels = stream.decode_all(&table)?;
     let info = &stream.info;
     for (c, (codes, &n)) in channels.iter().zip(&info.codebooks).enumerate() {
         let path = if channels.len() == 1 {
@@ -496,7 +497,12 @@ fn write_dac_codes(bytes: &[u8], output: &Path) -> Result<()> {
     }
     let sidecar = serde_json::json!({
         "model": "dac44",
-        "layout": format!("{:?}", info.layout),
+        "layout": match info.layout {
+            pico::ChannelLayout::Mono => "Mono",
+            pico::ChannelLayout::LeftRight => "LeftRight",
+            pico::ChannelLayout::MidSide => "MidSide",
+            pico::ChannelLayout::Parametric(_) => "Parametric",
+        },
         "codebooks": info.codebooks,
         "audio_length": info.audio_length,
         "pre_skip": info.pre_skip,

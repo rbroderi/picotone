@@ -111,9 +111,9 @@ fn pages_round_trip_at_the_fixture_size() -> Result<()> {
         for start in (0..frames).step_by(page) {
             let end = (start + page).min(frames);
             let codes = &case.codes[start * n..end * n];
-            let coded = hq::encode_page(&model, case.role, n, codes)?;
-            bytes += coded.len();
-            assert_eq!(hq::decode_page(&model, case.role, n, codes.len(), &coded)?, codes);
+            let packed = hq::encode_page(&model, case.role, n, codes)?;
+            bytes += packed.len();
+            assert_eq!(hq::decode_page(&model, case.role, n, codes.len(), &packed)?, codes);
         }
         // The range coder adds at most a few bytes per page to the model's bits.
         let bits = cast(bytes) * 8.0;
@@ -129,8 +129,8 @@ fn truncated_pages_are_refused() -> Result<()> {
     let case = &cases[0];
     let n = case.codebooks;
     let codes = &case.codes[..page * n];
-    let coded = hq::encode_page(&model, case.role, n, codes)?;
-    let short = &coded[..coded.len() / 2];
+    let packed = hq::encode_page(&model, case.role, n, codes)?;
+    let short = &packed[..packed.len() / 2];
     assert!(hq::decode_page(&model, case.role, n, codes.len(), short).is_err());
     Ok(())
 }

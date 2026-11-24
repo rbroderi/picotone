@@ -59,13 +59,15 @@ pub enum Role {
 
 /// Largest weight of a layer with `inputs` inputs and a bias.
 fn hidden_limit(inputs: usize) -> i32 {
-    let bound = (2_i64.pow(31) - 1 - i64::from(BIAS_LIMIT)) / (inputs.max(1) as i64 * i64::from(LIMIT));
+    let bound = (2_i64.pow(31) - 1 - i64::from(BIAS_LIMIT))
+        / (i64::try_from(inputs.max(1)).unwrap_or(i64::MAX / 2048) * i64::from(LIMIT));
     i32::try_from(bound.min(32767)).unwrap_or(0)
 }
 
 /// Largest weight of an output layer with `inputs` inputs.
 fn out_limit(inputs: usize) -> i32 {
-    let bound = (2_i64.pow(31) - 1) / (inputs.max(1) as i64 * i64::from(LIMIT));
+    let bound = (2_i64.pow(31) - 1)
+        / (i64::try_from(inputs.max(1)).unwrap_or(i64::MAX / 2048) * i64::from(LIMIT));
     i32::try_from(bound.min(32767)).unwrap_or(0)
 }
 
@@ -518,10 +520,11 @@ mod tests {
 
     #[test]
     fn limits_keep_accumulators_in_range() {
-        for n in [1, 128, 256, 384, 512, 1152] {
-            let worst = i64::from(hidden_limit(n)) * i64::from(LIMIT) * n as i64 + i64::from(BIAS_LIMIT);
+        for n in [1_i64, 128, 256, 384, 512, 1152] {
+            let inputs = usize::try_from(n).unwrap_or(0);
+            let worst = i64::from(hidden_limit(inputs)) * i64::from(LIMIT) * n + i64::from(BIAS_LIMIT);
             assert!(worst <= i64::from(i32::MAX), "{n}");
-            let worst = i64::from(out_limit(n)) * i64::from(LIMIT) * n as i64;
+            let worst = i64::from(out_limit(inputs)) * i64::from(LIMIT) * n;
             assert!(worst <= i64::from(i32::MAX), "{n}");
         }
     }

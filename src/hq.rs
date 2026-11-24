@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use anyhow::{Context as _, Result, ensure};
 use picotone::audio::Audio;
+use picotone::cx2::hq::HqModel;
 use picotone::dac::{self, DacDecoder, DacEncoder};
 use picotone::layout::{self, Trimmer};
 use picotone::nn::Seq;
@@ -23,6 +24,47 @@ use rayon::prelude::*;
 pub(crate) const ENCODER_FILE: &str = "dac44_encoder.safetensors";
 /// Decoder weights in the weights directory.
 pub(crate) const DECODER_FILE: &str = "dac44_student.safetensors";
+/// The cx2 table HQ streams are coded with, in the tables directory.
+pub(crate) const TABLE_FILE: &str = "cx2_dac44.ecxm";
+
+/// Loads an HQ cx2 table.
+pub(crate) fn load_table(path: &Path) -> Result<HqModel> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    HqModel::from_table(&bytes).with_context(|| format!("loading {}", path.display()))
+}
+
+/// The table a stream was coded with: `explicit`, or the HQ table in `dir` with its hash.
+pub(crate) fn find_table(dir: &Path, explicit: Option<&Path>, hash: u64) -> Result<HqModel> {
+    let table = if let Some(path) = explicit {
+        load_table(path)?
+    } else {
+        let mut found = None;
+        let entries =
+            std::fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))?;
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().is_some_and(|e| e == "ecxm") {
+                let bytes = std::fs::read(&path)?;
+                if picotone::cx2::hq::table_hash(&bytes) == Some(hash) {
+                    found = Some(HqModel::from_table(&bytes)?);
+                    break;
+                }
+            }
+        }
+        found.with_context(|| {
+            format!(
+                "no HQ cx2 table with hash {hash:016x} in {} (pass --tables or --table)",
+                dir.display()
+            )
+        })?
+    };
+    ensure!(
+        table.hash() == hash,
+        "the file was coded with HQ cx2 table {hash:016x}, not {:016x}",
+        table.hash()
+    );
+    Ok(table)
+}
 
 /// How to choose the stereo layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +115,8 @@ pub(crate) struct Settings<'a> {
     pub page_length: Option<usize>,
     /// Leave the length out of the header.
     pub no_length: bool,
+    /// The cx2 table to code with.
+    pub table: &'a HqModel,
 }
 
 fn file(weights: &Path, name: &str) -> Result<PathBuf> {
@@ -232,6 +276,7 @@ pub(crate) fn encode(
     let codebooks = layout_codebooks(layout, s, picked);
     let mut info = DacInfo {
         codebook_hash: encoder.codebook_hash(),
+        table_hash: s.table.hash(),
         layout,
         codebooks: codebooks.clone(),
         looped: false,
@@ -272,9 +317,11 @@ pub(crate) fn encode(
             }
         );
     }
-    let bytes = pico::write_dac_parametric(&info, &codes, &parameters)?;
+    let coding = Instant::now();
+    let bytes = pico::write_dac_parametric(&info, s.table, &codes, &parameters)?;
+    let cx2_seconds = coding.elapsed().as_secs_f64();
     eprintln!(
-        "encoded with dac44-student ({}, {} codebooks{}) in {:.2} s",
+        "encoded with dac44-student ({}, {} codebooks{}) in {:.2} s (cx2 {:.2} s)",
         layout.name(),
         codebooks
             .iter()
@@ -282,7 +329,8 @@ pub(crate) fn encode(
             .collect::<Vec<_>>()
             .join("+"),
         if s.looped { ", loop" } else { "" },
-        start.elapsed().as_secs_f64()
+        start.elapsed().as_secs_f64(),
+        cx2_seconds
     );
     Ok((info, bytes))
 }
@@ -353,7 +401,7 @@ fn pick(
 }
 
 /// Decodes an HQ stream to audio, trimmed for playback.
-pub(crate) fn decode(weights: &Path, stream: &DacStream) -> Result<Audio> {
+pub(crate) fn decode(weights: &Path, table: &HqModel, stream: &DacStream) -> Result<Audio> {
     let decoder = load_decoder(weights)?;
     let info = &stream.info;
     ensure!(
@@ -363,7 +411,8 @@ pub(crate) fn decode(weights: &Path, stream: &DacStream) -> Result<Audio> {
         decoder.codebook_hash()
     );
     let start = Instant::now();
-    let all_codes = stream.decode_all()?;
+    let all_codes = stream.decode_all(table)?;
+    let cx2_seconds = start.elapsed().as_secs_f64();
     let signals = all_codes
         .par_iter()
         .zip(&info.codebooks)
@@ -400,7 +449,7 @@ pub(crate) fn decode(weights: &Path, stream: &DacStream) -> Result<Audio> {
     trimmer.finish()?;
     let audio = Audio::from_seq(&out, dac::SAMPLE_RATE);
     eprintln!(
-        "decoded {:.2} s with dac44-student in {:.2} s",
+        "decoded {:.2} s with dac44-student in {:.2} s (cx2 {cx2_seconds:.2} s)",
         audio.seconds(),
         start.elapsed().as_secs_f64()
     );
@@ -437,6 +486,24 @@ pub(crate) fn print_info(stream: &DacStream, size: usize) {
             .join("+")
     );
     eprintln!("code hash:  {:016x}", info.codebook_hash);
+    eprintln!("cx2 table:  {:016x}", info.table_hash);
+    let frames = stream
+        .spans
+        .iter()
+        .zip(&stream.pages)
+        .filter(|(_, p)| p.is_some())
+        .map(|(s, _)| s.len())
+        .sum::<usize>();
+    for (c, (bytes, &n)) in stream.coded_bytes().iter().zip(&info.codebooks).enumerate() {
+        let codes = frames * n;
+        if codes > 0 {
+            let bits = picotone::config::to_f64(bytes * 8) / picotone::config::to_f64(codes);
+            eprintln!(
+                "channel {c}:  {bytes} bytes of codes, {bits:.3} bits per code ({:.1}% under 10)",
+                100.0 * (1.0 - bits / 10.0)
+            );
+        }
+    }
     eprintln!(
         "pages:      {} of {} frames ({} damaged)",
         stream.pages.len(),

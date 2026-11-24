@@ -170,8 +170,9 @@ EnCodec; only the fixed part and the audio packets differ. The implementation is
 | size | field | meaning |
 |---|---|---|
 | 1 | model | 2 |
-| 1 | scheme | 1 = raw: 10 bits per code, no entropy coding |
+| 1 | scheme | 2 = `cx2` (the only HQ scheme; below) |
 | 8 | codebook hash | FNV-1a 64 over DAC's 9 x 1024 x 8 quantiser codebooks (`f32`, little-endian, stage by stage) |
+| 8 | table hash | FNV-1a 64 of the HQ cx2 table file (`.ecxm`, magic `ECXH`) the pages are coded with |
 | 1 | layout | 0 = mono, 1 = left/right, 2 = mid/side (M = (L+R)/2, S = (L-R)/2; L = M+S, R = M-S), 3 = parametric stereo (the mid M alone, plus stereo parameters per page) |
 | 1 | parametric settings | **only for layout 3**: bits 0-1 the band layout (0 = 20 bands, 1 = 10), bits 2-4 log2 of the frames per parameter set (1 to 16); other bits 0 |
 | 1 per coded channel | codebooks | codes per frame for each coded channel (1 to 9); for mid/side, the mid's then the side's; for parametric stereo, the mid's |
@@ -183,7 +184,8 @@ EnCodec; only the fixed part and the audio packets differ. The implementation is
 
 The hash names the code space, not a decoder: any decoder of DAC 44 kHz's codes (the student, a later student,
 or DAC's own decoder) can play the stream, and a decoder must refuse a stream whose hash differs from its own
-codebooks.
+codebooks. The table hash names the entropy coder's model: a decoder needs that exact table (picotone looks for
+it by hash in its tables directory; it ships as `models/cx2_dac44.ecxm`) and refuses the stream without it.
 
 ### Audio packets
 
@@ -191,17 +193,32 @@ codebooks.
 |---|---|
 | varint | end trim: **only in the last packet, and only when the length is not in the header** |
 | varint, then that many bytes | **only for layout 3**: the size of the page's stereo parameters, then the parameters (below) |
-| rest | the page's codes: channel 0's frames, then channel 1's; within a frame, codebook 0 first |
+| per coded channel: varint, then that many bytes | the size of the channel's coded codes, then the codes, range-coded with cx2 (below) |
 
-Each code is 10 bits, packed low bits first into one bit stream per page that is padded with zeros to a whole
-byte. A page holds `page length` frames (the last may hold fewer), so its size in bytes is fixed by the header,
-and a reader refuses a packet of any other size.
+Nothing follows the last channel's codes; a reader refuses a packet with trailing bytes. A page holds
+`page length` frames (the last may hold fewer).
+
+### Code coding (`cx2`)
+
+Each coded channel of each page is coded on its own: the predictor starts empty and the range coder (the
+64-bit coder of the EnCodec streams' cx2, `src/cx2/rangecoder.rs`) starts afresh, so a page needs nothing from
+other pages or channels. The codes go frame by frame, codebook 0 first, `codebooks` per frame. For each code the
+model gives 1024 integer logits; the frequencies are `(EXP[d mod 2^f] >> (d div 2^f)) + floor`, where `d` is
+the code's distance below the largest logit, `f` the table's fractional bits, `EXP` and `floor` from the table,
+and the shift capped at 31.
+
+The model (`src/cx2/hq.rs`, trained by `train/hq_net.py`) is an integer network over the channel's previous 8
+frames *of the same page* and the codebooks already coded in this frame, with a bias chosen by the channel's
+role: left/right (layout 1), mid (layout 0, the mid of layout 2, and layout 3), or side. Every operation is an
+`i16` x `i16` product summed in `i32`, a right shift by a power of two and a clamp, with limits on the table's
+values that keep the sums in range, so every decoder computes identical frequencies. The table format is
+described in `src/cx2/hq.rs`; its exact arithmetic is the reference.
 
 ### Length and granules
 
 The coded audio is `ceil(samples / 512)` frames; the encoder zero-pads the last frame, and that padding is
 implicit (it is not part of the end trim). A page's granule position is `frames so far x 512`, capped at the end
-of the audio. Every page decodes on its own (the codes need no state), but the decoder is a convolution
+of the audio. Every page decodes on its own (the codes' coder starts afresh per page), but the decoder is a convolution
 network, so a player seeking to a page decodes from a few frames earlier for an exact result.
 
 ### Stereo

@@ -25,13 +25,14 @@ def main():
     ap.add_argument("--wav", required=True, help="directory holding <name>.wav")
     ap.add_argument("--out", required=True)
     ap.add_argument("--threads", type=int, default=3)
-    ap.add_argument("--limit", type=int, default=0, help="stop after this many clips (0: all)")
+    ap.add_argument("--limit", type=int, default=0, help="use this many clips, spread evenly over the split (0: all)")
     ap.add_argument("--timeout", type=int, default=1800, help="seconds per clip before it counts as hung")
     args = ap.parse_args()
     with open(args.list, encoding="utf-8") as f:
         clips = [c["name"] for c in json.load(f) if c["split"] == args.split]
-    if args.limit:
-        clips = clips[: args.limit]
+    if args.limit and args.limit < len(clips):
+        # Every k-th clip, so the subset spreads over the list's groups and sources.
+        clips = [clips[i * len(clips) // args.limit] for i in range(args.limit)]
     os.makedirs(args.out, exist_ok=True)
     start = time.time()
     done = 0

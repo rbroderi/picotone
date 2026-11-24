@@ -354,8 +354,10 @@ fn main() -> Result<()> {
                 std::fs::read(input).with_context(|| format!("reading {}", input.display()))?;
             match pico::codec_of(&bytes)? {
                 Codec::Dac44 => {
-                    ensure!(options.table.is_none(), "HQ files have no cx2 table");
-                    let audio = hq::decode(&weights(), &hq::parse(&bytes)?)?;
+                    let stream = hq::parse(&bytes)?;
+                    let table =
+                        hq::find_table(&tables(), options.table.as_deref(), stream.info.table_hash)?;
+                    let audio = hq::decode(&weights(), &table, &stream)?;
                     write_wav(output, &audio, options)?;
                 }
                 Codec::Encodec(_) => {
@@ -375,7 +377,9 @@ fn main() -> Result<()> {
             wav,
         } => match encode_file(&weights(), &tables(), input, encode, true)? {
             Encoded::Hq { bytes, .. } => {
-                let audio = hq::decode(&weights(), &hq::parse(&bytes)?)?;
+                let stream = hq::parse(&bytes)?;
+                let table = hq::find_table(&tables(), wav.table.as_deref(), stream.info.table_hash)?;
+                let audio = hq::decode(&weights(), &table, &stream)?;
                 write_wav(output, &audio, wav)?;
             }
             Encoded::Encodec { model, bytes, .. } => {
@@ -471,12 +475,18 @@ impl Encoded {
 
 fn encode_hq(
     weights: &Path,
+    tables: &Path,
     source: &Audio,
     options: &EncodeOptions,
     channels: usize,
     auto_mono: bool,
 ) -> Result<Encoded> {
     let codebooks = options.codebooks.unwrap_or(picotone::dac::CODEBOOKS);
+    let table_path = options
+        .table
+        .clone()
+        .unwrap_or_else(|| tables.join(hq::TABLE_FILE));
+    let table = hq::load_table(&table_path)?;
     let settings = hq::Settings {
         channels,
         auto_mono,
@@ -498,6 +508,7 @@ fn encode_hq(
         tags: &options.tags,
         page_length: options.page_length,
         no_length: options.no_length,
+        table: &table,
     };
     let (info, bytes) = hq::encode(weights, source, &settings)?;
     Ok(Encoded::Hq { info, bytes })
@@ -526,7 +537,7 @@ fn encode_file(
         Plan::Hq {
             channels,
             auto_mono,
-        } => return encode_hq(weights, &source, options, channels, auto_mono),
+        } => return encode_hq(weights, tables, &source, options, channels, auto_mono),
     };
     let table_path = options
         .table
