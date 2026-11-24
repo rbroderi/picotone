@@ -163,6 +163,95 @@ fn truncated_pages_are_refused() -> Result<()> {
     Ok(())
 }
 
+/// Where an HQ decode's time goes: `cargo test --release --test hq_cx2 -- --ignored --nocapture`.
+/// Every figure is the best of several runs, so other load on the machine matters less.
+#[test]
+#[ignore = "a timing report, not a check"]
+fn profile_decode() -> Result<()> {
+    use picotone::cx2::kernels::Matrix;
+    use std::time::Instant;
+    let best = |runs: usize, f: &mut dyn FnMut() -> Result<()>| -> Result<f64> {
+        let mut out = f64::INFINITY;
+        for _ in 0..runs {
+            let t = Instant::now();
+            f()?;
+            out = out.min(t.elapsed().as_secs_f64());
+        }
+        Ok(out)
+    };
+    let (_, frames, _, cases) = fixture()?;
+    let model = model()?;
+    for case in &cases {
+        let n = case.codebooks;
+        let page = &case.codes[..80.min(frames) * n];
+        let packed = hq::encode_page(&model, case.role, n, page)?;
+        let page_frames = cast(page.len() / n);
+        let decode = best(9, &mut || {
+            drop(hq::decode_page(&model, case.role, n, page.len(), &packed)?);
+            Ok(())
+        })? / page_frames;
+        // The predictor without the range coder or the frequency step.
+        let mut predictor = model.predictor(case.role, n)?;
+        let logits = best(9, &mut || {
+            predictor.reset();
+            for &code in page {
+                let _ = std::hint::black_box(predictor.logits());
+                predictor.update(code)?;
+            }
+            Ok(())
+        })? / page_frames;
+        eprintln!(
+            "q{n}: decode {:.1} us per frame ({:.4} s per channel-second); logits alone {:.1} us",
+            decode * 1e6,
+            decode * 86.13,
+            logits * 1e6
+        );
+    }
+    // Kernel shapes, with half the inputs zero as after a ReLU.
+    for (rows, columns, per_frame) in [
+        (512, 1152, 1),
+        (256, 512, 1),
+        (128, 256 + 64, 9),
+        (1024, 128, 9),
+    ] {
+        let weights: Vec<i16> = (0..rows * columns)
+            .map(|i| i16::try_from(i * 7919 % 601).unwrap_or(0) - 300)
+            .collect();
+        let matrix = Matrix::from_columns(&weights, rows).context("shape")?;
+        let input: Vec<i16> = (0..columns)
+            .map(|i| {
+                if i % 2 == 0 {
+                    0
+                } else {
+                    i16::try_from(i % 1000).unwrap_or(0)
+                }
+            })
+            .collect();
+        let mut acc = vec![0_i32; rows];
+        for simd in [Simd::new(), Simd::baseline()] {
+            let calls = 500;
+            let us = best(7, &mut || {
+                for _ in 0..calls {
+                    simd.multiply_add(&mut acc, &matrix, &input);
+                }
+                Ok(())
+            })? / cast(calls)
+                * 1e6;
+            eprintln!(
+                "{rows:5} x {columns:4} ({}): {us:7.2} us per call, x{per_frame} per q9 frame, {:.1} GMAC/s",
+                if simd.is_baseline() {
+                    "baseline"
+                } else {
+                    "dispatch"
+                },
+                cast(rows * columns) / us / 1e3
+            );
+        }
+        let _ = std::hint::black_box(&acc);
+    }
+    Ok(())
+}
+
 #[expect(clippy::cast_precision_loss, reason = "byte counts are small")]
 const fn cast(value: usize) -> f64 {
     value as f64

@@ -41,6 +41,8 @@ const VERSION: u32 = 1;
 /// Largest activation and embedding magnitude.
 const LIMIT: i32 = 1023;
 const BIAS_LIMIT: u32 = 1 << 29;
+/// Codes per block of frequency sums, which the coder searches first.
+const BLOCK: usize = 32;
 /// Largest right shift applied to the exponential table.
 const MAX_SHIFT: u32 = 31;
 /// Largest shift a layer may declare.
@@ -339,6 +341,7 @@ impl HqModel {
             hidden: vec![0; self.h1.max(self.rank)],
             logits: vec![0; CARD],
             freqs: vec![0; CARD],
+            blocks: vec![0; CARD / BLOCK],
         })
     }
 
@@ -373,6 +376,8 @@ pub struct HqPredictor<'a> {
     hidden: Vec<i16>,
     logits: Vec<i32>,
     freqs: Vec<u32>,
+    /// Sum of each `BLOCK` frequencies (each at most `2^24 + 2^16`, so a block fits a `u32`).
+    blocks: Vec<u32>,
 }
 
 impl HqPredictor<'_> {
@@ -433,12 +438,58 @@ impl HqPredictor<'_> {
         let last = table.len() - 1;
         let best = self.logits.iter().copied().max().unwrap_or(0);
         let mut total = 0_u64;
-        for (freq, &logit) in self.freqs.iter_mut().zip(&self.logits) {
-            let below = usize::try_from(best.abs_diff(logit)).unwrap_or(usize::MAX);
-            *freq = table[below.min(last)];
-            total += u64::from(*freq);
+        for ((freqs, logits), block) in self
+            .freqs
+            .as_chunks_mut::<BLOCK>()
+            .0
+            .iter_mut()
+            .zip(self.logits.as_chunks::<BLOCK>().0)
+            .zip(&mut self.blocks)
+        {
+            let mut sum = 0_u32;
+            for (freq, &logit) in freqs.iter_mut().zip(logits) {
+                let below = usize::try_from(best.abs_diff(logit)).unwrap_or(usize::MAX);
+                *freq = table[below.min(last)];
+                sum += *freq;
+            }
+            *block = sum;
+            total += u64::from(sum);
         }
         (&self.freqs, total)
+    }
+
+    /// The frequencies of the codes before `code`, summed, from the last [`Self::frequencies`].
+    #[must_use]
+    pub fn cumulative(&self, code: usize) -> u64 {
+        let block = code / BLOCK;
+        let whole: u64 = self.blocks[..block].iter().map(|&b| u64::from(b)).sum();
+        whole
+            + self.freqs[block * BLOCK..code]
+                .iter()
+                .map(|&f| u64::from(f))
+                .sum::<u64>()
+    }
+
+    /// The code whose frequency range holds `target`, with the range's start and
+    /// size, from the last [`Self::frequencies`]; `None` past the total.
+    #[must_use]
+    pub fn locate(&self, target: u64) -> Option<(usize, u64, u32)> {
+        let mut cum = 0_u64;
+        for (b, &sum) in self.blocks.iter().enumerate() {
+            let next = cum + u64::from(sum);
+            if target < next {
+                for (i, &freq) in self.freqs[b * BLOCK..(b + 1) * BLOCK].iter().enumerate() {
+                    let end = cum + u64::from(freq);
+                    if target < end {
+                        return Some((b * BLOCK + i, cum, freq));
+                    }
+                    cum = end;
+                }
+                return None;
+            }
+            cum = next;
+        }
+        None
     }
 
     /// Records the code just coded and moves to the next one.
@@ -484,8 +535,8 @@ pub fn encode_page(
         let index = usize::from(code);
         let (freqs, total) = predictor.frequencies();
         ensure!(index < freqs.len(), "code {code} is out of range");
-        let cum: u64 = freqs[..index].iter().map(|&f| u64::from(f)).sum();
-        encoder.encode(cum, u64::from(freqs[index]), total)?;
+        let freq = u64::from(freqs[index]);
+        encoder.encode(predictor.cumulative(index), freq, total)?;
         predictor.update(code)?;
     }
     Ok(encoder.finish())
@@ -507,19 +558,11 @@ pub fn decode_page(
     // The count comes from a header; reserve only what the bytes could plausibly hold.
     let mut codes = Vec::with_capacity(count.min(bytes.len().saturating_mul(8) + 64));
     for _ in 0..count {
-        let (freqs, total) = predictor.frequencies();
+        let (_, total) = predictor.frequencies();
         let target = decoder.target(total)?;
-        let mut cum = 0_u64;
-        let mut found = None;
-        for (index, &freq) in freqs.iter().enumerate() {
-            let next = cum + u64::from(freq);
-            if target < next {
-                found = Some((index, freq));
-                break;
-            }
-            cum = next;
-        }
-        let (index, freq) = found.context("corrupt entropy-coded page")?;
+        let (index, cum, freq) = predictor
+            .locate(target)
+            .context("corrupt entropy-coded page")?;
         decoder.consume(cum, u64::from(freq));
         ensure!(!decoder.overrun(), "entropy-coded page is truncated");
         let code = u16::try_from(index)?;

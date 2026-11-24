@@ -46,6 +46,12 @@ impl Simd {
         }
     }
 
+    /// Whether this dispatcher always runs the baseline code path.
+    #[must_use]
+    pub const fn is_baseline(self) -> bool {
+        self.baseline
+    }
+
     /// Adds `matrix * weights` to `acc`.
     ///
     /// `matrix` holds `weights.len()` columns of `acc.len()` entries each. The
@@ -96,6 +102,11 @@ impl Simd {
         #[cfg(target_arch = "x86_64")]
         if let Some(v3) = self.v3 {
             v3.vectorize(|| multiply_add_v3(v3, acc, matrix, active));
+            return;
+        }
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        if !self.baseline {
+            multiply_add_simd128(acc, matrix, active);
             return;
         }
         multiply_add(acc, matrix, active);
@@ -218,6 +229,50 @@ fn multiply_add_v3(
             }
         }
         let padded: [i32; GROUP] = pulp::cast(lanes);
+        sums.copy_from_slice(&padded[..sums.len()]);
+    }
+}
+
+/// WebAssembly SIMD128 form of [`Simd::multiply_add`]: the same sums, four
+/// rows per instruction. `i32x4.dot_i16x8_s` adds the two products of a row
+/// with wrapping, exactly as the other forms do (it is not relaxed SIMD).
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn multiply_add_simd128(acc: &mut [i32], matrix: &Matrix, active: &[(usize, i16, i16)]) {
+    use core::arch::wasm32::{
+        i16x8, i32x4, i32x4_add, i32x4_dot_i16x8, i32x4_extract_lane, i32x4_splat, v128,
+    };
+    for (sums, blocks) in acc
+        .chunks_mut(GROUP)
+        .zip(matrix.blocks.chunks_exact(matrix.pairs.max(1)))
+    {
+        let mut padded = [0_i32; GROUP];
+        padded[..sums.len()].copy_from_slice(sums);
+        let mut lanes: [v128; GROUP / 4] = core::array::from_fn(|j| {
+            i32x4(
+                padded[4 * j],
+                padded[4 * j + 1],
+                padded[4 * j + 2],
+                padded[4 * j + 3],
+            )
+        });
+        for &(pair, left, right) in active {
+            let Some(block) = blocks.get(pair) else {
+                continue;
+            };
+            let [l0, l1] = left.to_le_bytes();
+            let [r0, r1] = right.to_le_bytes();
+            let weights = i32x4_splat(i32::from_le_bytes([l0, l1, r0, r1]));
+            for (lane, e) in lanes.iter_mut().zip(block.as_chunks::<8>().0) {
+                let entries = i16x8(e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]);
+                *lane = i32x4_add(*lane, i32x4_dot_i16x8(entries, weights));
+            }
+        }
+        for (j, lane) in lanes.iter().enumerate() {
+            padded[4 * j] = i32x4_extract_lane::<0>(*lane);
+            padded[4 * j + 1] = i32x4_extract_lane::<1>(*lane);
+            padded[4 * j + 2] = i32x4_extract_lane::<2>(*lane);
+            padded[4 * j + 3] = i32x4_extract_lane::<3>(*lane);
+        }
         sums.copy_from_slice(&padded[..sums.len()]);
     }
 }
