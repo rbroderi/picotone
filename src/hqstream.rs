@@ -54,6 +54,14 @@ pub trait HqDecoder: fmt::Debug + Send + Sync {
     /// The context it needs around a span.
     fn context(&self) -> Context;
 
+    /// Most frames one [`HqDecoder::decode_window`] call should decode
+    /// (before context); longer spans are split into pieces of at most this
+    /// many, decoded in parallel. A decoder with a wide context wants long
+    /// pieces, which recompute less of it.
+    fn piece(&self) -> usize {
+        dac::CHUNK
+    }
+
     /// Decodes `codes`, `[frames][num_codebooks]`, as if they were a whole
     /// file: `frames * 512` samples.
     ///
@@ -138,9 +146,9 @@ pub struct HqStream<'a> {
     emitted: usize,
 }
 
-/// Most frames one network call decodes; longer requests are split into
-/// pieces that run in parallel (the same as [`dac::CHUNK`]).
-const PIECE: usize = dac::CHUNK;
+/// A span is split for idle threads only into pieces of at least this many
+/// contexts, so that the recomputed context stays a small share.
+const MIN_PIECE_CONTEXTS: usize = 4;
 
 impl<'a> HqStream<'a> {
     /// Opens `stream` for decoding with `table` and `decoder`; the first
@@ -412,9 +420,19 @@ impl<'a> HqStream<'a> {
     }
 
     /// Each coded channel's samples of frames `range`, decoded in pieces of
-    /// at most [`PIECE`] frames, all pieces of all channels in parallel.
+    /// at most [`HqDecoder::piece`] frames (more, shorter ones while threads
+    /// would idle), all pieces of all channels in parallel.
     fn network(&self, range: Range<usize>) -> Result<Vec<Vec<f32>>> {
-        let pieces = range.len().div_ceil(PIECE);
+        let channels = self.codes.len().max(1);
+        let shortest = MIN_PIECE_CONTEXTS * self.decoder.context().frames.max(1);
+        let spread = rayon::current_num_threads()
+            .div_ceil(channels)
+            .min(range.len() / shortest)
+            .max(1);
+        let pieces = range
+            .len()
+            .div_ceil(self.decoder.piece().max(1))
+            .max(spread);
         let size = range.len().div_ceil(pieces.max(1));
         let jobs: Vec<(usize, Range<usize>)> = (0..self.codes.len())
             .flat_map(|c| {

@@ -316,6 +316,9 @@ struct WavOptions {
     /// cx2 table to decode with, instead of the one the tables directory holds for the file.
     #[arg(long)]
     table: Option<PathBuf>,
+    /// HQ decoder: any decoder of DAC 44 kHz codes plays any HQ file.
+    #[arg(long, value_enum, default_value_t = hq::DecoderChoice::Student)]
+    decoder: hq::DecoderChoice,
 }
 
 fn main() -> Result<()> {
@@ -360,7 +363,7 @@ fn main() -> Result<()> {
                         options.table.as_deref(),
                         stream.info.table_hash,
                     )?;
-                    let audio = hq::decode(&weights(), &table, stream)?;
+                    let audio = hq::decode(&weights(), &table, stream, options.decoder)?;
                     write_wav(output, &audio, options)?;
                 }
                 Codec::Encodec(_) => {
@@ -383,7 +386,7 @@ fn main() -> Result<()> {
                 let stream = hq::parse(&bytes)?;
                 let table =
                     hq::find_table(&tables(), wav.table.as_deref(), stream.info.table_hash)?;
-                let audio = hq::decode(&weights(), &table, stream)?;
+                let audio = hq::decode(&weights(), &table, stream, wav.decoder)?;
                 write_wav(output, &audio, wav)?;
             }
             Encoded::Encodec { model, bytes, .. } => {

@@ -18,13 +18,21 @@ import type {
   BuildPreference,
   ChunkResponse,
   DecodeStats,
+  HqDecoderName,
   ModelInfo,
   ModelName,
   Request,
   Response,
 } from "./protocol.js";
 
-export type { BuildInfo, BuildPreference, DecodeStats, ModelInfo, ModelName } from "./protocol.js";
+export type {
+  BuildInfo,
+  BuildPreference,
+  DecodeStats,
+  HqDecoderName,
+  ModelInfo,
+  ModelName,
+} from "./protocol.js";
 export { type PicoInfo, readPicoHeader } from "./pico-header.js";
 import { readPicoHeader } from "./pico-header.js";
 
@@ -233,15 +241,29 @@ export class PicotoneDecoder {
    * with the cx2 tables `cx2-tables.json` lists for it. Both models can be
    * loaded at the same time; `decode` picks the one the file names and the
    * table by the hash the file stores.
+   *
+   * For `dac44`, `hqDecoder` picks the network (default `dac44_student`;
+   * `dac44_vocos` does about a fifth of the work). Loading again with the
+   * other one switches to it; the old weights stay in the worker's memory.
    */
   loadModel(
     name: ModelName,
-    options: { readonly onProgress?: (loaded: number, total: number) => void } = {},
+    options: {
+      readonly onProgress?: (loaded: number, total: number) => void;
+      readonly hqDecoder?: HqDecoderName;
+    } = {},
   ): Promise<ModelInfo> {
     const id = this.#nextId++;
     return new Promise<ModelInfo>((resolve, reject) => {
       this.#send(
-        { type: "load", id, model: name, modelsUrl: this.#modelsUrl, cacheName: this.#cacheName },
+        {
+          type: "load",
+          id,
+          model: name,
+          modelsUrl: this.#modelsUrl,
+          cacheName: this.#cacheName,
+          ...(options.hqDecoder === undefined ? {} : { hqDecoder: options.hqDecoder }),
+        },
         (message) => {
           if (message.type === "loadProgress") {
             options.onProgress?.(message.loaded, message.total);

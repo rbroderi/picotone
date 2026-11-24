@@ -20,6 +20,7 @@ pub mod config;
 pub mod cx2;
 pub mod dac;
 mod fastconv;
+mod fft;
 pub mod hqstream;
 mod kernels;
 pub mod layout;
@@ -31,6 +32,7 @@ pub mod prof;
 pub mod pstereo;
 pub mod scale;
 pub mod stereo;
+pub mod vocos;
 pub mod weights;
 mod winograd;
 

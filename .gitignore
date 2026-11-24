@@ -21,6 +21,9 @@ distill/runs/
 distill/export/
 distill/data/*.jsonl
 distill/data/*.jsonl.*
+# The Vocos HQ decoder: random-init stand-ins (tools/vocos_fixture.py) until
+# the trained export is converted by tools/export_vocos.py
+weights/dac44_vocos.*
 
 # Scratch audio
 *.wav

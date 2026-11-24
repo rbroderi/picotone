@@ -111,7 +111,9 @@ search in the quantiser, which gives slightly better quality at no decode cost.
 | `--threads` | all cores | Worker threads |
 
 `decode` takes `--float` (32-bit float WAV) and `--rescale` (scale down to avoid clipping, instead of
-limiting). `roundtrip` encodes and decodes in one step. `info` prints the headers, the tags and the bitrate.
+limiting). For HQ files, `--decoder vocos` decodes with the Vocos (iSTFT) decoder,
+`weights/dac44_vocos.safetensors`, instead of the student: about six times faster. Any HQ file plays with
+either decoder. Its trained weights are not in the repository yet (`tools/export_vocos.py` makes them). `roundtrip` encodes and decodes in one step. `info` prints the headers, the tags and the bitrate.
 
 ## The `.pico` format
 

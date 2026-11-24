@@ -38,9 +38,11 @@ pub const CODEBOOKS: usize = 9;
 /// Entries per codebook.
 pub const CODEBOOK_SIZE: usize = 1024;
 /// Values per codebook entry.
-const CODEBOOK_DIM: usize = 8;
+pub(crate) const CODEBOOK_DIM: usize = 8;
 /// Folded input values per codebook: the entry, then "present".
 const IN_PER_CODEBOOK: usize = CODEBOOK_DIM + 1;
+/// Folded input values per frame, all codebooks.
+pub(crate) const FOLDED_INPUT: usize = CODEBOOKS * IN_PER_CODEBOOK;
 /// Upsampling of each block.
 const RATES: [usize; 4] = [8, 8, 4, 2];
 /// Dilations of each block's residual units.
@@ -67,7 +69,7 @@ pub const CHUNK: usize = 256;
 /// A stream stores this hash of the codebooks its codes index. It names DAC's
 /// quantiser, not a decoder, so any decoder of DAC codes plays the stream; the
 /// encoder and decoder files each carry a copy of the codebooks.
-fn codebook_hash<'a>(books: impl IntoIterator<Item = &'a f32>) -> u64 {
+pub(crate) fn codebook_hash<'a>(books: impl IntoIterator<Item = &'a f32>) -> u64 {
     books
         .into_iter()
         .flat_map(|v| v.to_le_bytes())
@@ -411,23 +413,13 @@ impl DacDecoder {
 
     /// The folded input of frames `start..end`: `[frames, 81]`.
     fn input_frames(&self, codes: &[u16], num_codebooks: usize, start: usize, end: usize) -> Seq {
-        let cin = CODEBOOKS * IN_PER_CODEBOOK;
-        let mut x = Seq::zeros(end - start, cin);
-        for (row, frame) in x
-            .data_mut()
-            .chunks_exact_mut(cin)
-            .zip(codes[start * num_codebooks..end * num_codebooks].chunks_exact(num_codebooks))
-        {
-            for (i, (&code, dst)) in frame
-                .iter()
-                .zip(row.as_chunks_mut::<IN_PER_CODEBOOK>().0)
-                .enumerate()
-            {
-                let entry = (i * CODEBOOK_SIZE + usize::from(code)) * CODEBOOK_DIM;
-                dst[..CODEBOOK_DIM].copy_from_slice(&self.codebooks[entry..entry + CODEBOOK_DIM]);
-                dst[CODEBOOK_DIM] = 1.0;
-            }
-        }
+        let mut x = Seq::zeros(end - start, FOLDED_INPUT);
+        write_folded_input(
+            &self.codebooks,
+            &codes[start * num_codebooks..end * num_codebooks],
+            num_codebooks,
+            x.data_mut(),
+        );
         x
     }
 
@@ -492,8 +484,35 @@ impl DacDecoder {
     }
 }
 
+/// Writes the folded input of `codes` (`[frames][num_codebooks]`) into the
+/// zeroed `out`, `[frames][81]`: for each codebook present, its entry's 8
+/// values and a 1. `codebooks` is `[codebook][entry][value]`.
+pub(crate) fn write_folded_input(
+    codebooks: &[f32],
+    codes: &[u16],
+    num_codebooks: usize,
+    out: &mut [f32],
+) {
+    for (row, frame) in out
+        .as_chunks_mut::<FOLDED_INPUT>()
+        .0
+        .iter_mut()
+        .zip(codes.chunks_exact(num_codebooks))
+    {
+        for (i, (&code, dst)) in frame
+            .iter()
+            .zip(row.as_chunks_mut::<IN_PER_CODEBOOK>().0)
+            .enumerate()
+        {
+            let entry = (i * CODEBOOK_SIZE + usize::from(code)) * CODEBOOK_DIM;
+            dst[..CODEBOOK_DIM].copy_from_slice(&codebooks[entry..entry + CODEBOOK_DIM]);
+            dst[CODEBOOK_DIM] = 1.0;
+        }
+    }
+}
+
 /// Checks that `codes` are whole frames of `num_codebooks` valid codes.
-fn check_codes(codes: &[u16], num_codebooks: usize) -> Result<()> {
+pub(crate) fn check_codes(codes: &[u16], num_codebooks: usize) -> Result<()> {
     ensure!(
         (1..=CODEBOOKS).contains(&num_codebooks),
         "{num_codebooks} codebooks; the model has 1 to {CODEBOOKS}"

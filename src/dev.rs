@@ -101,9 +101,9 @@ pub(crate) enum DevCommand {
         #[arg(required = true)]
         files: Vec<String>,
     },
-    /// Time the HQ decoder (`dac44-student`) on random codes; prints the real-time factor.
+    /// Time an HQ decoder (`dac44-student` or `dac44-vocos`, told apart by its tensors) on random codes; prints the real-time factor.
     DacBench {
-        /// The decoder weights (`dac44_student.safetensors`).
+        /// The decoder weights (`dac44_student` or `dac44_vocos.safetensors`).
         weights: PathBuf,
         /// Seconds of audio to decode, per channel.
         #[arg(long, default_value_t = 30.0)]
@@ -118,7 +118,7 @@ pub(crate) enum DevCommand {
     /// Decode a `.npy` of DAC codes (`[frames, 9]`) with the HQ decoder to raw
     /// little-endian f32 samples, for parity checks against PyTorch.
     DacDecode {
-        /// The decoder weights (`dac44_student.safetensors`).
+        /// The decoder weights (`dac44_student` or `dac44_vocos.safetensors`).
         weights: PathBuf,
         /// Codes, `[frames, codebooks]` u16.
         codes: PathBuf,
@@ -471,6 +471,39 @@ fn dac_encode(
     write_npy(output, &codes, CODEBOOKS)
 }
 
+/// Either HQ decoder, told apart by its tensors.
+enum AnyDecoder {
+    Student(picotone::dac::DacDecoder),
+    Vocos(picotone::vocos::VocosDecoder),
+}
+
+impl AnyDecoder {
+    fn load(weights: &Path) -> Result<Self> {
+        let w = picotone::weights::Weights::load(weights)?;
+        Ok(if w.contains("head.bias") {
+            let d = picotone::vocos::VocosDecoder::from_weights(&w)?;
+            eprintln!("Vocos decoder: dim {}, {} blocks", d.dim(), d.blocks());
+            Self::Vocos(d)
+        } else {
+            Self::Student(picotone::dac::DacDecoder::load(weights)?)
+        })
+    }
+
+    fn decode(&self, codes: &[u16], n: usize) -> Result<Vec<f32>> {
+        match self {
+            Self::Student(d) => d.decode(codes, n),
+            Self::Vocos(d) => d.decode(codes, n),
+        }
+    }
+
+    fn decode_chunked(&self, codes: &[u16], n: usize, chunk: usize) -> Result<Vec<f32>> {
+        match self {
+            Self::Student(d) => d.decode_chunked(codes, n, chunk),
+            Self::Vocos(d) => d.decode_chunked(codes, n, chunk),
+        }
+    }
+}
+
 /// Decodes a code array with the HQ decoder to raw f32 samples.
 fn dac_decode(
     weights: &Path,
@@ -479,7 +512,7 @@ fn dac_decode(
     codebooks: usize,
     chunk: Option<usize>,
 ) -> Result<()> {
-    let decoder = picotone::dac::DacDecoder::load(weights)?;
+    let decoder = AnyDecoder::load(weights)?;
     let (all, columns) = read_npy(codes)?;
     ensure!(
         (1..=columns).contains(&codebooks),
@@ -507,9 +540,9 @@ fn dac_decode(
 
 /// Decodes random codes with the HQ decoder and reports the real-time factor.
 fn dac_bench(weights: &Path, seconds: f64, codebooks: usize, channels: usize) -> Result<()> {
-    use picotone::dac::{CODEBOOK_SIZE, DacDecoder, HOP, SAMPLE_RATE};
+    use picotone::dac::{CODEBOOK_SIZE, HOP, SAMPLE_RATE};
     let start = Instant::now();
-    let decoder = DacDecoder::load(weights)?;
+    let decoder = AnyDecoder::load(weights)?;
     eprintln!(
         "loaded {} in {:.2} s",
         weights.display(),

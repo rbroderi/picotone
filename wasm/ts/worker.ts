@@ -83,7 +83,15 @@ interface Runtime {
 }
 
 let runtime: Promise<Runtime> | null = null;
-const models = new Map<string, { decoder: WasmDecoder; tables: string[] }>();
+interface Built {
+  readonly decoder: WasmDecoder;
+  readonly network: string;
+  readonly tables: string[];
+}
+/** Every network built so far, by network name. */
+const built = new Map<string, Built>();
+/** The network each model's files decode with, by model name. */
+const models = new Map<string, Built>();
 let tables: WasmTables | null = null;
 const cancelled = new Set<number>();
 
@@ -289,14 +297,20 @@ async function openCache(name: string | null): Promise<Cache | null> {
 async function load(request: LoadRequest): Promise<void> {
   const { pkg } = await ready();
   const t0 = performance.now();
-  const existing = models.get(request.model);
+  // HQ files (`dac44` codes) name their code space, not a decoder: any
+  // decoder of DAC 44 kHz codes plays them.
+  const network = request.model === "dac44" ? (request.hqDecoder ?? "dac44_student") : request.model;
+  const existing = built.get(network);
   if (existing !== undefined) {
-    // Weights stay in wasm memory for the worker's lifetime; reuse them.
+    // Weights stay in wasm memory for the worker's lifetime; reuse them, and
+    // make this network the one the model's files decode with.
+    models.set(request.model, existing);
     post({
       type: "loaded",
       id: request.id,
       model: {
         name: request.model,
+        network,
         sampleRate: existing.decoder.sampleRate,
         channels: existing.decoder.channels,
         fetchedBytes: 0,
@@ -309,9 +323,6 @@ async function load(request: LoadRequest): Promise<void> {
   }
   const cache = await openCache(request.cacheName);
   const base = request.modelsUrl;
-  // HQ files (`dac44` codes) decode with the student network; another
-  // decoder of the same codes would be another network name here.
-  const network = request.model === "dac44" ? "dac44_student" : request.model;
   const config = await fetchBytes(new URL(`${network}.json`, base).href, cache, () => {});
   const weights = await fetchBytes(
     new URL(`${network}.safetensors`, base).href,
@@ -340,12 +351,17 @@ async function load(request: LoadRequest): Promise<void> {
     loadedTables.push(hash);
     tableBytes += table.fetched;
   }
-  models.set(request.model, { decoder, tables: loadedTables });
+  // Switching HQ decoders keeps both in wasm memory (it never shrinks), so
+  // switching back costs nothing; terminate the worker to release them.
+  const entry = { decoder, network, tables: loadedTables };
+  built.set(network, entry);
+  models.set(request.model, entry);
   post({
     type: "loaded",
     id: request.id,
     model: {
       name: request.model,
+      network,
       sampleRate: decoder.sampleRate,
       channels: decoder.channels,
       fetchedBytes: config.fetched + weights.fetched + manifest.fetched + tableBytes,

@@ -2,7 +2,8 @@
 //!
 //! A [`Tables`] holds the cx2 entropy tables, found by the hash a `.pico`
 //! stream stores. A [`Decoder`] holds one decoder network: a decoder-only
-//! EnCodec model, or an HQ decoder of DAC 44 kHz codes (`dac44_student`).
+//! EnCodec model, or an HQ decoder of DAC 44 kHz codes (`dac44_student` or
+//! `dac44_vocos`; any of them plays any HQ file).
 //! [`Decoder::open`] parses a `.pico` file into a [`Stream`], and
 //! [`Stream::decode_next`] decodes the next part of it, returning only samples
 //! that later input can no longer change, so playback can start before the
@@ -32,6 +33,7 @@ use picotone::layout::Trimmer;
 use picotone::model::{Encodec, EncodedFrame, OverlapAdd, StreamDecoder};
 use picotone::nn::Seq;
 use picotone::pico::{self, ChannelLayout, Codec, DacInfo, DacStream, Info};
+use picotone::vocos::{self, VocosDecoder};
 use wasm_bindgen::prelude::*;
 
 /// Name of the HQ decoder network, and of its weight files.
@@ -525,6 +527,10 @@ impl Decoder {
             );
             let decoder: &'static DacDecoder =
                 Box::leak(Box::new(DacDecoder::from_bytes(safetensors)?));
+            Net::Hq(decoder)
+        } else if name == vocos::NAME {
+            let decoder: &'static VocosDecoder =
+                Box::leak(Box::new(VocosDecoder::from_bytes(safetensors)?));
             Net::Hq(decoder)
         } else {
             let model = Encodec::decoder_from_bytes(name, config_json, safetensors)?;
@@ -1378,6 +1384,26 @@ mod tests {
             page_length: 75,
             ..STOCK48
         })
+    }
+
+    /// The Vocos decoder builds by its name and plays HQ files: they name
+    /// their code space, not a decoder.
+    #[test]
+    fn vocos_builds_as_an_hq_decoder() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let weights = std::fs::read(root.join("tests/data/vocos_tiny.safetensors"))?;
+        let config = std::fs::read_to_string(root.join("tests/data/vocos_tiny.json"))?;
+        let decoder = Decoder::build(vocos::NAME, &config, &weights)?;
+        assert_eq!(decoder.name(), "dac44_vocos");
+        assert_eq!(decoder.model(), HQ_MODEL);
+        let Net::Hq(hq) = decoder.net else {
+            bail!("dac44_vocos built an EnCodec decoder");
+        };
+        let student = DacDecoder::from_bytes(&std::fs::read(
+            root.join("weights/dac44_student.safetensors"),
+        )?)?;
+        assert_eq!(hq.codebook_hash(), student.codebook_hash());
+        Ok(())
     }
 
     /// An HQ parametric stereo file through the bindings: the header, the

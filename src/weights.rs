@@ -105,6 +105,12 @@ impl Weights {
         self.index.contains_key(name)
     }
 
+    /// The shape of tensor `name`, if the checkpoint holds it.
+    #[must_use]
+    pub fn shape(&self, name: &str) -> Option<&[usize]> {
+        self.index.get(name).map(|entry| entry.shape.as_slice())
+    }
+
     /// The values of tensor `name`, checking its shape.
     ///
     /// # Errors

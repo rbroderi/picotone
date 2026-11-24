@@ -930,6 +930,336 @@ impl WithSimd for Gates<'_> {
     }
 }
 
+/// Numerator coefficients of the rational `erf` approximation on
+/// `[-4, 4]` (XLA's single-precision `erf`), highest power first:
+/// `erf(x) = x p(x^2) / q(x^2)`.
+const ERF_ALPHA: [f32; 7] = [
+    -2.726_142_3e-10,
+    2.770_681_4e-8,
+    -2.101_024e-6,
+    -5.692_506_4e-5,
+    -7.349_906_3e-4,
+    -2.954_6e-3,
+    -1.609_603_3e-2,
+];
+/// Denominator coefficients, highest power first.
+const ERF_BETA: [f32; 5] = [
+    -1.456_607_2e-5,
+    -2.133_740_6e-4,
+    -1.682_827e-3,
+    -7.373_329_4e-3,
+    -1.426_474e-2,
+];
+/// Past this magnitude `erf` is 1 in single precision.
+const ERF_LIMIT: f32 = 4.0;
+
+/// `erf(x)`, good to a few ulps.
+#[inline(always)]
+fn erf_vector<S: Simd>(simd: S, x: S::f32s) -> S::f32s {
+    let limit = simd.splat_f32s(ERF_LIMIT);
+    let x = simd.min_f32s(simd.max_f32s(x, simd.neg_f32s(limit)), limit);
+    let x2 = simd.mul_f32s(x, x);
+    let mut p = simd.splat_f32s(ERF_ALPHA[0]);
+    for &a in &ERF_ALPHA[1..] {
+        p = simd.mul_add_e_f32s(x2, p, simd.splat_f32s(a));
+    }
+    let mut q = simd.splat_f32s(ERF_BETA[0]);
+    for &b in &ERF_BETA[1..] {
+        q = simd.mul_add_e_f32s(x2, q, simd.splat_f32s(b));
+    }
+    simd.div_f32s(simd.mul_f32s(x, p), q)
+}
+
+/// PyTorch's exact GELU, `x (1 + erf(x / sqrt 2)) / 2`.
+#[inline(always)]
+fn gelu_vector<S: Simd>(simd: S, x: S::f32s) -> S::f32s {
+    let erf = erf_vector(
+        simd,
+        simd.mul_f32s(x, simd.splat_f32s(std::f32::consts::FRAC_1_SQRT_2)),
+    );
+    simd.mul_f32s(
+        simd.mul_f32s(x, simd.splat_f32s(0.5)),
+        simd.add_f32s(simd.splat_f32s(1.0), erf),
+    )
+}
+
+/// Exact GELU in place.
+pub(crate) fn gelu_in_place(values: &mut [f32]) {
+    struct Gelu<'a>(&'a mut [f32]);
+    impl WithSimd for Gelu<'_> {
+        type Output = ();
+
+        #[inline(always)]
+        fn with_simd<S: Simd>(self, simd: S) {
+            let (vectors, tail) = S::as_mut_simd_f32s(self.0);
+            for v in vectors {
+                *v = gelu_vector(simd, *v);
+            }
+            if !tail.is_empty() {
+                let v = gelu_vector(simd, simd.partial_load_f32s(tail));
+                simd.partial_store_f32s(tail, v);
+            }
+        }
+    }
+    arch().dispatch(Gelu(values));
+}
+
+/// Taylor coefficients of `cos(r)`, even terms 2 to 12. On `|r| <= pi/2` the
+/// truncation error is below `7e-9`.
+const COS_C: [f32; 6] = [
+    -1.0 / 2.0,
+    1.0 / 24.0,
+    -1.0 / 720.0,
+    1.0 / 40_320.0,
+    -1.0 / 3_628_800.0,
+    1.0 / 479_001_600.0,
+];
+
+/// `(m cos p, m sin p)` with `m = min(exp(l), 100)`: one bin of the Vocos
+/// head's spectrum from its log-magnitude `l` and phase `p`.
+///
+/// The phase is reduced to `[-pi/2, pi/2]` (round to the nearest multiple
+/// `k` of pi, two-part subtraction, exact while `|k| < 2^16`), and the sign
+/// of both results follows the parity of `k`.
+#[inline(always)]
+fn polar_vector<S: Simd>(simd: S, l: S::f32s, p: S::f32s) -> (S::f32s, S::f32s) {
+    // exp(4.7) > 100, so clamping there first changes nothing but overflow.
+    let l = simd.min_f32s(
+        simd.max_f32s(l, simd.splat_f32s(-EXP_LIMIT)),
+        simd.splat_f32s(4.7),
+    );
+    let (expm1, scale) = exp_parts(simd, l);
+    let magnitude = simd.min_f32s(
+        simd.mul_add_e_f32s(scale, expm1, scale),
+        simd.splat_f32s(100.0),
+    );
+    let magic = simd.splat_f32s(ROUND_MAGIC);
+    let shifted = simd.mul_add_e_f32s(p, simd.splat_f32s(std::f32::consts::FRAC_1_PI), magic);
+    let k = simd.sub_f32s(shifted, magic);
+    let r = simd.sub_f32s(
+        simd.sub_f32s(p, simd.mul_f32s(k, simd.splat_f32s(PI_HI))),
+        simd.mul_f32s(k, simd.splat_f32s(PI_LO)),
+    );
+    let r2 = simd.mul_f32s(r, r);
+    let mut s = simd.splat_f32s(SIN_C11);
+    for c in [SIN_C9, SIN_C7, SIN_C5, SIN_C3] {
+        s = simd.mul_add_e_f32s(s, r2, simd.splat_f32s(c));
+    }
+    let s = simd.mul_add_e_f32s(simd.mul_f32s(s, r2), r, r);
+    let mut c = simd.splat_f32s(COS_C[5]);
+    for &coefficient in COS_C[..5].iter().rev() {
+        c = simd.mul_add_e_f32s(c, r2, simd.splat_f32s(coefficient));
+    }
+    let c = simd.mul_add_e_f32s(c, r2, simd.splat_f32s(1.0));
+    // The low bit of `shifted` is the parity of k: odd k flips both signs.
+    let sign = simd.mul_u32s(
+        simd.and_u32s(simd.transmute_u32s_f32s(shifted), simd.splat_u32s(1)),
+        simd.splat_u32s(1 << 31),
+    );
+    let flip =
+        |v: S::f32s| simd.transmute_f32s_u32s(simd.xor_u32s(simd.transmute_u32s_f32s(v), sign));
+    (
+        simd.mul_f32s(magnitude, flip(c)),
+        simd.mul_f32s(magnitude, flip(s)),
+    )
+}
+
+/// The spectrum of one Vocos head frame: `re`, `im` from the log-magnitudes
+/// and phases (see [`polar_vector`]). All four slices have the same length.
+pub(crate) fn polar(log_magnitude: &[f32], phase: &[f32], re: &mut [f32], im: &mut [f32]) {
+    struct Polar<'a> {
+        l: &'a [f32],
+        p: &'a [f32],
+        re: &'a mut [f32],
+        im: &'a mut [f32],
+    }
+    impl WithSimd for Polar<'_> {
+        type Output = ();
+
+        #[inline(always)]
+        fn with_simd<S: Simd>(self, simd: S) {
+            let (l, l_tail) = S::as_simd_f32s(self.l);
+            let (p, p_tail) = S::as_simd_f32s(self.p);
+            let (re, re_tail) = S::as_mut_simd_f32s(self.re);
+            let (im, im_tail) = S::as_mut_simd_f32s(self.im);
+            for (((re, im), &l), &p) in re.iter_mut().zip(im).zip(l).zip(p) {
+                (*re, *im) = polar_vector(simd, l, p);
+            }
+            if !re_tail.is_empty() {
+                let (r, i) = polar_vector(
+                    simd,
+                    simd.partial_load_f32s(l_tail),
+                    simd.partial_load_f32s(p_tail),
+                );
+                simd.partial_store_f32s(re_tail, r);
+                simd.partial_store_f32s(im_tail, i);
+            }
+        }
+    }
+    let n = re.len();
+    arch().dispatch(Polar {
+        l: &log_magnitude[..n],
+        p: &phase[..n],
+        re,
+        im: &mut im[..n],
+    });
+}
+
+/// Sum of `values` over registers in a fixed order, then the tail.
+#[inline(always)]
+fn row_sum<S: Simd>(simd: S, vectors: &[S::f32s], tail: &[f32]) -> f32 {
+    let (pairs, last) = vectors.as_chunks::<2>();
+    let mut acc = [simd.splat_f32s(0.0); 2];
+    for &[a, b] in pairs {
+        acc[0] = simd.add_f32s(acc[0], a);
+        acc[1] = simd.add_f32s(acc[1], b);
+    }
+    if let [a] = last {
+        acc[0] = simd.add_f32s(acc[0], *a);
+    }
+    tail.iter().fold(
+        simd.reduce_sum_f32s(simd.add_f32s(acc[0], acc[1])),
+        |s, &v| s + v,
+    )
+}
+
+/// One frame normalised in place: PyTorch's `LayerNorm` over the frame's
+/// channels (biased variance), with an optional per-channel scale and offset.
+#[inline(always)]
+fn layer_norm_row<S: Simd>(simd: S, row: &mut [f32], eps: f32, affine: Option<(&[f32], &[f32])>) {
+    #[expect(clippy::cast_precision_loss, reason = "frames are a few thousand wide")]
+    let count = row.len() as f32;
+    let (vectors, tail) = S::as_mut_simd_f32s(row);
+    let mean = row_sum(simd, vectors, tail) / count;
+    let m = simd.splat_f32s(mean);
+    let (pairs, last) = vectors.as_chunks::<2>();
+    let mut acc = [simd.splat_f32s(0.0); 2];
+    for &[a, b] in pairs {
+        let (a, b) = (simd.sub_f32s(a, m), simd.sub_f32s(b, m));
+        acc[0] = simd.mul_add_e_f32s(a, a, acc[0]);
+        acc[1] = simd.mul_add_e_f32s(b, b, acc[1]);
+    }
+    if let [a] = last {
+        let a = simd.sub_f32s(*a, m);
+        acc[0] = simd.mul_add_e_f32s(a, a, acc[0]);
+    }
+    let squares = tail.iter().fold(
+        simd.reduce_sum_f32s(simd.add_f32s(acc[0], acc[1])),
+        |s, &v| s + (v - mean) * (v - mean),
+    );
+    let rstd = 1.0 / (squares / count + eps).sqrt();
+    let r = simd.splat_f32s(rstd);
+    if let Some((weight, bias)) = affine {
+        let (w, w_tail) = S::as_simd_f32s(weight);
+        let (b, b_tail) = S::as_simd_f32s(bias);
+        for ((v, &w), &b) in vectors.iter_mut().zip(w).zip(b) {
+            *v = simd.mul_add_e_f32s(simd.mul_f32s(simd.sub_f32s(*v, m), r), w, b);
+        }
+        for ((v, &w), &b) in tail.iter_mut().zip(w_tail).zip(b_tail) {
+            *v = ((*v - mean) * rstd) * w + b;
+        }
+    } else {
+        for v in vectors {
+            *v = simd.mul_f32s(simd.sub_f32s(*v, m), r);
+        }
+        for v in tail {
+            *v = (*v - mean) * rstd;
+        }
+    }
+}
+
+/// `LayerNorm` of every `channels`-wide frame of `values`, in place.
+pub(crate) fn layer_norm_in_place(
+    values: &mut [f32],
+    channels: usize,
+    eps: f32,
+    affine: Option<(&[f32], &[f32])>,
+) {
+    struct Norm<'a> {
+        values: &'a mut [f32],
+        channels: usize,
+        eps: f32,
+        affine: Option<(&'a [f32], &'a [f32])>,
+    }
+    impl WithSimd for Norm<'_> {
+        type Output = ();
+
+        #[inline(always)]
+        fn with_simd<S: Simd>(self, simd: S) {
+            for row in self.values.chunks_exact_mut(self.channels) {
+                layer_norm_row(simd, row, self.eps, self.affine);
+            }
+        }
+    }
+    if channels == 0 {
+        return;
+    }
+    arch().dispatch(Norm {
+        values,
+        channels,
+        eps,
+        affine,
+    });
+}
+
+/// A depthwise k7 conv (zero padded to keep the length) over time-major
+/// frames `x`, each output frame then normalised by `LayerNorm` without an
+/// affine part, into `out`: a Vocos `ConvNeXt` block up to its first Linear.
+/// `taps` is `[7][channels]`.
+pub(crate) fn depthwise7_layer_norm(
+    x: &[f32],
+    taps: &[f32],
+    bias: &[f32],
+    eps: f32,
+    out: &mut [f32],
+) {
+    struct Depthwise<'a> {
+        x: &'a [f32],
+        taps: &'a [f32],
+        bias: &'a [f32],
+        eps: f32,
+        out: &'a mut [f32],
+    }
+    impl WithSimd for Depthwise<'_> {
+        type Output = ();
+
+        #[inline(always)]
+        fn with_simd<S: Simd>(self, simd: S) {
+            let c = self.bias.len();
+            let frames = self.x.len() / c;
+            let (bias, bias_tail) = S::as_simd_f32s(self.bias);
+            for (t, row) in self.out.chunks_exact_mut(c).enumerate() {
+                let (acc, acc_tail) = S::as_mut_simd_f32s(row);
+                acc.copy_from_slice(bias);
+                acc_tail.copy_from_slice(bias_tail);
+                // Taps past either end read zeros, which add nothing.
+                for j in t.saturating_sub(3)..(t + 4).min(frames) {
+                    let tap = j + 3 - t;
+                    let (w, w_tail) = S::as_simd_f32s(&self.taps[tap * c..(tap + 1) * c]);
+                    let (v, v_tail) = S::as_simd_f32s(&self.x[j * c..(j + 1) * c]);
+                    for ((a, &w), &v) in acc.iter_mut().zip(w).zip(v) {
+                        *a = simd.mul_add_e_f32s(w, v, *a);
+                    }
+                    for ((a, &w), &v) in acc_tail.iter_mut().zip(w_tail).zip(v_tail) {
+                        *a += w * v;
+                    }
+                }
+                layer_norm_row(simd, row, self.eps, None);
+            }
+        }
+    }
+    if bias.is_empty() {
+        return;
+    }
+    arch().dispatch(Depthwise {
+        x,
+        taps,
+        bias,
+        eps,
+        out,
+    });
+}
+
 #[cfg(test)]
 #[expect(
     clippy::cast_precision_loss,
@@ -1079,6 +1409,98 @@ mod tests {
                 let identity = Affine::identity(channels);
                 map_into(&xs, &mut copy, Some(&identity), false);
                 assert_eq!(copy, xs);
+            }
+        }
+    }
+
+    /// `erf` by its Taylor series (small `|x|`) or continued fraction.
+    fn erf_f64(x: f64) -> f64 {
+        if x.abs() > 2.5 {
+            // erfc(a) = exp(-a^2) / sqrt(pi) / (a + (1/2) / (a + 1 / (a + ...))).
+            let a = x.abs();
+            let mut fraction = a;
+            for n in (1..100).rev() {
+                fraction = a + f64::from(n) / 2.0 / fraction;
+            }
+            let erfc = (-a * a).exp() / std::f64::consts::PI.sqrt() / fraction;
+            return x.signum() * (1.0 - erfc);
+        }
+        let mut term = x;
+        let mut sum = x;
+        for n in 1..200 {
+            term *= -x * x / f64::from(n);
+            sum += term / f64::from(2 * n + 1);
+        }
+        sum * 2.0 / std::f64::consts::PI.sqrt()
+    }
+
+    #[test]
+    fn gelu_matches_the_exact_formula() {
+        let xs: Vec<f32> = (0..4001).map(|i| (i as f32 - 2000.0) * 0.005).collect();
+        let mut got = xs.clone();
+        gelu_in_place(&mut got);
+        for (&x, &y) in xs.iter().zip(&got) {
+            let x64 = f64::from(x);
+            let want = 0.5 * x64 * (1.0 + erf_f64(x64 / std::f64::consts::SQRT_2));
+            assert!(
+                // For negative x, 1 + erf cancels: erf's few-ulp error near
+                // -1 is an absolute error below 1e-6 here.
+                (f64::from(y) - want).abs() <= 2e-7f64.mul_add(want.abs(), 1e-6),
+                "gelu({x}) = {y}, want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn polar_matches_the_library() {
+        let n = 3001;
+        let l: Vec<f32> = (0..n).map(|i| (i as f32 - 2000.0) * 0.01).collect();
+        let p: Vec<f32> = (0..n).map(|i| (i as f32 - 1500.0) * 0.0371).collect();
+        let (mut re, mut im) = (vec![0.0; n], vec![0.0; n]);
+        polar(&l, &p, &mut re, &mut im);
+        for i in 0..n {
+            let m = f64::from(l[i]).exp().min(100.0);
+            let (s, c) = f64::from(p[i]).sin_cos();
+            let tol = 3e-7 * m.max(1e-30) + 1e-30;
+            assert!(
+                (f64::from(re[i]) - m * c).abs() <= tol,
+                "re {i}: {} vs {}",
+                re[i],
+                m * c
+            );
+            assert!(
+                (f64::from(im[i]) - m * s).abs() <= tol,
+                "im {i}: {} vs {}",
+                im[i],
+                m * s
+            );
+        }
+    }
+
+    #[test]
+    fn layer_norm_matches_the_definition() {
+        for channels in [1, 7, 32, 33, 512] {
+            let xs = pattern(channels * 5, 1.3);
+            let w: Vec<f32> = (0..channels).map(|c| 1.0 + c as f32 * 0.01).collect();
+            let b: Vec<f32> = (0..channels).map(|c| c as f32 * -0.02).collect();
+            let mut got = xs.clone();
+            layer_norm_in_place(&mut got, channels, 1e-6, Some((&w, &b)));
+            for (row, out) in xs.chunks(channels).zip(got.chunks(channels)) {
+                let mean = row.iter().map(|&v| f64::from(v)).sum::<f64>() / channels as f64;
+                let var = row
+                    .iter()
+                    .map(|&v| (f64::from(v) - mean).powi(2))
+                    .sum::<f64>()
+                    / channels as f64;
+                for c in 0..channels {
+                    let want = (f64::from(row[c]) - mean) / (var + 1e-6).sqrt() * f64::from(w[c])
+                        + f64::from(b[c]);
+                    assert!(
+                        (f64::from(out[c]) - want).abs() <= 1e-5,
+                        "{channels}: {} vs {want}",
+                        out[c]
+                    );
+                }
             }
         }
     }

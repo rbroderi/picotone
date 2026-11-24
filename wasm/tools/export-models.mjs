@@ -4,6 +4,7 @@
 //   www/models/EnCodec-MIT.txt     (the weights' licence, beside every model file)
 //   www/models/dac44_student.*     (the HQ decoder, for model dac44: its weights, config,
 //                                   NOTICE and training credits, copied unchanged)
+//   www/models/dac44_vocos.*       (the Vocos HQ decoder, when ../weights has it; same files)
 //   www/models/DAC-MIT.txt         (the licence of DAC, which the HQ decoder derives from)
 //   www/models/<table>.ecxm        (the default cx2 table of each exported model)
 //   www/models/cx2-tables.json     ({ tables: [{ file, model, hash }] }; the worker reads it)
@@ -12,7 +13,17 @@
 // Usage: node tools/export-models.mjs [name ...]
 //   names: encodec_24khz, encodec_48khz, dac44 (HQ); default: all three
 
-import { mkdirSync, openSync, readSync, closeSync, writeFileSync, copyFileSync, statSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,15 +38,17 @@ const TABLES = {
   encodec_48khz: "cx2_encodec_48khz_net2_v5.ecxm",
   dac44: "cx2_dac44.ecxm",
 };
-// The HQ decoder network of the dac44 code space, and the files shipped with it.
+// The HQ decoder networks of the dac44 code space, and the files shipped with each. The
+// student is required; the Vocos decoder (tools/export_vocos.py) is copied when present.
 const HQ_DECODER = "dac44_student";
-const HQ_FILES = [
-  `${HQ_DECODER}.safetensors`,
-  `${HQ_DECODER}.json`,
-  `${HQ_DECODER}.NOTICE.txt`,
-  `${HQ_DECODER}.credits.jsonl`,
-  "DAC-MIT.txt",
+const HQ_VOCOS = "dac44_vocos";
+const hqFiles = (network) => [
+  `${network}.safetensors`,
+  `${network}.json`,
+  `${network}.NOTICE.txt`,
+  `${network}.credits.jsonl`,
 ];
+const HQ_FILES = [...hqFiles(HQ_DECODER), "DAC-MIT.txt"];
 
 /**
  * The hash a .pico stream stores for its table: FNV-1a 64 of the file's bytes, as 16 hex
@@ -120,6 +133,19 @@ for (const name of names) {
       copyFileSync(join(weightsDir, file), join(outDir, file));
     }
     console.log(`dac44: ${HQ_FILES.join(", ")} copied unchanged`);
+    // The weights and config make the network; a trained export also has its NOTICE and
+    // credits (a random-init stand-in has none).
+    const vocos = hqFiles(HQ_VOCOS).filter((file) => existsSync(join(weightsDir, file)));
+    if (vocos.includes(`${HQ_VOCOS}.safetensors`) && vocos.includes(`${HQ_VOCOS}.json`)) {
+      for (const file of vocos) copyFileSync(join(weightsDir, file), join(outDir, file));
+      const missing = hqFiles(HQ_VOCOS).filter((file) => !vocos.includes(file));
+      console.log(
+        `dac44: ${vocos.join(", ")} copied unchanged` +
+          (missing.length > 0 ? ` (no ${missing.join(", ")}: not a trained export?)` : ""),
+      );
+    } else {
+      console.log(`dac44: no ${HQ_VOCOS}.safetensors/.json in ${weightsDir}; the Vocos decoder is not exported`);
+    }
   } else {
     exportModel(name);
     encodec = true;
