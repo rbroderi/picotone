@@ -43,6 +43,7 @@ interface WasmTables {
 
 interface WasmDecoder {
   readonly name: string;
+  readonly loadMemory: string;
   readonly sampleRate: number;
   readonly channels: number;
   openAt(pico: Uint8Array, tables: WasmTables, startSample: number): WasmStream;
@@ -261,23 +262,28 @@ async function fetchBytes(
     onProgress(bytes.length, bytes.length);
     return { bytes, fetched: fromCache ? 0 : bytes.length, fromCache };
   }
+  // Read straight into one buffer of the announced size, so the file is held
+  // once rather than as parts plus their concatenation. (A compressed
+  // response announces less than it holds; the buffer then grows.)
   const reader = body.getReader();
-  const parts: Uint8Array[] = [];
+  let bytes = new Uint8Array(total > 0 ? total : 1 << 20);
   let loaded = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) {
       break;
     }
-    parts.push(value);
+    if (loaded + value.length > bytes.length) {
+      const grown = new Uint8Array(Math.max(2 * bytes.length, loaded + value.length));
+      grown.set(bytes.subarray(0, loaded));
+      bytes = grown;
+    }
+    bytes.set(value, loaded);
     loaded += value.length;
     onProgress(loaded, total);
   }
-  const bytes = new Uint8Array(loaded);
-  let at = 0;
-  for (const part of parts) {
-    bytes.set(part, at);
-    at += part.length;
+  if (loaded < bytes.length) {
+    bytes = bytes.slice(0, loaded);
   }
   return { bytes, fetched: fromCache ? 0 : loaded, fromCache };
 }
@@ -295,7 +301,7 @@ async function openCache(name: string | null): Promise<Cache | null> {
 }
 
 async function load(request: LoadRequest): Promise<void> {
-  const { pkg } = await ready();
+  const { pkg, memory } = await ready();
   const t0 = performance.now();
   // HQ files (`dac44` codes) name their code space, not a decoder: any
   // decoder of DAC 44 kHz codes plays them.
@@ -317,6 +323,8 @@ async function load(request: LoadRequest): Promise<void> {
         fromCache: true,
         tables: existing.tables,
         loadMs: performance.now() - t0,
+        memoryBytes: memory.buffer.byteLength,
+        loadMemory: {},
       },
     });
     return;
@@ -330,7 +338,14 @@ async function load(request: LoadRequest): Promise<void> {
     (loaded, total) => post({ type: "loadProgress", id: request.id, loaded, total }),
   );
   const configJson = new TextDecoder().decode(config.bytes);
+  const start = memory.buffer.byteLength;
+  // The bytes stay in JavaScript; the decoder reads each tensor from them.
   const decoder = new pkg.Decoder(network, configJson, weights.bytes);
+  const loadMemory = {
+    start,
+    ...(JSON.parse(decoder.loadMemory) as Record<string, number>),
+    built: memory.buffer.byteLength,
+  };
   // The cx2 tables of this model; a file finds its table by hash.
   const manifest = await fetchBytes(new URL("cx2-tables.json", base).href, cache, () => {});
   const listed = (JSON.parse(new TextDecoder().decode(manifest.bytes)) as TableManifest).tables.filter(
@@ -368,6 +383,8 @@ async function load(request: LoadRequest): Promise<void> {
       fromCache: config.fromCache && weights.fromCache,
       tables: loadedTables,
       loadMs: performance.now() - t0,
+      memoryBytes: memory.buffer.byteLength,
+      loadMemory,
     },
   });
 }
@@ -397,6 +414,7 @@ async function decode(request: DecodeRequest): Promise<void> {
   const t0 = performance.now();
   const stream = decoder.openAt(bytes, tables, request.startSample);
   let firstChunkMs = -1;
+  let firstChunkMemoryBytes = 0;
   let maxSegments = Math.max(1, request.firstChunkSegments);
   try {
     for (;;) {
@@ -414,6 +432,7 @@ async function decode(request: DecodeRequest): Promise<void> {
       const elapsedMs = performance.now() - t0;
       if (firstChunkMs < 0) {
         firstChunkMs = elapsedMs;
+        firstChunkMemoryBytes = memory.buffer.byteLength;
       }
       post(
         {
@@ -447,6 +466,7 @@ async function decode(request: DecodeRequest): Promise<void> {
         speed: audioSeconds / (decodeMs / 1000),
         cx2Ms: stream.cx2Ms,
         networkMs: stream.networkMs,
+        firstChunkMemoryBytes,
         memoryBytes: memory.buffer.byteLength,
       },
     });

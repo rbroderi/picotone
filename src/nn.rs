@@ -340,16 +340,12 @@ impl ConvKernel {
             weight.len()
         );
         ensure!(bias.len() == out_channels, "conv bias size mismatch");
-        let mut matrix = vec![0.0; kernel * in_channels * out_channels];
-        for o in 0..out_channels {
-            for i in 0..in_channels {
-                for j in 0..kernel {
-                    matrix[(j * in_channels + i) * out_channels + o] =
-                        weight[(o * in_channels + i) * kernel + j];
-                }
-            }
-        }
-        Self::from_matrix(
+        // Row (tap, input), column output, read straight from the weight.
+        let matrix = PackedMat::from_fn(kernel * in_channels, out_channels, |r, o| {
+            let (j, i) = (r / in_channels, r % in_channels);
+            weight[(o * in_channels + i) * kernel + j]
+        });
+        Self::from_packed(
             matrix,
             bias.to_vec(),
             (out_channels, in_channels, kernel),
@@ -370,11 +366,33 @@ impl ConvKernel {
         dilation: usize,
     ) -> Result<Self> {
         ensure!(
+            weight.len() == kernel * in_channels * out_channels,
+            "conv matrix size mismatch"
+        );
+        let weight = PackedMat::pack(weight, kernel * in_channels, out_channels)?;
+        Self::from_packed(
+            weight,
+            bias,
+            (out_channels, in_channels, kernel),
+            stride,
+            dilation,
+        )
+    }
+
+    /// Builds a kernel from its packed `[(j, i), o]` matrix.
+    fn from_packed(
+        weight: PackedMat,
+        bias: Vec<f32>,
+        (out_channels, in_channels, kernel): (usize, usize, usize),
+        stride: usize,
+        dilation: usize,
+    ) -> Result<Self> {
+        ensure!(
             stride > 0 && dilation > 0 && kernel > 0,
             "invalid conv geometry"
         );
         ensure!(
-            weight.len() == kernel * in_channels * out_channels && bias.len() == out_channels,
+            weight.shape() == (kernel * in_channels, out_channels) && bias.len() == out_channels,
             "conv matrix size mismatch"
         );
         Ok(Self {
@@ -383,7 +401,7 @@ impl ConvKernel {
             kernel,
             stride,
             dilation,
-            weight: PackedMat::pack(weight, kernel * in_channels, out_channels)?,
+            weight,
             bias,
         })
     }
@@ -1250,23 +1268,20 @@ impl ConvTranspose1d {
         let taps = k.div_ceil(s);
         let rows = taps * cin;
         let cols = s * cout;
-        let mut matrix = vec![0.0; rows * cols];
-        for tap in 0..taps {
-            for p in 0..s {
-                let j = p + (taps - 1 - tap) * s;
-                if j >= k {
-                    continue;
-                }
-                for i in 0..cin {
-                    for o in 0..cout {
-                        matrix[(tap * cin + i) * cols + p * cout + o] =
-                            weight[(i * cout + o) * k + j];
-                    }
-                }
+        // Row (tap, input), column (phase, output): kernel position
+        // `p + (taps - 1 - tap) * s`, zero past the kernel.
+        let matrix = PackedMat::from_fn(rows, cols, |r, c| {
+            let (tap, i) = (r / cin, r % cin);
+            let (p, o) = (c / cout, c % cout);
+            let j = p + (taps - 1 - tap) * s;
+            if j < k {
+                weight[(i * cout + o) * k + j]
+            } else {
+                0.0
             }
-        }
+        });
         let poly_bias = bias.repeat(s);
-        let poly = ConvKernel::from_matrix(matrix, poly_bias, (cols, cin, taps), 1, 1)?;
+        let poly = ConvKernel::from_packed(matrix, poly_bias, (cols, cin, taps), 1, 1)?;
         let padding_total = k - s;
         let right = if causal {
             crate::config::floor_to_usize(
@@ -1445,15 +1460,11 @@ impl Lstm {
             "LSTM parameter size mismatch"
         );
         let bias: Vec<f32> = p.b_ih.iter().zip(p.b_hh).map(|(a, b)| a + b).collect();
-        let mut recurrent = vec![0.0; 4 * dim * dim];
-        for (gate, row) in p.w_hh.chunks_exact(dim).enumerate() {
-            for (unit, &v) in row.iter().enumerate() {
-                recurrent[unit * 4 * dim + gate] = v;
-            }
-        }
+        // Row unit, column gate: the transpose of `w_hh`.
+        let w_hh = PackedMat::from_fn(dim, 4 * dim, |unit, gate| p.w_hh[gate * dim + unit]);
         self.layers.push(LstmLayer {
             input: ConvKernel::from_torch(p.w_ih, &bias, (4 * dim, dim, 1), 1, 1)?,
-            w_hh: PackedMat::pack(recurrent, dim, 4 * dim)?,
+            w_hh,
             hidden: dim,
         });
         Ok(())
@@ -1730,6 +1741,86 @@ mod tests {
     fn seq(len: usize, channels: usize, f: impl Fn(usize) -> f32) -> Seq {
         Seq::from_vec(len, channels, (0..len * channels).map(f).collect())
             .unwrap_or_else(|_| Seq::zeros(len, channels))
+    }
+
+    fn values(n: usize, seed: f32) -> Vec<f32> {
+        (0..n)
+            .map(|i| ((i as f32).mul_add(0.731, seed)).sin())
+            .collect()
+    }
+
+    /// The layers pack their weights straight from PyTorch's layout into the
+    /// same matrices, bit for bit, as the loader that went through a
+    /// row-major matrix first.
+    #[test]
+    fn layers_pack_like_the_matrix_loader() -> Result<()> {
+        // Conv: rows (tap, input), columns output.
+        let (cout, cin, kernel) = (37, 19, 7);
+        let (weight, bias) = (values(cout * cin * kernel, 0.1), values(cout, 0.2));
+        let mut matrix = vec![0.0; kernel * cin * cout];
+        for o in 0..cout {
+            for i in 0..cin {
+                for j in 0..kernel {
+                    matrix[(j * cin + i) * cout + o] = weight[(o * cin + i) * kernel + j];
+                }
+            }
+        }
+        let old = PackedMat::pack(matrix, kernel * cin, cout)?;
+        let conv = ConvKernel::from_torch(&weight, &bias, (cout, cin, kernel), 1, 3)?;
+        assert!(conv.weight.bit_identical(&old), "conv");
+        // Transposed conv: rows (tap, input), columns (phase, output).
+        // Kernel 12, stride 8: some positions lie past the kernel.
+        let (cin, cout, k, s) = (24, 12, 12, 8);
+        let (weight, bias) = (values(cin * cout * k, 0.3), values(cout, 0.4));
+        let taps = k.div_ceil(s);
+        let cols = s * cout;
+        let mut matrix = vec![0.0; taps * cin * cols];
+        for tap in 0..taps {
+            for p in 0..s {
+                let j = p + (taps - 1 - tap) * s;
+                if j >= k {
+                    continue;
+                }
+                for i in 0..cin {
+                    for o in 0..cout {
+                        matrix[(tap * cin + i) * cols + p * cout + o] =
+                            weight[(i * cout + o) * k + j];
+                    }
+                }
+            }
+        }
+        let old = PackedMat::pack(matrix, taps * cin, cols)?;
+        let geometry = ConvGeometry {
+            in_channels: cin,
+            out_channels: cout,
+            kernel: k,
+            stride: s,
+            dilation: 1,
+        };
+        let up = ConvTranspose1d::new(&weight, &bias, geometry, false, 0.0, None)?;
+        assert!(up.poly.weight.bit_identical(&old), "transposed conv");
+        // LSTM recurrent weights: the transpose of `w_hh`.
+        let dim = 9;
+        let w_hh = values(4 * dim * dim, 0.5);
+        let mut recurrent = vec![0.0; 4 * dim * dim];
+        for (gate, row) in w_hh.chunks_exact(dim).enumerate() {
+            for (unit, &v) in row.iter().enumerate() {
+                recurrent[unit * 4 * dim + gate] = v;
+            }
+        }
+        let old = PackedMat::pack(recurrent, dim, 4 * dim)?;
+        let (input, b) = (values(4 * dim * dim, 0.6), values(4 * dim, 0.7));
+        let lstm = Lstm::new(
+            dim,
+            &[LstmParams {
+                w_ih: &input,
+                w_hh: &w_hh,
+                b_ih: &b,
+                b_hh: &b,
+            }],
+        )?;
+        assert!(lstm.layers[0].w_hh.bit_identical(&old), "LSTM");
+        Ok(())
     }
 
     #[test]

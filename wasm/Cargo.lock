@@ -611,6 +611,7 @@ name = "picotone-wasm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "js-sys",
  "picotone",
  "rayon",
  "serde_json",

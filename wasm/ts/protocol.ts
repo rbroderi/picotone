@@ -55,6 +55,17 @@ export interface ModelInfo {
   readonly tables: readonly string[];
   /** Time to fetch and build the model, in milliseconds. */
   readonly loadMs: number;
+  /**
+   * WebAssembly memory size after the load, tables included. It never
+   * shrinks, so this is the peak so far; it stays the worker's footprint.
+   */
+  readonly memoryBytes: number;
+  /**
+   * WebAssembly memory size at each phase of building the network, in
+   * order: `start` (before), the network's own phases, `built` (after).
+   * Empty when the network was already built.
+   */
+  readonly loadMemory: Readonly<Record<string, number>>;
 }
 
 /** Timing and memory of one decode. */
@@ -71,6 +82,8 @@ export interface DecodeStats {
   readonly cx2Ms: number;
   /** Of `decodeMs`, the network, stereo and trim, in milliseconds. */
   readonly networkMs: number;
+  /** WebAssembly memory size after the first chunk. */
+  readonly firstChunkMemoryBytes: number;
   /** WebAssembly memory size after the decode (its peak: it never shrinks). */
   readonly memoryBytes: number;
 }

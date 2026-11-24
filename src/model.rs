@@ -242,15 +242,29 @@ impl Encodec {
     /// # Errors
     /// Fails when the inputs do not describe a valid decoder.
     pub fn decoder_from_bytes(name: &str, config_json: &str, safetensors: &[u8]) -> Result<Self> {
-        Self::from_bytes_with(
-            name,
-            config_json,
-            safetensors,
-            LoadOptions::decoder_only(None),
-        )
+        Self::decoder_from_weights(name, config_json, &Weights::from_bytes(safetensors)?)
     }
 
-    fn build(name: &str, config: Config, weights: &Weights, options: LoadOptions) -> Result<Self> {
+    /// Like [`Encodec::decoder_from_bytes`], reading the tensors from
+    /// `weights` (any [`Weights`] source) one at a time.
+    ///
+    /// # Errors
+    /// Fails when the inputs do not describe a valid decoder.
+    pub fn decoder_from_weights(
+        name: &str,
+        config_json: &str,
+        weights: &Weights<'_>,
+    ) -> Result<Self> {
+        let config = Config::from_json(config_json)?;
+        Self::build(name, config, weights, LoadOptions::decoder_only(None))
+    }
+
+    fn build(
+        name: &str,
+        config: Config,
+        weights: &Weights<'_>,
+        options: LoadOptions,
+    ) -> Result<Self> {
         let builder = Builder {
             w: weights,
             cfg: &config,
@@ -1285,7 +1299,7 @@ impl Stack {
 
 /// Builds layers in the Hugging Face module order so tensor names line up.
 struct Builder<'a> {
-    w: &'a Weights,
+    w: &'a Weights<'a>,
     cfg: &'a Config,
 }
 
@@ -1406,18 +1420,12 @@ impl Builder<'_> {
     /// Conv weights, materialising weight normalisation when used.
     fn weight(&self, prefix: &str, shape: [usize; 3]) -> Result<Vec<f32>> {
         match self.cfg.norm_type {
-            NormType::TimeGroupNorm => Ok(self
-                .w
-                .get(&format!("{prefix}.weight"), &shape)?
-                .into_owned()),
+            NormType::TimeGroupNorm => Ok(self.w.get(&format!("{prefix}.weight"), &shape)?),
             NormType::WeightNorm => {
                 let g = self
                     .w
                     .get(&format!("{prefix}.weight_g"), &[shape[0], 1, 1])?;
-                let mut out = self
-                    .w
-                    .get(&format!("{prefix}.weight_v"), &shape)?
-                    .into_owned();
+                let mut out = self.w.get(&format!("{prefix}.weight_v"), &shape)?;
                 let row = shape[1] * shape[2];
                 for (chunk, &gain) in out.chunks_exact_mut(row).zip(g.iter()) {
                     let norm = chunk
@@ -1439,12 +1447,8 @@ impl Builder<'_> {
         match self.cfg.norm_type {
             NormType::WeightNorm => Ok(None),
             NormType::TimeGroupNorm => Ok(Some(GroupNorm1::new(
-                self.w
-                    .get(&format!("{prefix}.norm.weight"), &[channels])?
-                    .into_owned(),
-                self.w
-                    .get(&format!("{prefix}.norm.bias"), &[channels])?
-                    .into_owned(),
+                self.w.get(&format!("{prefix}.norm.weight"), &[channels])?,
+                self.w.get(&format!("{prefix}.norm.bias"), &[channels])?,
             )?)),
         }
     }
@@ -1569,7 +1573,12 @@ struct Quantizer {
 }
 
 impl Quantizer {
-    fn new(w: &Weights, cfg: &Config, limit: Option<usize>, for_encoding: bool) -> Result<Self> {
+    fn new(
+        w: &Weights<'_>,
+        cfg: &Config,
+        limit: Option<usize>,
+        for_encoding: bool,
+    ) -> Result<Self> {
         let dim = cfg.codebook_dim();
         let size = cfg.codebook_size;
         let total = cfg.total_codebooks()?;
@@ -1580,12 +1589,10 @@ impl Quantizer {
         let count = limit.map_or(total, |n| n.min(total));
         let codebooks = (0..count)
             .map(|q| {
-                let embed = w
-                    .get(
-                        &format!("quantizer.layers.{q}.codebook.embed"),
-                        &[size, dim],
-                    )?
-                    .into_owned();
+                let embed = w.get(
+                    &format!("quantizer.layers.{q}.codebook.embed"),
+                    &[size, dim],
+                )?;
                 let embed_t = for_encoding.then(|| {
                     let mut embed_t = vec![0.0; size * dim];
                     for n in 0..size {

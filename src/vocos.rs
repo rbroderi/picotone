@@ -97,7 +97,7 @@ pub struct VocosDecoder {
 /// A PyTorch Linear `[out, in]` as a `[in, out]` matrix and bias, with an
 /// optional `LayerNorm` affine part before it folded in (`w diag(scale)`,
 /// `b + w shift`) and an optional per-output scale after it, in double
-/// precision.
+/// precision. Each folded value is written straight into the packed matrix.
 fn fold_linear(
     weight: &[f32],
     bias: &[f32],
@@ -106,33 +106,39 @@ fn fold_linear(
     after: Option<&[f32]>,
 ) -> Result<(PackedMat, Vec<f32>)> {
     ensure!(
-        weight.len() == outputs * inputs && bias.len() == outputs,
+        weight.len() == outputs * inputs
+            && bias.len() == outputs
+            && before.is_none_or(|(s, t)| s.len() == inputs && t.len() == inputs)
+            && after.is_none_or(|s| s.len() == outputs),
         "linear layer size mismatch"
     );
-    let mut matrix = vec![0.0_f32; inputs * outputs];
-    let mut folded = vec![0.0_f32; outputs];
-    for o in 0..outputs {
-        let row = &weight[o * inputs..(o + 1) * inputs];
-        let post = after.map_or(1.0, |s| f64::from(s[o]));
-        let mut b = f64::from(bias[o]);
-        for (i, &w) in row.iter().enumerate() {
-            let (scale, shift) =
-                before.map_or((1.0, 0.0), |(s, t)| (f64::from(s[i]), f64::from(t[i])));
-            b += f64::from(w) * shift;
+    let affine = |i: usize| before.map_or((1.0, 0.0), |(s, t)| (f64::from(s[i]), f64::from(t[i])));
+    let post = |o: usize| after.map_or(1.0, |s| f64::from(s[o]));
+    let folded = (0..outputs)
+        .map(|o| {
+            let row = &weight[o * inputs..(o + 1) * inputs];
+            let b = row
+                .iter()
+                .enumerate()
+                .fold(f64::from(bias[o]), |b, (i, &w)| {
+                    b + f64::from(w) * affine(i).1
+                });
             #[expect(clippy::cast_possible_truncation, reason = "rounding the fold once")]
-            let value = (f64::from(w) * scale * post) as f32;
-            matrix[i * outputs + o] = value;
-        }
+            let value = (b * post(o)) as f32;
+            value
+        })
+        .collect();
+    let matrix = PackedMat::from_fn(inputs, outputs, |i, o| {
         #[expect(clippy::cast_possible_truncation, reason = "rounding the fold once")]
-        let value = (b * post) as f32;
-        folded[o] = value;
-    }
-    Ok((PackedMat::pack(matrix, inputs, outputs)?, folded))
+        let value = (f64::from(weight[o * inputs + i]) * affine(i).0 * post(o)) as f32;
+        value
+    });
+    Ok((matrix, folded))
 }
 
 /// Tensor `name` of shape `[len]`.
-fn vector(w: &Weights, name: &str, len: usize) -> Result<Vec<f32>> {
-    Ok(w.get(name, &[len])?.into_owned())
+fn vector(w: &Weights<'_>, name: &str, len: usize) -> Result<Vec<f32>> {
+    w.get(name, &[len])
 }
 
 /// The periodic Hann window over `n` (as `torch.hann_window`, in float32)
@@ -154,7 +160,7 @@ fn hann_windows(n: usize) -> (Vec<f32>, Vec<f32>) {
 
 impl Block {
     /// Block `index` of the checkpoint, folded.
-    fn load(w: &Weights, index: usize, dim: usize, mlp: usize) -> Result<Self> {
+    fn load(w: &Weights<'_>, index: usize, dim: usize, mlp: usize) -> Result<Self> {
         let p = format!("block{index}");
         let taps_in = w.get(&format!("{p}.dwconv.weight"), &[dim, KERNEL])?;
         let mut taps = vec![0.0; KERNEL * dim];
@@ -198,7 +204,7 @@ impl VocosDecoder {
     /// # Errors
     /// Fails when a tensor is missing or has the wrong shape, or the head is
     /// not for hop 512.
-    pub fn from_weights(w: &Weights) -> Result<Self> {
+    pub fn from_weights(w: &Weights<'_>) -> Result<Self> {
         let dim = *w
             .shape("embed.bias")
             .and_then(<[usize]>::first)
@@ -218,20 +224,14 @@ impl VocosDecoder {
                  2050 values) only"
             );
         }
-        let codebooks = w
-            .get("codebooks", &[CODEBOOKS, CODEBOOK_SIZE, CODEBOOK_DIM])?
-            .into_owned();
+        let codebooks = w.get("codebooks", &[CODEBOOKS, CODEBOOK_SIZE, CODEBOOK_DIM])?;
         let embed_weight = w.get("embed.weight", &[dim, FOLDED_INPUT, KERNEL])?;
-        let mut matrix = vec![0.0; KERNEL * FOLDED_INPUT * dim];
-        for o in 0..dim {
-            for i in 0..FOLDED_INPUT {
-                for j in 0..KERNEL {
-                    matrix[(j * FOLDED_INPUT + i) * dim + o] =
-                        embed_weight[(o * FOLDED_INPUT + i) * KERNEL + j];
-                }
-            }
-        }
-        let embed = PackedMat::pack(matrix, KERNEL * FOLDED_INPUT, dim)?;
+        // Row (tap, input), column output.
+        let embed = PackedMat::from_fn(KERNEL * FOLDED_INPUT, dim, |r, o| {
+            let (j, i) = (r / FOLDED_INPUT, r % FOLDED_INPUT);
+            embed_weight[(o * FOLDED_INPUT + i) * KERNEL + j]
+        });
+        drop(embed_weight);
         let vector = |name: &str, len: usize| vector(w, name, len);
         let mut blocks = Vec::new();
         while w.contains(&format!("block{}.gamma", blocks.len())) {
@@ -281,8 +281,7 @@ impl VocosDecoder {
     /// # Errors
     /// Fails when the bytes are not a valid decoder.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let w = Weights::from_bytes(bytes)?;
-        Self::from_weights(&w).context("building the Vocos HQ decoder")
+        Self::from_weights(&Weights::from_bytes(bytes)?).context("building the Vocos HQ decoder")
     }
 
     /// Channels of the residual stream.
@@ -523,5 +522,128 @@ impl HqDecoder for VocosDecoder {
     fn decode_window(&self, codes: &[u16], num_codebooks: usize) -> Result<Vec<f32>> {
         dac::check_codes(codes, num_codebooks)?;
         self.decode_span(codes, num_codebooks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fold as the loader did it before it packed straight from the
+    /// tensors: a row-major `[in, out]` matrix first, then packed.
+    fn fold_linear_via_matrix(
+        weight: &[f32],
+        bias: &[f32],
+        (outputs, inputs): (usize, usize),
+        before: Option<(&[f32], &[f32])>,
+        after: Option<&[f32]>,
+    ) -> Result<(PackedMat, Vec<f32>)> {
+        let mut matrix = vec![0.0_f32; inputs * outputs];
+        let mut folded = vec![0.0_f32; outputs];
+        for o in 0..outputs {
+            let row = &weight[o * inputs..(o + 1) * inputs];
+            let post = after.map_or(1.0, |s| f64::from(s[o]));
+            let mut b = f64::from(bias[o]);
+            for (i, &w) in row.iter().enumerate() {
+                let (scale, shift) =
+                    before.map_or((1.0, 0.0), |(s, t)| (f64::from(s[i]), f64::from(t[i])));
+                b += f64::from(w) * shift;
+                #[expect(clippy::cast_possible_truncation, reason = "rounding the fold once")]
+                let value = (f64::from(w) * scale * post) as f32;
+                matrix[i * outputs + o] = value;
+            }
+            #[expect(clippy::cast_possible_truncation, reason = "rounding the fold once")]
+            let value = (b * post) as f32;
+            folded[o] = value;
+        }
+        Ok((PackedMat::pack(matrix, inputs, outputs)?, folded))
+    }
+
+    fn same_bits(a: &[f32], b: &[f32]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+    }
+
+    /// The decoder's packed weights equal, bit for bit, those of the loader
+    /// that went through row-major matrices.
+    fn packs_like_the_matrix_loader(path: &Path) -> Result<()> {
+        let bytes = std::fs::read(path)?;
+        let w = Weights::from_bytes(&bytes)?;
+        let d = VocosDecoder::from_weights(&w)?;
+        let (dim, mlp) = (d.dim, d.mlp);
+        let embed = w.get("embed.weight", &[dim, FOLDED_INPUT, KERNEL])?;
+        let mut matrix = vec![0.0; KERNEL * FOLDED_INPUT * dim];
+        for o in 0..dim {
+            for i in 0..FOLDED_INPUT {
+                for j in 0..KERNEL {
+                    matrix[(j * FOLDED_INPUT + i) * dim + o] =
+                        embed[(o * FOLDED_INPUT + i) * KERNEL + j];
+                }
+            }
+        }
+        let old = PackedMat::pack(matrix, KERNEL * FOLDED_INPUT, dim)?;
+        assert!(old.bit_identical(&d.embed), "embed");
+        let v = |name: &str, len: usize| w.get(name, &[len]);
+        for (index, block) in d.blocks.iter().enumerate() {
+            let p = format!("block{index}");
+            let (norm_w, norm_b) = (
+                v(&format!("{p}.norm.weight"), dim)?,
+                v(&format!("{p}.norm.bias"), dim)?,
+            );
+            let args = (
+                w.get(&format!("{p}.pw1.weight"), &[mlp, dim])?,
+                v(&format!("{p}.pw1.bias"), mlp)?,
+            );
+            let before = Some((norm_w.as_slice(), norm_b.as_slice()));
+            let (old, old_bias) =
+                fold_linear_via_matrix(&args.0, &args.1, (mlp, dim), before, None)?;
+            let (new, new_bias) = fold_linear(&args.0, &args.1, (mlp, dim), before, None)?;
+            assert!(
+                old.bit_identical(&block.pw1) && new.bit_identical(&block.pw1),
+                "{p}.pw1"
+            );
+            assert!(same_bits(&old_bias, &new_bias) && same_bits(&old_bias, &block.pw1_bias));
+            let gamma = v(&format!("{p}.gamma"), dim)?;
+            let args = (
+                w.get(&format!("{p}.pw2.weight"), &[dim, mlp])?,
+                v(&format!("{p}.pw2.bias"), dim)?,
+            );
+            let (old, old_bias) =
+                fold_linear_via_matrix(&args.0, &args.1, (dim, mlp), None, Some(&gamma))?;
+            let (new, new_bias) = fold_linear(&args.0, &args.1, (dim, mlp), None, Some(&gamma))?;
+            assert!(
+                old.bit_identical(&block.pw2) && new.bit_identical(&block.pw2),
+                "{p}.pw2"
+            );
+            assert!(same_bits(&old_bias, &new_bias), "{p}.pw2 bias");
+        }
+        let width = d.n_fft + 2;
+        let (final_w, final_b) = (v("final_norm.weight", dim)?, v("final_norm.bias", dim)?);
+        let (old, old_bias) = fold_linear_via_matrix(
+            &w.get("head.weight", &[width, dim])?,
+            &v("head.bias", width)?,
+            (width, dim),
+            Some((&final_w, &final_b)),
+            None,
+        )?;
+        assert!(old.bit_identical(&d.head), "head");
+        assert!(same_bits(&old_bias, &d.head_bias), "head bias");
+        Ok(())
+    }
+
+    #[test]
+    fn tiny_fixture_packs_like_the_matrix_loader() -> Result<()> {
+        packs_like_the_matrix_loader(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/vocos_tiny.safetensors"),
+        )
+    }
+
+    /// The full-size decoder too, when `weights/` has it (it is not committed).
+    #[test]
+    fn full_size_packs_like_the_matrix_loader() -> Result<()> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("weights/dac44_vocos.safetensors");
+        if !path.exists() {
+            return Ok(());
+        }
+        packs_like_the_matrix_loader(&path)
     }
 }

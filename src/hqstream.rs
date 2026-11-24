@@ -62,6 +62,14 @@ pub trait HqDecoder: fmt::Debug + Send + Sync {
         dac::CHUNK
     }
 
+    /// Most frames, counting each piece's context, that should be decoded
+    /// at once across threads. A decoder whose activations are large per
+    /// frame bounds this, so that its memory does not grow with the thread
+    /// count; the threads then share each piece's layers instead.
+    fn frames_in_flight(&self) -> usize {
+        usize::MAX
+    }
+
     /// Decodes `codes`, `[frames][num_codebooks]`, as if they were a whole
     /// file: `frames * 512` samples.
     ///
@@ -424,8 +432,16 @@ impl<'a> HqStream<'a> {
     /// would idle), all pieces of all channels in parallel.
     fn network(&self, range: Range<usize>) -> Result<Vec<Vec<f32>>> {
         let channels = self.codes.len().max(1);
-        let shortest = MIN_PIECE_CONTEXTS * self.decoder.context().frames.max(1);
-        let spread = rayon::current_num_threads()
+        let context = self.decoder.context();
+        let shortest = MIN_PIECE_CONTEXTS * context.frames.max(1);
+        // The frames a piece decodes beyond its own: context both sides,
+        // rounded out to the alignment.
+        let extra = 2 * context.frames + context.align;
+        let budget = self.decoder.frames_in_flight();
+        let at_once = rayon::current_num_threads()
+            .min(budget / (shortest + extra))
+            .max(1);
+        let spread = at_once
             .div_ceil(channels)
             .min(range.len() / shortest)
             .max(1);
@@ -442,18 +458,25 @@ impl<'a> HqStream<'a> {
                 })
             })
             .collect();
-        let decoded = jobs
-            .into_par_iter()
-            .map(|(c, piece)| {
-                self.decoder.decode_range(
-                    &self.codes[c],
-                    self.stream.info.codebooks[c],
-                    self.codes_first,
-                    piece,
-                    self.frames,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
+        // Jobs run in waves of at most `budget` frames in flight.
+        let wave = (budget / (size + extra)).max(1);
+        let mut decoded = Vec::with_capacity(jobs.len());
+        for batch in jobs.chunks(wave) {
+            decoded.extend(
+                batch
+                    .par_iter()
+                    .map(|(c, piece)| {
+                        self.decoder.decode_range(
+                            &self.codes[*c],
+                            self.stream.info.codebooks[*c],
+                            self.codes_first,
+                            piece.clone(),
+                            self.frames,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
         Ok(decoded
             .chunks(pieces.max(1))
             .map(<[Vec<f32>]>::concat)

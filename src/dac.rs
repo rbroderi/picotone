@@ -63,6 +63,14 @@ pub const CONTEXT: usize = 12;
 pub const ALIGN: usize = 9;
 /// Latent frames per chunk, before context (about 3 s).
 pub const CHUNK: usize = 256;
+/// Most frames (with their context) decoded at once across threads. The
+/// last block's activations take 64 KiB per frame and copy, three or four
+/// at a time, so this bounds the decode's memory at about 150 MiB above the
+/// weights however many threads there are; past that, the threads share
+/// each piece's convs. Unbounded, a 16-thread wasm decode of 30 s stereo
+/// peaked at 430–670 MiB, against 215–230 MiB at 512 and at the same speed
+/// within noise; 256 was about 15% slower.
+const FRAMES_IN_FLIGHT: usize = 512;
 
 /// FNV-1a 64 of codebook values as little-endian f32, `[codebook][entry][value]`.
 ///
@@ -87,8 +95,8 @@ struct Snake {
 }
 
 impl Snake {
-    fn load(w: &Weights, name: &str, channels: usize) -> Result<Self> {
-        let alpha = w.get(name, &[channels])?.into_owned();
+    fn load(w: &Weights<'_>, name: &str, channels: usize) -> Result<Self> {
+        let alpha = w.get(name, &[channels])?;
         let inv = alpha.iter().map(|a| 1.0 / (a + 1e-9)).collect();
         Ok(Self { alpha, inv })
     }
@@ -143,7 +151,7 @@ const WINOGRAD_MIN_CHANNELS: usize = 16;
 impl SnakeConv {
     /// A stride-1 conv that keeps its input's length.
     fn load(
-        w: &Weights,
+        w: &Weights<'_>,
         snake: &str,
         conv: &str,
         (cout, cin, kernel): (usize, usize, usize),
@@ -163,7 +171,7 @@ impl SnakeConv {
     /// The encoder's downsampling conv: kernel `2 * stride`, padding
     /// `stride / 2`, which divides the length by `stride` exactly.
     fn load_down(
-        w: &Weights,
+        w: &Weights<'_>,
         snake: &str,
         conv: &str,
         (cout, cin): (usize, usize),
@@ -180,7 +188,7 @@ impl SnakeConv {
     }
 
     fn build(
-        w: &Weights,
+        w: &Weights<'_>,
         (snake, conv): (&str, &str),
         (cout, cin, kernel): (usize, usize, usize),
         (stride, dilation): (usize, usize),
@@ -227,6 +235,17 @@ impl SnakeConv {
         self.snake.apply(interior);
         self.conv.apply(&padded)
     }
+
+    /// As [`SnakeConv::forward`], consuming `x`: an unpadded conv applies
+    /// Snake in place rather than to a copy (the same values, one buffer
+    /// fewer).
+    fn forward_owned(&self, mut x: Seq) -> Result<Seq> {
+        if self.pad > 0 {
+            return self.forward(&x);
+        }
+        self.snake.apply(x.data_mut());
+        self.conv.apply(&x)
+    }
 }
 
 /// `x + conv2(snake2(conv1(snake1(x))))`.
@@ -239,7 +258,7 @@ struct Residual {
 impl Residual {
     /// Residual unit `r` of the block at `prefix`, `channels` wide.
     fn load(
-        w: &Weights,
+        w: &Weights<'_>,
         prefix: &str,
         channels: usize,
         dilation: usize,
@@ -267,7 +286,7 @@ impl Residual {
 
     /// The three residual units of the block at `prefix`.
     fn load_three(
-        w: &Weights,
+        w: &Weights<'_>,
         prefix: &str,
         channels: usize,
         backend: Backend,
@@ -282,8 +301,7 @@ impl Residual {
     }
 
     fn forward(&self, x: Seq) -> Result<Seq> {
-        let h = self.first.forward(&x)?;
-        let y = self.second.forward(&h)?;
+        let y = self.second.forward_owned(self.first.forward(&x)?)?;
         let mut out = x;
         out.add_assign(&y)?;
         Ok(out)
@@ -327,15 +345,13 @@ impl DacDecoder {
     ///
     /// # Errors
     /// Fails when a tensor is missing or has the wrong shape.
-    pub fn from_weights(w: &Weights, width: usize) -> Result<Self> {
+    pub fn from_weights(w: &Weights<'_>, width: usize) -> Result<Self> {
         ensure!(
             width.is_multiple_of(1 << RATES.len()),
             "width {width} does not halve {} times",
             RATES.len()
         );
-        let codebooks = w
-            .get("codebooks", &[CODEBOOKS, CODEBOOK_SIZE, CODEBOOK_DIM])?
-            .into_owned();
+        let codebooks = w.get("codebooks", &[CODEBOOKS, CODEBOOK_SIZE, CODEBOOK_DIM])?;
         let cin = CODEBOOKS * IN_PER_CODEBOOK;
         let input = ConvKernel::from_torch(
             &w.get("input.weight", &[width, cin, KERNEL])?,
@@ -544,6 +560,10 @@ impl HqDecoder for DacDecoder {
         }
     }
 
+    fn frames_in_flight(&self) -> usize {
+        FRAMES_IN_FLIGHT
+    }
+
     fn decode_window(&self, codes: &[u16], num_codebooks: usize) -> Result<Vec<f32>> {
         check_codes(codes, num_codebooks)?;
         let x = self.input_frames(codes, num_codebooks, 0, codes.len() / num_codebooks);
@@ -591,7 +611,7 @@ struct Quantizer {
 }
 
 impl Quantizer {
-    fn load(w: &Weights, i: usize) -> Result<Self> {
+    fn load(w: &Weights<'_>, i: usize) -> Result<Self> {
         let p = format!("quant{i}");
         let conv = |name: &str, cout: usize, cin: usize| -> Result<ConvKernel> {
             ConvKernel::from_torch(
@@ -603,7 +623,7 @@ impl Quantizer {
             )
         };
         let shape = [CODEBOOK_SIZE, CODEBOOK_DIM];
-        let unit = w.get(&format!("{p}.codebook_unit"), &shape)?.into_owned();
+        let unit = w.get(&format!("{p}.codebook_unit"), &shape)?;
         let unit_sq = unit
             .as_chunks::<CODEBOOK_DIM>()
             .0
@@ -612,7 +632,7 @@ impl Quantizer {
             .collect();
         Ok(Self {
             in_proj: conv("in_proj", CODEBOOK_DIM, LATENT_DIM)?,
-            codebook: w.get(&format!("{p}.codebook"), &shape)?.into_owned(),
+            codebook: w.get(&format!("{p}.codebook"), &shape)?,
             unit,
             unit_sq,
             out_proj: conv("out_proj", LATENT_DIM, CODEBOOK_DIM)?,
@@ -684,7 +704,7 @@ impl DacEncoder {
     ///
     /// # Errors
     /// Fails when a tensor is missing or has the wrong shape.
-    pub fn from_weights(w: &Weights) -> Result<Self> {
+    pub fn from_weights(w: &Weights<'_>) -> Result<Self> {
         let input = ConvKernel::from_torch(
             &w.get("input.weight", &[ENCODER_DIM, 1, KERNEL])?,
             &w.get("input.bias", &[ENCODER_DIM])?,

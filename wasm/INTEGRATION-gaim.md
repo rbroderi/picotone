@@ -323,7 +323,7 @@ decoder in `web/` refuses HQ files for now.
 plays any `dac44` file. `await decoder.loadModel("dac44", { hqDecoder: "dac44_vocos" })` loads the
 Vocos decoder (`dac44_vocos.*`) instead of the student. It is about 5× faster: 4.4–4.7× realtime
 for single-threaded stereo against 0.9× (§5), so it suits plain-HTTP table pages. It needs
-about 172 MiB of wasm memory single-threaded. `ModelInfo.network` says which network is in use.
+about 77 MiB of wasm memory single-threaded. `ModelInfo.network` says which network is in use.
 Loading `dac44` again with the other `hqDecoder` switches files of that model to it. The worker
 keeps both networks in memory, so switching back is free.
 
@@ -364,8 +364,8 @@ random-initialised stand-in weights (the speed does not depend on the values):
 | mono q9 | 18.0× | 8.9× | 6.6× | 101 dB |
 | 2 single-threaded workers, one mono q9 file each, at once | | 15.7 channel-s/s | | |
 
-wasm memory peaks at 172 MiB single-threaded and 203 MiB threaded (Vocos alone; the
-weights are 56 MB). The lower SNR against native (101 dB, against 111–117 dB for the student)
+wasm memory peaks at 71–77 MiB single-threaded and 125–151 MiB threaded (Vocos alone; the
+weights are 56 MB, packed 63 MiB). The lower SNR against native (101 dB, against 111–117 dB for the student)
 comes from the random stand-in weights; it is still above the test's 100 dB bar.
 
 The student network dominates its decode (98%); its cost does not depend on the codebook count, and parametric
@@ -373,12 +373,27 @@ stereo costs about the same as mono. **Single-threaded HQ stereo is slower than 
 here, so on plain-HTTP pages `play()` buffers most of the file first: decode HQ music ahead of
 time there (`decodeToAudioBuffer`), or serve over HTTPS for the threaded build. One
 single-threaded worker per channel would give about 1.4× for stereo (measured as two
-workers decoding at once); the API does not split a file by channel yet. Threaded, HQ uses
-about 650–850 MiB of wasm memory (each thread's network scratch); single-threaded 115 MiB.
+workers decoding at once); the API does not split a file by channel yet. Threaded, the student
+uses about 200–220 MiB of wasm memory (it decodes at most 512 frames at once across threads, so
+this does not grow with the thread count); single-threaded 102 MiB.
+
+**Memory.** wasm memory never shrinks, so its peak is what a worker keeps. The weights are not
+copied into wasm: `new Decoder(name, config, bytes)` takes the `Uint8Array` and reads each
+tensor from it as it packs it, so the load holds only the packed network (plus one tensor).
+Drop the buffer after the constructor returns. Peaks measured with `node wasm/test/memory.mjs`
+(30 s q9 HQ files, 8 s / 6 s EnCodec; 16 threads):
+
+| network | threaded: built / peak | single: built / peak |
+|---|---|---|
+| HQ student (stereo / mono) | 57 / 220, 200–217 MiB | 25 / 102 MiB |
+| HQ Vocos (stereo / mono) | 97 / 151, 125 MiB | 64 / 77, 71 MiB |
+| EnCodec 48 kHz stereo | 71 / 169 MiB | 40 / 100 MiB |
+| EnCodec 24 kHz mono | 79 / 127 MiB | 47 / 79 MiB |
+
+"Built" includes the empty instance (34 MiB threaded with its thread stacks, 1 MiB single);
+the cx2 tables add 4–32 MiB, and decoding the rest. It does not depend on file length.
 
 No EnCodec case had an underrun. Model download and load take 0.3–0.5 s from a local server.
-wasm memory peaks at about 205–265 MiB threaded and 175–215 MiB single-threaded, almost all
-of it model weights and tables; it does not depend on file length.
 
 **Verdict for music loops.** With the threaded build (localhost, or HTTPS per §3) music
 starts after about 0.2 s and stays far ahead of realtime. The single-threaded build, all the

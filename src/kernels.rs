@@ -219,6 +219,53 @@ impl PackedMat {
         Ok(Self { k, n, layout, data })
     }
 
+    /// Packs the `[k, n]` matrix whose value at row `r`, column `c` is
+    /// `value(r, c)`, writing each value straight into its place: the same
+    /// matrix as [`PackedMat::pack`] of the row-major values, without them.
+    /// A weight is read from its checkpoint layout this way, and never held
+    /// in a second, intermediate layout.
+    pub(crate) fn from_fn(k: usize, n: usize, value: impl Fn(usize, usize) -> f32) -> Self {
+        let lanes = lanes();
+        let (layout, data) = if lanes == 1 || k == 0 || n == 0 {
+            let data = (0..k).flat_map(|r| (0..n).map(move |c| (r, c)));
+            (Layout::Plain, data.map(|(r, c)| value(r, c)).collect())
+        } else if n <= MAX_DOT_OUTPUTS {
+            let data = (0..n).flat_map(|c| (0..k).map(move |r| (r, c)));
+            (Layout::Columns, data.map(|(r, c)| value(r, c)).collect())
+        } else {
+            let width = panel_width(lanes);
+            let mut data = vec![0.0; n.div_ceil(width) * k * width];
+            for (p, panel) in data.chunks_exact_mut(k * width).enumerate() {
+                let first = p * width;
+                let cols = width.min(n - first);
+                for (r, dst) in panel.chunks_exact_mut(width).enumerate() {
+                    for (c, v) in dst[..cols].iter_mut().enumerate() {
+                        *v = value(r, first + c);
+                    }
+                }
+            }
+            (Layout::Panels { width }, data)
+        };
+        Self { k, n, layout, data }
+    }
+
+    /// Rows and columns, `(k, n)`.
+    pub(crate) const fn shape(&self) -> (usize, usize) {
+        (self.k, self.n)
+    }
+
+    /// Whether both hold the same values bit for bit, in the same layout.
+    #[cfg(test)]
+    pub(crate) fn bit_identical(&self, other: &Self) -> bool {
+        (self.k, self.n, self.layout) == (other.k, other.n, other.layout)
+            && self.data.len() == other.data.len()
+            && self
+                .data
+                .iter()
+                .zip(&other.data)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+    }
+
     /// The matrix in row-major order again.
     pub(crate) fn unpack(&self) -> Vec<f32> {
         let (k, n) = (self.k, self.n);
@@ -1309,6 +1356,11 @@ mod tests {
             let bias = pattern(n, 2.0);
             let mat = PackedMat::pack(weight.clone(), k, n)?;
             assert_eq!(mat.unpack(), weight);
+            let direct = PackedMat::from_fn(k, n, |r, c| weight[r * n + c]);
+            assert!(
+                direct.bit_identical(&mat),
+                "{k}x{n}: from_fn differs from pack"
+            );
             let mut out = vec![0.0; rows * n];
             mat.mul(&a, stride, Some(&bias), &mut out)?;
             // Accumulating on top of the bias gives the same values.

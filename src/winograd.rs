@@ -381,21 +381,19 @@ impl WinogradConv {
             cin.is_multiple_of(LANES) && cout.is_multiple_of(LANES),
             "Winograd convs need multiples of {LANES} channels, not {cin} -> {cout}"
         );
+        // Row input `c`, column output `o`: the filter's taps against `g`.
         let u = G
             .iter()
             .map(|g| {
-                let mut mat = vec![0.0_f32; cin * cout];
-                for (o, filters) in weight.chunks_exact(cin * TAPS).enumerate() {
-                    for (c, taps) in filters.as_chunks::<TAPS>().0.iter().enumerate() {
-                        let v: f64 = taps.iter().zip(g).map(|(&w, &gj)| f64::from(w) * gj).sum();
-                        #[expect(clippy::cast_possible_truncation, reason = "f64 to f32 weights")]
-                        let v = v as f32;
-                        mat[c * cout + o] = v;
-                    }
-                }
-                PackedMat::pack(mat, cin, cout)
+                PackedMat::from_fn(cin, cout, |c, o| {
+                    let taps = &weight[(o * cin + c) * TAPS..][..TAPS];
+                    let v: f64 = taps.iter().zip(g).map(|(&w, &gj)| f64::from(w) * gj).sum();
+                    #[expect(clippy::cast_possible_truncation, reason = "f64 to f32 weights")]
+                    let v = v as f32;
+                    v
+                })
             })
-            .collect::<Result<_>>()?;
+            .collect();
         Ok(Self {
             cin,
             cout,
@@ -519,6 +517,29 @@ mod tests {
             .zip(direct.data())
             .fold(0.0_f32, |a, (p, q)| a.max((p - q).abs()));
         Ok(diff / peak)
+    }
+
+    /// The transformed filters equal, bit for bit, those packed from a
+    /// row-major matrix (the loader before it packed straight from the weight).
+    #[test]
+    fn filters_pack_like_the_matrix_loader() -> Result<()> {
+        let (cout, cin) = (24, 16);
+        let mut seed = 5;
+        let w = noise(cout * cin * TAPS, &mut seed);
+        let conv = WinogradConv::from_torch(&w, &noise(cout, &mut seed), (cout, cin), 3)?;
+        for (g, packed) in G.iter().zip(&conv.u) {
+            let mut mat = vec![0.0_f32; cin * cout];
+            for (o, filters) in w.chunks_exact(cin * TAPS).enumerate() {
+                for (c, taps) in filters.as_chunks::<TAPS>().0.iter().enumerate() {
+                    let v: f64 = taps.iter().zip(g).map(|(&w, &gj)| f64::from(w) * gj).sum();
+                    #[expect(clippy::cast_possible_truncation, reason = "f64 to f32 weights")]
+                    let v = v as f32;
+                    mat[c * cout + o] = v;
+                }
+            }
+            assert!(PackedMat::pack(mat, cin, cout)?.bit_identical(packed));
+        }
+        Ok(())
     }
 
     #[test]

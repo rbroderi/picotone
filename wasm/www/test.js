@@ -159,5 +159,21 @@ window.picotoneConcurrent = async (name, workers, hqDecoder = undefined) => {
     for (const d of decoders) d.dispose();
   }
 };
+/**
+ * Memory of one network in a fresh worker (wasm memory never shrinks, so every figure is the
+ * peak up to that point): the load's phases, then after the first chunk and after the decode.
+ */
+window.picotoneMemory = async (name, { build = "auto", threads = 0, relaxedSimd = true, hqDecoder = undefined, chunkSegments = undefined } = {}) => {
+  const bytes = new Uint8Array(await (await fetch(`/test-data/${name}.pico`)).arrayBuffer());
+  const info = readPicoHeader(bytes);
+  const fresh = await PicotoneDecoder.create({ baseUrl: "./picotone/", modelsUrl: "./models/", build, threads, relaxedSimd, cacheName: null });
+  try {
+    const model = await fresh.loadModel(info.model, { hqDecoder });
+    const result = await fresh.decode(bytes, { chunkSegments });
+    return { build: fresh.build, model, stats: result.stats, seconds: info.durationSeconds };
+  } finally {
+    fresh.dispose();
+  }
+};
 window.picotoneInfo = (buffer) => readPicoHeader(buffer).audioLength;
 window.picotoneReady = true;

@@ -34,6 +34,7 @@ use picotone::model::{Encodec, EncodedFrame, OverlapAdd, StreamDecoder};
 use picotone::nn::Seq;
 use picotone::pico::{self, ChannelLayout, Codec, DacInfo, DacStream, Info};
 use picotone::vocos::{self, VocosDecoder};
+use picotone::weights::Weights;
 use wasm_bindgen::prelude::*;
 
 /// Name of the HQ decoder network, and of its weight files.
@@ -61,6 +62,37 @@ fn now_ms() -> f64 {
     use std::time::Instant;
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     ORIGIN.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
+}
+
+/// Bytes of WebAssembly memory: its peak so far, since it never shrinks.
+#[cfg(target_arch = "wasm32")]
+fn memory_bytes() -> usize {
+    core::arch::wasm32::memory_size::<0>() * 65_536
+}
+
+/// Bytes of WebAssembly memory (0 off wasm).
+#[cfg(not(target_arch = "wasm32"))]
+const fn memory_bytes() -> usize {
+    0
+}
+
+/// The memory size at each phase of a load, in order.
+#[derive(Debug, Default)]
+struct Phases(Vec<(&'static str, usize)>);
+
+impl Phases {
+    fn mark(&mut self, phase: &'static str) {
+        self.0.push((phase, memory_bytes()));
+    }
+
+    fn json(&self) -> String {
+        let map: serde_json::Map<String, serde_json::Value> = self
+            .0
+            .iter()
+            .map(|&(phase, bytes)| (phase.to_owned(), serde_json::json!(bytes)))
+            .collect();
+        serde_json::Value::Object(map).to_string()
+    }
 }
 
 #[cfg(feature = "threads")]
@@ -426,6 +458,8 @@ enum Net {
 #[derive(Debug)]
 pub struct Decoder {
     net: Net,
+    /// WebAssembly memory after each phase of the build, as JSON.
+    load_memory: String,
 }
 
 #[wasm_bindgen]
@@ -438,11 +472,41 @@ impl Decoder {
     /// bytes. For EnCodec those need to hold only the decoder and quantizer
     /// tensors; `dac44_student` takes its weight file as it is.
     ///
+    /// The bytes stay in JavaScript: each tensor is read from them when it is
+    /// packed, a piece at a time, so WebAssembly memory never holds the file.
+    /// The caller can drop its buffer once this returns.
+    ///
     /// # Errors
     /// Fails when the inputs do not describe a valid decoder.
     #[wasm_bindgen(constructor)]
-    pub fn new(name: &str, config_json: &str, safetensors: &[u8]) -> Result<Self, JsError> {
-        Self::build(name, config_json, safetensors).map_err(|e| to_js(&e))
+    pub fn new(
+        name: &str,
+        config_json: &str,
+        safetensors: &js_sys::Uint8Array,
+    ) -> Result<Self, JsError> {
+        let len = safetensors.length();
+        let read = move |offset: u64, buf: &mut [u8]| -> Result<()> {
+            let start = u32::try_from(offset)?;
+            let end = u32::try_from(buf.len())
+                .ok()
+                .and_then(|n| start.checked_add(n))
+                .filter(|&end| end <= len)
+                .context("read past the end of the weights")?;
+            safetensors.subarray(start, end).copy_to(buf);
+            Ok(())
+        };
+        Weights::from_reader(u64::from(len), Box::new(read))
+            .and_then(|weights| Self::build(name, config_json, &weights))
+            .map_err(|e| to_js(&e))
+    }
+
+    /// WebAssembly memory in bytes after each phase of building the network,
+    /// as a JSON object from phase name to bytes, in order. The memory never
+    /// shrinks, so each value is the peak up to that phase.
+    #[wasm_bindgen(getter, js_name = loadMemory)]
+    #[must_use]
+    pub fn load_memory(&self) -> String {
+        self.load_memory.clone()
     }
 
     /// Network name, e.g. `encodec_48khz` or `dac44_student`.
@@ -516,7 +580,11 @@ impl Decoder {
 }
 
 impl Decoder {
-    fn build(name: &str, config_json: &str, safetensors: &[u8]) -> Result<Self> {
+    /// Builds the network from its tensors; `parsed` is the memory once the
+    /// header is read, `packed` once every tensor is packed.
+    fn build(name: &str, config_json: &str, w: &Weights<'_>) -> Result<Self> {
+        let mut phases = Phases::default();
+        phases.mark("parsed");
         let net = if name == HQ_DECODER {
             let config: serde_json::Value =
                 serde_json::from_str(config_json).context("parsing the decoder's config")?;
@@ -525,18 +593,25 @@ impl Decoder {
                 width.is_none_or(|w| w == 512),
                 "this build decodes the width-512 HQ student only"
             );
-            let decoder: &'static DacDecoder =
-                Box::leak(Box::new(DacDecoder::from_bytes(safetensors)?));
+            let decoder = DacDecoder::from_weights(w, 512).context("building the HQ decoder")?;
+            let decoder: &'static DacDecoder = Box::leak(Box::new(decoder));
             Net::Hq(decoder)
         } else if name == vocos::NAME {
-            let decoder: &'static VocosDecoder =
-                Box::leak(Box::new(VocosDecoder::from_bytes(safetensors)?));
+            let decoder = VocosDecoder::from_weights(w).context("building the Vocos HQ decoder")?;
+            let decoder: &'static VocosDecoder = Box::leak(Box::new(decoder));
             Net::Hq(decoder)
         } else {
-            let model = Encodec::decoder_from_bytes(name, config_json, safetensors)?;
-            Net::Encodec(Box::leak(Box::new(model)))
+            Net::Encodec(Box::leak(Box::new(Encodec::decoder_from_weights(
+                name,
+                config_json,
+                w,
+            )?)))
         };
-        Ok(Self { net })
+        phases.mark("packed");
+        Ok(Self {
+            net,
+            load_memory: phases.json(),
+        })
     }
 }
 
@@ -1393,7 +1468,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let weights = std::fs::read(root.join("tests/data/vocos_tiny.safetensors"))?;
         let config = std::fs::read_to_string(root.join("tests/data/vocos_tiny.json"))?;
-        let decoder = Decoder::build(vocos::NAME, &config, &weights)?;
+        let decoder = Decoder::build(vocos::NAME, &config, &Weights::from_bytes(&weights)?)?;
         assert_eq!(decoder.name(), "dac44_vocos");
         assert_eq!(decoder.model(), HQ_MODEL);
         let Net::Hq(hq) = decoder.net else {
@@ -1415,7 +1490,7 @@ mod tests {
         let weights = std::fs::read(root.join("weights/dac44_student.safetensors"))?;
         let config = std::fs::read_to_string(root.join("weights/dac44_student.json"))?;
         let table_bytes = std::fs::read(root.join("models/cx2_dac44.ecxm"))?;
-        let decoder = Decoder::build(HQ_DECODER, &config, &weights)?;
+        let decoder = Decoder::build(HQ_DECODER, &config, &Weights::from_bytes(&weights)?)?;
         let mut tables = Tables::new();
         let hash = tables.add_table(&table_bytes)?;
         let table = HqModel::from_table(&table_bytes)?;
