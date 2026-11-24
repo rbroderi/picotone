@@ -238,3 +238,50 @@ whole (`*_lengths`), which is what the position input relies on.
 Larger networks are allowed within the integer format's limits: `--h1` up to 512, `--h2`
 up to 256, `--rank-low` / `--rank-high` up to 128. Cost per coded symbol grows with the head
 ranks (a 1024 x rank product per code), so check speed after converting.
+
+# The HQ table (`models/cx2_dac44.ecxm`)
+
+HQ streams (DAC 44 kHz codes) are coded by a separate cx2 model: one integer network, no other
+experts (`../src/cx2/hq.rs`). `hq_net.py` trains it and writes its table. The table depends only
+on the codes it is trained on and on DAC's 9 x 1024 codebook vectors (`quantK.codebook_unit` in
+`dac44_encoder.safetensors`, a fixed half of each code's embedding). So a new encoder that keeps
+those codebooks needs only the three steps below, and nothing else changes.
+
+```sh
+# 1. Dump codes: per clip one [frames, 9] .npy per coded channel and a .json sidecar.
+#    Encodes with the HQ encoder at 9 codebooks; skips clips already dumped.
+#    Point PICOTONE_EXE at a copy of the binary if you rebuild picotone meanwhile.
+python ../tools/dac_codes.py --list X:/audio/work/clips2.json --split fit2 --wav X:/audio/work/wav2 \
+    --out ../work/dac_codes/fit2 --threads 3 --limit 300
+#    (the same for the test split, into ../work/dac_codes/test)
+
+# 2. Train: tiers q1-q9 mixed per channel, 80-frame pages, 8 frames of history.
+#    Prints bits per code per tier and per role on the test codes.
+uv run --extra cpu python hq_net.py train --fit ../work/dac_codes/fit ../work/dac_codes/fit2 \
+    --test ../work/dac_codes/test --weights ../weights --out out/hq_net.pt --steps 40000 --threads 6
+
+# 3. Export: the table, the integer-vs-float check per tier (coded bits, through the coder's
+#    frequency table), and the Rust parity fixture.
+uv run --extra cpu python hq_net.py export --ckpt out/hq_net.pt --test ../work/dac_codes/test \
+    --weights ../weights --table ../models/cx2_dac44.ecxm --fixture ../tests/data/cx2_dac44_fixture.json
+```
+
+Then `cargo test --release --test hq_cx2` checks Rust against the fixture: the logits on the AVX2
+and portable paths, page round trips, and truncation. `picotone --threads 1 dev dac-pack
+models/cx2_dac44.ecxm ../work/dac_codes/test` reports the real coded size per tier and the cx2
+time. A new table changes the table hash, so HQ files coded with the old one must be re-encoded.
+There is no backward compatibility: ship the new table only.
+
+What the network sees: the channel's previous 8 frames *in the same page* (pages are 80 frames,
+and every page and channel starts empty), the codebooks already coded in this frame, and the
+channel's role (left/right, mid or mono, side). Choices measured on the 23 test clips (stage 0,
+109 fit clips, `dac_cx_probe.py`):
+
+- **History.** 4 frames costs 0.03 bits per code more than 8, and 16 frames buys nothing.
+- **Other channel.** Coding the other stereo channel as an input saves under 0.01 bits.
+- **Page length.** Longer pages save under 0.03 bits.
+- **Additive experts** (codebook pairs, the codebook geometry): under 0.006 bits together.
+- **More fit data and longer training** help: half the fit data costs 0.18 bits, and 12k steps
+  beat 6k by 0.10 bits.
+
+The integer table codes within 0.002 bits per code of the float network.

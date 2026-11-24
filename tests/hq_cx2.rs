@@ -137,10 +137,12 @@ fn pages_round_trip_at_the_fixture_size() -> Result<()> {
                 codes
             );
         }
-        // The range coder adds at most a few bytes per page to the model's bits.
+        // The range coder lands within a few bytes per page of the model's bits
+        // (its flush can trim the last bytes, so a little under is possible too).
         let bits = cast(bytes) * 8.0;
+        let pages = cast(frames.div_ceil(page));
         assert!(
-            bits >= case.bits - 1.0 && bits <= case.bits + 64.0 * cast(frames.div_ceil(page)),
+            bits >= case.bits - 16.0 * pages && bits <= case.bits + 64.0 * pages,
             "{bits} vs {}",
             case.bits
         );
