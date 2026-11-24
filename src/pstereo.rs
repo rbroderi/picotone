@@ -293,6 +293,7 @@ fn frame_sets(spans: &[Range<usize>], per: usize) -> (Vec<usize>, Vec<Range<usiz
 // ---------------------------------------------------------------- FFT
 
 /// A 1024-point complex FFT and the sine window.
+#[derive(Debug)]
 struct Fft {
     /// `e^{-2 pi i k / N}` for `k < N / 2`.
     twiddles: Vec<(f32, f32)>,
@@ -789,75 +790,279 @@ pub fn upmix(
     spans: &[Range<usize>],
     cfg: Config,
 ) -> Result<[Vec<f32>; 2]> {
-    let nb = cfg.band_count();
-    let edges = cfg.edges();
-    let (of_frame, pages) = frame_sets(spans, cfg.frames);
-    let sets = pages.last().map_or(0, |p| p.end);
-    ensure!(
-        params.iid.len() == sets * nb && params.icc.len() == sets * nb,
-        "parametric stereo parameters for the wrong number of sets"
-    );
-    let n = mid.len();
-    if of_frame.is_empty() || n == 0 {
-        return Ok([mid.to_vec(), mid.to_vec()]);
-    }
-    // The decorrelated mid.
-    #[expect(clippy::cast_possible_truncation, reason = "f32 taps")]
-    let taps: Vec<(usize, f32)> = VELVET.iter().map(|&(d, g)| (d, g as f32)).collect();
-    let mut wet = vec![0.0_f32; n];
-    for (i, w) in wet.iter_mut().enumerate() {
-        let mut acc = 0.0;
-        for &(delay, gain) in &taps {
-            if delay > i {
-                break;
-            }
-            acc += gain * mid[i - delay];
-        }
-        *w = acc;
-    }
-    let table = gains();
-    let fft = Fft::new();
-    let (mut re, mut im) = (vec![0.0; N], vec![0.0; N]);
-    let mut spec = [[(0.0, 0.0); BINS]; 2];
-    let mut side_spec = [(0.0_f32, 0.0_f32); BINS];
-    let frames = n.div_ceil(HOP);
-    let mut side = vec![0.0_f32; (frames + 1) * HOP + N];
-    for t in 0..=frames {
-        let origin = frame_origin(t);
-        fft.forward_pair(
-            |i| {
-                let j = origin + isize::try_from(i).unwrap_or(0);
-                (at(mid, j), at(&wet, j))
-            },
-            &mut re,
-            &mut im,
-            &mut spec,
-        );
-        let set = of_frame[t.min(of_frame.len() - 1)];
-        for b in 0..nb {
-            let range = edges[b]..edges[b + 1];
-            let (mut em, mut ed) = (0.0_f32, 0.0_f32);
-            for k in range.clone() {
-                let ((mr, mi), (dr, di)) = (spec[0][k], spec[1][k]);
-                em += mr * mr + mi * mi;
-                ed += dr * dr + di * di;
-            }
-            let duck = ((em + 1e-12) / (ed + 1e-12)).sqrt().min(1.0);
-            let i = set * nb + b;
-            let (g, h) = table[usize::from(params.iid[i]) * ICC.len() + usize::from(params.icc[i])];
-            let hd = h * duck;
-            for k in range {
-                let ((mr, mi), (dr, di)) = (spec[0][k], spec[1][k]);
-                side_spec[k] = (g * mr + hd * dr, g * mi + hd * di);
-            }
-        }
-        // Frame t starts at sample (t - 1) * HOP: offset by HOP in `side`.
-        fft.inverse_add(&side_spec, &mut re, &mut im, &mut side[t * HOP..]);
-    }
-    let side = &side[HOP..HOP + n];
-    let left = mid.iter().zip(side).map(|(m, s)| m + s).collect();
-    let right = mid.iter().zip(side).map(|(m, s)| m - s).collect();
+    let mut upmixer = Upmixer::new(params.clone(), spans, cfg, mid.len(), 0)?;
+    let [mut left, mut right] = upmixer.push(mid)?;
+    let [l, r] = upmixer.finish()?;
+    left.extend(l);
+    right.extend(r);
     Ok([left, right])
+}
+
+/// Samples of mid before a block that the upmix of that block reads: the
+/// decorrelator's longest delay, plus the STFT frame before the block.
+const UPMIX_LOOKBACK: usize = VELVET[VELVET.len() - 1].0 + HOP;
+
+/// The upmix of [`upmix`], run on the mid as it is decoded, a part at a
+/// time. Its output equals [`upmix`]'s bit for bit, about one HQ frame (512
+/// samples) behind the mid it has been given.
+///
+/// It can also start at a later block of 512 samples (a seek): it then needs
+/// the mid from [`Upmixer::first_input`] on, a little before that block.
+#[derive(Debug)]
+pub struct Upmixer {
+    cfg: Config,
+    params: Params,
+    /// Parameter set of each HQ frame.
+    of_frame: Vec<usize>,
+    /// `(g, h)` per IID and ICC level.
+    gains: Vec<(f32, f32)>,
+    taps: Vec<(usize, f32)>,
+    fft: Fft,
+    /// Mid samples in the whole stream.
+    total: usize,
+    /// Sample of `mid[0]` and `wet[0]`.
+    origin: usize,
+    mid: Vec<f32>,
+    /// The decorrelated mid.
+    wet: Vec<f32>,
+    /// Next STFT frame to run.
+    next_frame: usize,
+    /// Accumulated side, from sample `side_origin`.
+    side: Vec<f32>,
+    side_origin: usize,
+    /// Next sample to return.
+    emitted: usize,
+}
+
+impl Upmixer {
+    /// An upmix of a mid of `total` samples, returning samples from block
+    /// `first_block` (sample `first_block * 512`) on.
+    ///
+    /// # Errors
+    /// Fails when the parameters do not match the pages.
+    pub fn new(
+        params: Params,
+        spans: &[Range<usize>],
+        cfg: Config,
+        total: usize,
+        first_block: usize,
+    ) -> Result<Self> {
+        let nb = cfg.band_count();
+        let (of_frame, pages) = frame_sets(spans, cfg.frames);
+        let sets = pages.last().map_or(0, |p| p.end);
+        ensure!(
+            params.iid.len() == sets * nb && params.icc.len() == sets * nb,
+            "parametric stereo parameters for the wrong number of sets"
+        );
+        let start = (first_block * HOP).min(total);
+        let origin = start.saturating_sub(UPMIX_LOOKBACK) / HOP * HOP;
+        // From the file's start every frame runs; after a seek the first
+        // frame is the one that starts the first returned block.
+        let next_frame = if origin == 0 { 0 } else { first_block };
+        #[expect(clippy::cast_possible_truncation, reason = "f32 taps")]
+        let taps = VELVET.iter().map(|&(d, g)| (d, g as f32)).collect();
+        Ok(Self {
+            cfg,
+            params,
+            of_frame,
+            gains: gains(),
+            taps,
+            fft: Fft::new(),
+            total,
+            origin,
+            mid: Vec::new(),
+            wet: Vec::new(),
+            next_frame,
+            side: Vec::new(),
+            side_origin: next_frame.saturating_sub(1) * HOP,
+            emitted: start,
+        })
+    }
+
+    /// The first mid sample [`Upmixer::push`] expects.
+    #[must_use]
+    pub const fn first_input(&self) -> usize {
+        self.origin
+    }
+
+    /// Mid samples received so far, counted from the stream's start.
+    const fn received(&self) -> usize {
+        self.origin + self.mid.len()
+    }
+
+    /// Takes the next mid samples and returns the left and right samples
+    /// that are final now.
+    ///
+    /// # Errors
+    /// Fails when more than the whole mid is pushed.
+    pub fn push(&mut self, mid: &[f32]) -> Result<[Vec<f32>; 2]> {
+        ensure!(
+            self.received() + mid.len() <= self.total,
+            "more mid than the stream holds"
+        );
+        for &v in mid {
+            let i = self.received();
+            self.mid.push(v);
+            let mut acc = 0.0;
+            for &(delay, gain) in &self.taps {
+                if delay > i {
+                    break;
+                }
+                // Before `origin` (after a seek) the mid is unknown; those
+                // samples only reach output before the first block.
+                if let Some(&m) = (i - delay)
+                    .checked_sub(self.origin)
+                    .and_then(|j| self.mid.get(j))
+                {
+                    acc += gain * m;
+                }
+            }
+            self.wet.push(acc);
+        }
+        // Frame t reads the mid up to sample (t + 1) * HOP.
+        let end = if self.received() == self.total {
+            self.total.div_ceil(HOP) + 1
+        } else {
+            self.received() / HOP
+        };
+        Ok(self.run_frames(end))
+    }
+
+    /// Returns the rest, once the whole mid has been pushed.
+    ///
+    /// # Errors
+    /// Fails when the mid is incomplete.
+    pub fn finish(&mut self) -> Result<[Vec<f32>; 2]> {
+        ensure!(
+            self.received() == self.total,
+            "the upmix has {} of {} mid samples",
+            self.received(),
+            self.total
+        );
+        Ok(self.run_frames(self.total.div_ceil(HOP) + 1))
+    }
+
+    /// Mid or decorrelated sample `j` (zero outside the stream).
+    fn sample(buffer: &[f32], origin: usize, j: isize) -> f32 {
+        usize::try_from(j)
+            .ok()
+            .and_then(|j| j.checked_sub(origin))
+            .and_then(|j| buffer.get(j))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Runs STFT frames up to `end` (exclusive) and returns the samples they complete.
+    fn run_frames(&mut self, end: usize) -> [Vec<f32>; 2] {
+        let nb = self.cfg.band_count();
+        let edges = self.cfg.edges();
+        let (mut re, mut im) = (vec![0.0; N], vec![0.0; N]);
+        let mut spec = [[(0.0, 0.0); BINS]; 2];
+        let mut side_spec = [(0.0_f32, 0.0_f32); BINS];
+        let all = self.total.div_ceil(HOP);
+        let end = end.min(all + 1);
+        if self.of_frame.is_empty() {
+            // No parameters: both channels are the mid.
+            self.next_frame = end;
+        }
+        while self.next_frame < end {
+            let t = self.next_frame;
+            let origin = frame_origin(t);
+            let (mid, wet, o) = (&self.mid, &self.wet, self.origin);
+            self.fft.forward_pair(
+                |i| {
+                    let j = origin + isize::try_from(i).unwrap_or(0);
+                    if usize::try_from(j).is_ok_and(|j| j >= self.total) {
+                        return (0.0, 0.0);
+                    }
+                    (Self::sample(mid, o, j), Self::sample(wet, o, j))
+                },
+                &mut re,
+                &mut im,
+                &mut spec,
+            );
+            let set = self.of_frame[t.min(self.of_frame.len() - 1)];
+            for b in 0..nb {
+                let range = edges[b]..edges[b + 1];
+                let (mut em, mut ed) = (0.0_f32, 0.0_f32);
+                for k in range.clone() {
+                    let ((mr, mi), (dr, di)) = (spec[0][k], spec[1][k]);
+                    em += mr * mr + mi * mi;
+                    ed += dr * dr + di * di;
+                }
+                let duck = ((em + 1e-12) / (ed + 1e-12)).sqrt().min(1.0);
+                let i = set * nb + b;
+                let (g, h) = self.gains
+                    [usize::from(self.params.iid[i]) * ICC.len() + usize::from(self.params.icc[i])];
+                let hd = h * duck;
+                for k in range {
+                    let ((mr, mi), (dr, di)) = (spec[0][k], spec[1][k]);
+                    side_spec[k] = (g * mr + hd * dr, g * mi + hd * di);
+                }
+            }
+            // Frame t covers samples [(t - 1) * HOP, (t + 1) * HOP); `side`
+            // holds them from `side_origin`, offset by HOP as in a buffer
+            // that starts at sample -HOP.
+            let at = t * HOP - self.side_origin;
+            if self.side.len() < at + N {
+                self.side.resize(at + N, 0.0);
+            }
+            self.fft
+                .inverse_add(&side_spec, &mut re, &mut im, &mut self.side[at..]);
+            self.next_frame += 1;
+        }
+        // Samples before frame `next_frame - 1`'s start are final; all of them at the end.
+        let ready = if self.next_frame > all {
+            self.total
+        } else {
+            (self.next_frame.saturating_sub(1) * HOP).min(self.total)
+        };
+        self.emit(ready)
+    }
+
+    /// Returns samples `emitted..ready` and forgets what no later frame reads.
+    fn emit(&mut self, ready: usize) -> [Vec<f32>; 2] {
+        let from = self.emitted;
+        if ready <= from {
+            return [Vec::new(), Vec::new()];
+        }
+        let mut left = Vec::with_capacity(ready - from);
+        let mut right = Vec::with_capacity(ready - from);
+        for s in from..ready {
+            let m = self.mid[s - self.origin];
+            if self.of_frame.is_empty() {
+                // No parameters: both channels are the mid itself.
+                left.push(m);
+                right.push(m);
+                continue;
+            }
+            // Side buffer index of sample s: (s + HOP) - side_origin.
+            let side = self
+                .side
+                .get(s + HOP - self.side_origin)
+                .copied()
+                .unwrap_or(0.0);
+            left.push(m + side);
+            right.push(m - side);
+        }
+        self.emitted = ready;
+        // Keep what the next frame and the decorrelator read.
+        let keep = (self.next_frame.saturating_sub(1) * HOP)
+            .min(ready)
+            .saturating_sub(UPMIX_LOOKBACK);
+        if keep > self.origin + (1 << 16) {
+            let cut = keep - self.origin;
+            drop(self.mid.drain(..cut));
+            drop(self.wet.drain(..cut));
+            self.origin = keep;
+        }
+        let side_keep = self.next_frame.saturating_sub(1) * HOP;
+        if side_keep > self.side_origin + (1 << 16) {
+            drop(self.side.drain(..side_keep - self.side_origin));
+            self.side_origin = side_keep;
+        }
+        [left, right]
+    }
 }
 
 #[cfg(test)]
@@ -1046,6 +1251,128 @@ mod tests {
                 .zip(&c[0][edge + HOP..])
                 .any(|(x, y)| x.to_bits() != y.to_bits())
         );
+        Ok(())
+    }
+
+    /// The upmix as one pass over the whole mid: the reference for [`Upmixer`].
+    fn upmix_whole(
+        mid: &[f32],
+        params: &Params,
+        spans: &[Range<usize>],
+        cfg: Config,
+    ) -> [Vec<f32>; 2] {
+        let nb = cfg.band_count();
+        let edges = cfg.edges();
+        let (of_frame, _) = frame_sets(spans, cfg.frames);
+        let n = mid.len();
+        #[expect(clippy::cast_possible_truncation, reason = "f32 taps")]
+        let taps: Vec<(usize, f32)> = VELVET.iter().map(|&(d, g)| (d, g as f32)).collect();
+        let mut wet = vec![0.0_f32; n];
+        for (i, w) in wet.iter_mut().enumerate() {
+            let mut acc = 0.0;
+            for &(delay, gain) in &taps {
+                if delay > i {
+                    break;
+                }
+                acc += gain * mid[i - delay];
+            }
+            *w = acc;
+        }
+        let table = gains();
+        let fft = Fft::new();
+        let (mut re, mut im) = (vec![0.0; N], vec![0.0; N]);
+        let mut spec = [[(0.0, 0.0); BINS]; 2];
+        let mut side_spec = [(0.0_f32, 0.0_f32); BINS];
+        let frames = n.div_ceil(HOP);
+        let mut side = vec![0.0_f32; (frames + 1) * HOP + N];
+        for t in 0..=frames {
+            let origin = frame_origin(t);
+            fft.forward_pair(
+                |i| {
+                    let j = origin + isize::try_from(i).unwrap_or(0);
+                    (at(mid, j), at(&wet, j))
+                },
+                &mut re,
+                &mut im,
+                &mut spec,
+            );
+            let set = of_frame[t.min(of_frame.len() - 1)];
+            for b in 0..nb {
+                let range = edges[b]..edges[b + 1];
+                let (mut em, mut ed) = (0.0_f32, 0.0_f32);
+                for k in range.clone() {
+                    let ((mr, mi), (dr, di)) = (spec[0][k], spec[1][k]);
+                    em += mr * mr + mi * mi;
+                    ed += dr * dr + di * di;
+                }
+                let duck = ((em + 1e-12) / (ed + 1e-12)).sqrt().min(1.0);
+                let i = set * nb + b;
+                let (g, h) =
+                    table[usize::from(params.iid[i]) * ICC.len() + usize::from(params.icc[i])];
+                let hd = h * duck;
+                for k in range {
+                    let ((mr, mi), (dr, di)) = (spec[0][k], spec[1][k]);
+                    side_spec[k] = (g * mr + hd * dr, g * mi + hd * di);
+                }
+            }
+            fft.inverse_add(&side_spec, &mut re, &mut im, &mut side[t * HOP..]);
+        }
+        let side = &side[HOP..HOP + n];
+        let left = mid.iter().zip(side).map(|(m, s)| m + s).collect();
+        let right = mid.iter().zip(side).map(|(m, s)| m - s).collect();
+        [left, right]
+    }
+
+    fn same_bits(a: &[f32], b: &[f32]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+    }
+
+    #[test]
+    fn streaming_upmix_equals_the_whole_pass() -> Result<()> {
+        // A length that is not a whole number of frames, long enough that the
+        // upmixer drops what it no longer needs.
+        let n = 400 * HOP - 77;
+        let [l, r] = scene(n);
+        let mid: Vec<f32> = l.iter().zip(&r).map(|(a, b)| (a + b) / 2.0).collect();
+        let frames = n.div_ceil(HOP);
+        for (cfg, per) in [(Config::DEFAULT, 80), (Config::new(10, 4)?, 30)] {
+            let sp = spans(frames, per);
+            let params = analyse(&l, &r, &sp, cfg);
+            let [wl, wr] = upmix_whole(&mid, &params, &sp, cfg);
+            let [al, ar] = upmix(&mid, &params, &sp, cfg)?;
+            assert!(same_bits(&al, &wl) && same_bits(&ar, &wr));
+            for first_block in [0, 1, 3, 5, 6, 37, 250, frames - 1] {
+                for part in [1, 333, 512, 4096, n] {
+                    let mut u = Upmixer::new(params.clone(), &sp, cfg, n, first_block)?;
+                    let from = u.first_input();
+                    assert!(from <= first_block * HOP);
+                    let s = first_block * HOP;
+                    let (mut gl, mut gr) = (Vec::new(), Vec::new());
+                    let mut pushed = from;
+                    for piece in mid[from..].chunks(part) {
+                        let [a, b] = u.push(piece)?;
+                        pushed += piece.len();
+                        gl.extend(a);
+                        gr.extend(b);
+                        // At most two frames behind the mid.
+                        assert!(s + gl.len() + 2 * HOP >= pushed);
+                    }
+                    let [a, b] = u.finish()?;
+                    gl.extend(a);
+                    gr.extend(b);
+                    let bad = gl
+                        .iter()
+                        .zip(&wl[s..])
+                        .position(|(a, b)| a.to_bits() != b.to_bits());
+                    assert!(
+                        same_bits(&gl, &wl[s..]) && same_bits(&gr, &wr[s..]),
+                        "block {first_block}, parts of {part}: {} vs {}, first bad {bad:?}",
+                        gl.len(),
+                        n - s
+                    );
+                }
+            }
+        }
         Ok(())
     }
 

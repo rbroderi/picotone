@@ -118,6 +118,8 @@ if (-not $SkipModels) {
     # Export when a model file, the table list or the licence is missing (delete www\models to refresh).
     $stale = -not (Test-Path (Join-Path $models "cx2-tables.json")) -or
         -not (Test-Path (Join-Path $models "encodec_48khz.safetensors")) -or
+        -not (Test-Path (Join-Path $models "dac44_student.safetensors")) -or
+        -not (Test-Path (Join-Path $models "cx2_dac44.ecxm")) -or
         -not (Test-Path (Join-Path $models "EnCodec-MIT.txt"))
     if ($stale) {
         Push-Location $here

@@ -17,6 +17,11 @@ sets one. Mixing old and new files does not work. (If gaim ever uses the WebGPU 
 from `web/`, its class is now `PicotoneWebGpu` and its models must be re-exported: their
 manifests now say `picotone-webgpu-weights`.)
 
+**HQ (M3):** to play HQ files, gaim must also re-copy the worker, `protocol.js`,
+`pico-header.js`, all three `pkg-*` builds and the three `.ts` files (the bindings changed),
+plus the new `dac44_student.*`, `DAC-MIT.txt`, `cx2_dac44.ecxm` and the new
+`cx2-tables.json` (§1). `DecodeStats` now also has `cx2Ms` and `networkMs`.
+
 ## 1. Files to copy
 
 Build first (`powershell -File wasm\build.ps1`; it compiles the wasm builds and the `.js`
@@ -30,7 +35,9 @@ files of `www/picotone/`, none of which are in git, and exports `www/models/`), 
 | `wasm/www/picotone/pkg-mt/` (whole folder, incl. `snippets/`) | `src/gaim/web/static/picotone/pkg-mt/` | threaded build + rayon pool worker |
 | `wasm/www/models/*.json`, `*.safetensors` | `src/gaim/web/static/picotone/models/` | decoder-only weights (63.4 MB mono, 46.6 MB stereo) |
 | `wasm/www/models/EnCodec-MIT.txt` | `src/gaim/web/static/picotone/models/` | the weights' MIT notice; it must travel with them |
-| `wasm/www/models/cx2-tables.json`, `cx2_*.ecxm` | `src/gaim/web/static/picotone/models/` | the cx2 tables (7.4 MB stereo, 12.5 MB mono) and their list |
+| `wasm/www/models/dac44_student.safetensors`, `dac44_student.json` | `src/gaim/web/static/picotone/models/` | the HQ decoder (20.6 MB), for `.pico` files of model `dac44` (the default `picotone encode` output) |
+| `wasm/www/models/dac44_student.NOTICE.txt`, `dac44_student.credits.jsonl`, `DAC-MIT.txt` | `src/gaim/web/static/picotone/models/` | the HQ decoder's notice, its training credits (10.9 MB) and DAC's MIT licence; the notice requires that they travel with the weights |
+| `wasm/www/models/cx2-tables.json`, `cx2_*.ecxm` | `src/gaim/web/static/picotone/models/` | the cx2 tables (7.4 MB stereo, 12.5 MB mono, 4.9 MB HQ `cx2_dac44.ecxm`) and their list |
 | `wasm/ts/picotone.ts`, `pico-header.ts`, `protocol.ts` | `web/src/picotone/` | typed client API, bundled by esbuild into console/table |
 
 `web/tools/build.ts` only prunes `static/build/`, so `static/picotone/` is left alone. The
@@ -297,8 +304,15 @@ Do not pad loops by hand any more. Short effects need nothing.
 | `--preset music6` | about 3.2–4 kbps (55 KB) | ambience beds |
 | `--fast --channel-format mono -b 6` | | effects, speech (24 kHz mono) |
 
-`picotone encode` with no preset or `--fast` now writes the HQ codec (44.1 kHz, model 2), which this
-decoder cannot play yet. Until it can, encode gaim's assets with a preset or `--fast`.
+`picotone encode` with no preset or `--fast` writes the HQ codec (44.1 kHz, `model: "dac44"`
+in `readPicoHeader`), at 1 to 9 codebooks per channel (`--codebooks`, about 0.86 kbps each
+before entropy coding) in mono, left/right, mid/side or parametric stereo. This decoder plays
+it: `await decoder.loadModel("dac44")` (the worker fetches `dac44_student.*` and the HQ
+table), then `play` / `decode` / `decodeToAudioBuffer` as for any file. HQ output is 44.1 kHz,
+so a 48 kHz `AudioContext` resamples it. It is much slower to decode than EnCodec (§5): use
+the threaded build (HTTPS, §3), or decode HQ music ahead of time on single-threaded pages.
+`readPicoHeader` also gives HQ files' `layout` and per-channel `codebooks`. The WebGPU
+decoder in `web/` refuses HQ files for now.
 
 ## 5. Performance and caveats
 
@@ -316,7 +330,26 @@ seconds ÷ decode wall time, including the cx2 decode; SNR is against the native
 | stereo music 75 s (`-b 6`) | 15.8× | 0.20 s | 6.8× | 5.6× | 0.27–0.31 s | 124 dB |
 | stereo 120 s, music12 | 11.9–12.4× | 0.18–0.20 s | 5.9–6.0× | 5.1× | 0.25–0.27 s | 104–118 dB |
 
-No case had an underrun. Model download and load take 0.3–0.5 s from a local server.
+**HQ (`dac44`)**, same machine, all 16 threads for the threaded build, 30 s of music. cx2 is
+the entropy decode, net the student network (with stereo and trim); per channel-second of
+coded audio:
+
+| case | threaded (16) | single, relaxed SIMD | single, plain | SNR |
+|---|---|---|---|---|
+| stereo q5 (L/R) | 3.9× | 0.83× (cx2 0.011 s, net 0.59 s) | 0.64× (cx2 0.012 s, net 0.77 s) | 115 dB |
+| stereo q9 (L/R) | 4.1× | 0.84× (cx2 0.015 s, net 0.58 s) | 0.68× (cx2 0.018 s, net 0.72 s) | 116 dB |
+| mono q9 | 7.5× | 1.45× | 1.29× | 117 dB |
+| 2 single-threaded workers, one mono q9 file each, at once | | 2.88 channel-s/s (1.44× for stereo) | | |
+
+The network dominates (98%); its cost does not depend on the codebook count, and parametric
+stereo costs about the same as mono. **Single-threaded HQ stereo is slower than realtime**
+here, so on plain-HTTP pages `play()` buffers most of the file first: decode HQ music ahead of
+time there (`decodeToAudioBuffer`), or serve over HTTPS for the threaded build. One
+single-threaded worker per channel would give about 1.4× for stereo (measured as two
+workers decoding at once); the API does not split a file by channel yet. Threaded, HQ uses
+about 650–850 MiB of wasm memory (each thread's network scratch); single-threaded 115 MiB.
+
+No EnCodec case had an underrun. Model download and load take 0.3–0.5 s from a local server.
 wasm memory peaks at about 205–265 MiB threaded and 175–215 MiB single-threaded, almost all
 of it model weights and tables; it does not depend on file length.
 
@@ -333,8 +366,10 @@ jump across the seam is 0.236, 25× the 99.9th-percentile step (0.0096). With `-
 0.0053, below the 99.9th-percentile step (0.0102).
 
 **Other caveats.**
-- The first chunk is one unit (one segment, or one second of mono frames). Threaded, that
-  is about 0.4–2 s.
+- The first chunk is one unit (one segment, one second of mono frames, or one HQ page of
+  80 frames, 0.93 s). Threaded, that is about 0.4–2 s.
+- HQ seeks (`startSample`) decode from a few frames before the point; HQ loops decode from
+  the start. Either way the samples equal a whole-file decode.
 - A loaded model stays in wasm memory for the worker's lifetime. The worker loads each
   model once; `dispose()` terminates it.
 - A file decodes only with the cx2 table it was coded with. The worker refuses others with

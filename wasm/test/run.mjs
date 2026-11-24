@@ -154,7 +154,17 @@ const listenCases =
         .map(({ clip, src }) => ({ name: `${clip}_music12`, mode: "stereo", rate: 48000, src, args: ["--preset", "music12"] }));
 
 const B6 = ["-b", "6"];
-const SEEK_CASES = ["mono_6s", "stereo_8s_music24", "stereo_8s_music6", "stereo_8s_edge", "stereo_music_6s_gapless"];
+const SEEK_CASES = [
+  "mono_6s",
+  "stereo_8s_music24",
+  "stereo_8s_music6",
+  "stereo_8s_edge",
+  "stereo_music_6s_gapless",
+  "hq_lr_q5_4s",
+  "hq_ms_q9_streamed",
+  "hq_ps_q3_4s",
+];
+const HQ = "dac44-student";
 const CASES = [
   { name: "mono_sfx_1s", mode: "mono", rate: 24000, make: () => effect(24000, 1.2, 7) },
   { name: "mono_6s_streamed", mode: "mono", rate: 24000, make: () => effect(24000, 6, 11), args: [...["-b", "6"], "--no-length", "--page-length", "30"] },
@@ -171,9 +181,27 @@ const CASES = [
   { name: "stereo_loop_4s_gapless", mode: "stereo", rate: 48000, make: () => loop(48000, 4), args: [...B6, "--loop"], seam: true, maxSeamRatio: 3 },
   { name: "stereo_music_6s_gapless", mode: "stereo", rate: 48000, make: () => music(48000, 6, 8), args: ["--preset", "music6", "--beam", "1", "--loop"], seam: true, maxSeamRatio: 3 },
   { name: "mono_loop_3s_gapless", mode: "mono", rate: 24000, make: () => [loop(24000, 3)[0]], args: [...B6, "--loop"], seam: true, maxSeamRatio: 3 },
+  // HQ (DAC 44.1 kHz codes, the student decoder): every layout, several codebook counts.
+  { name: "hq_mono_q9_3s", model: HQ, rate: 44100, make: () => effect(44100, 3, 21), args: ["--codebooks", "9", "--channel-format", "mono"] },
+  { name: "hq_lr_q5_4s", model: HQ, rate: 44100, make: () => music(44100, 4, 31), args: ["--codebooks", "5", "--stereo", "lr"] },
+  {
+    name: "hq_ms_q9_streamed",
+    model: HQ,
+    rate: 44100,
+    make: () => music(44100, 4, 32),
+    args: ["--codebooks", "9", "--side-codebooks", "4", "--stereo", "ms", "--no-length", "--page-length", "30"],
+  },
+  { name: "hq_ps_q3_4s", model: HQ, rate: 44100, make: () => music(44100, 4, 33), args: ["--codebooks", "3", "--stereo", "parametric"] },
+  { name: "hq_ps10_q1_3s", model: HQ, rate: 44100, make: () => music(44100, 3, 34), args: ["--codebooks", "1", "--stereo", "parametric", "--ps-bands", "10", "--ps-frames", "4"] },
+  { name: "hq_loop_q6_3s", model: HQ, rate: 44100, make: () => loop(44100, 3), args: ["--codebooks", "6", "--stereo", "lr", "--loop"], seam: true },
   ...(quick
     ? []
     : [
+        // Speed: 30 s of stereo at q5 and q9.
+        { name: "hq_stereo_q5_30s", model: HQ, rate: 44100, make: () => music(44100, 30, 35), args: ["--codebooks", "5", "--stereo", "lr"] },
+        { name: "hq_stereo_q9_30s", model: HQ, rate: 44100, make: () => music(44100, 30, 35), args: ["--codebooks", "9", "--stereo", "lr"] },
+        // One coded channel of the above, for the one-worker-per-channel measurement.
+        { name: "hq_mono_q9_30s", model: HQ, rate: 44100, make: () => [music(44100, 30, 35)[0]], args: ["--codebooks", "9", "--channel-format", "mono"] },
         { name: "mono_music_75s", mode: "mono", rate: 24000, make: () => [music(24000, 75, 4)[0]] },
         { name: "stereo_music_75s", mode: "stereo", rate: 48000, make: () => music(48000, 75, 2) },
         ...listenCases,
@@ -203,7 +231,7 @@ for (const c of CASES) {
   if (stale || !existsSync(ref) || !existsSync(pico) || process.argv.includes("--fresh")) {
     if (c.src) copyFileSync(c.src, wav);
     else writeWav16(wav, c.rate, c.make());
-    run(["encode", wav, pico, "--model", c.mode === "mono" ? "encodec-24k" : "encodec-48k", ...args]);
+    run(["encode", wav, pico, "--model", c.model ?? (c.mode === "mono" ? "encodec-24k" : "encodec-48k"), ...args]);
     writeFileSync(stamp, args.join(" "));
     run(["decode", pico, ref, "--float"]);
     console.log(`made ${c.name}: ${statSync(pico).size} bytes .pico`);
@@ -212,7 +240,7 @@ for (const c of CASES) {
 
 // Native speed for comparison (single thread and all threads).
 const nativeSpeed = {};
-for (const c of CASES.filter((k) => k.name === "stereo_8s" || k.name === "mono_6s")) {
+for (const c of CASES.filter((k) => ["stereo_8s", "mono_6s", "hq_stereo_q5_30s", "hq_stereo_q9_30s"].includes(k.name))) {
   for (const threads of [1, 0]) {
     const args = threads ? ["--threads", "1"] : [];
     const t0 = performance.now();
@@ -294,6 +322,7 @@ try {
             `first audio ${r.startedMs.toFixed(0).padStart(5)} ms  underruns ${r.underruns}  chunks ${r.chunks}  ` +
             `SNR ${r.parity.snrDb === null ? "inf" : r.parity.snrDb.toFixed(1)} dB  max|d| ${r.parity.maxAbsDiff.toExponential(2)}  ` +
             `exact ${(100 * r.parity.exactFraction).toFixed(1)}%  mem ${(r.stats.memoryBytes / 2 ** 20).toFixed(0)} MiB  ` +
+            `cx2 ${r.stats.cx2Ms.toFixed(0)} ms  net ${r.stats.networkMs.toFixed(0)} ms  ` +
             `${ok ? "ok" : "FAIL"}`,
         );
         if (r.seam) {
@@ -325,6 +354,19 @@ try {
             `   seek ${c.name} from sample ${r.startSample}: SNR ${r.parity.snrDb === null ? "inf" : r.parity.snrDb.toFixed(1)} dB  ` +
               `exact ${(100 * r.parity.exactFraction).toFixed(1)}%  ${ok ? "ok" : "FAIL"}`,
           );
+        }
+      }
+      // One single-threaded worker per coded channel: n workers decoding a mono file at once.
+      if (!quick && env.build.kind === "single" && env.build.relaxedSimd && CASES.some((k) => k.name === "hq_mono_q9_30s")) {
+        for (const workers of [1, 2]) {
+          const r = await page.evaluate((name, n) => window.picotoneConcurrent(name, n), "hq_mono_q9_30s", workers);
+          const channelSeconds = r.seconds * workers;
+          console.log(
+            `   ${workers} worker(s) x hq_mono_q9_30s at once: ${(r.wallMs / 1000).toFixed(2)} s wall = ` +
+              `${(channelSeconds / (r.wallMs / 1000)).toFixed(2)} channel-seconds/s ` +
+              `(cx2 ${r.stats.map((s) => s.cx2Ms.toFixed(0)).join("/")} ms, net ${r.stats.map((s) => s.networkMs.toFixed(0)).join("/")} ms)`,
+          );
+          results.push({ label: `workers_${workers}`, concurrent: r });
         }
       }
       console.log(`   model load: ${results.filter((r) => r.build === env.build.kind).map((r) => `${r.model} ${r.modelLoadMs.toFixed(0)} ms`).filter((v, i, a) => a.indexOf(v) === i).join(", ")}`);

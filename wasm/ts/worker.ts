@@ -30,6 +30,8 @@ interface WasmStream {
   readonly audioLength: number;
   readonly segmentCount: number;
   readonly segmentsDone: number;
+  readonly cx2Ms: number;
+  readonly networkMs: number;
   decodeNext(decoder: WasmDecoder, maxSegments: number): WasmChunk | undefined;
   free(): void;
 }
@@ -307,14 +309,17 @@ async function load(request: LoadRequest): Promise<void> {
   }
   const cache = await openCache(request.cacheName);
   const base = request.modelsUrl;
-  const config = await fetchBytes(new URL(`${request.model}.json`, base).href, cache, () => {});
+  // HQ files (`dac44` codes) decode with the student network; another
+  // decoder of the same codes would be another network name here.
+  const network = request.model === "dac44" ? "dac44_student" : request.model;
+  const config = await fetchBytes(new URL(`${network}.json`, base).href, cache, () => {});
   const weights = await fetchBytes(
-    new URL(`${request.model}.safetensors`, base).href,
+    new URL(`${network}.safetensors`, base).href,
     cache,
     (loaded, total) => post({ type: "loadProgress", id: request.id, loaded, total }),
   );
   const configJson = new TextDecoder().decode(config.bytes);
-  const decoder = new pkg.Decoder(request.model, configJson, weights.bytes);
+  const decoder = new pkg.Decoder(network, configJson, weights.bytes);
   // The cx2 tables of this model; a file finds its table by hash.
   const manifest = await fetchBytes(new URL("cx2-tables.json", base).href, cache, () => {});
   const listed = (JSON.parse(new TextDecoder().decode(manifest.bytes)) as TableManifest).tables.filter(
@@ -358,7 +363,11 @@ function yieldToEvents(): Promise<void> {
 async function decode(request: DecodeRequest): Promise<void> {
   const { pkg, memory } = await ready();
   const bytes = new Uint8Array(request.bytes);
-  const header = JSON.parse(pkg.readHeader(bytes)) as { model: ModelName; tableHash: string };
+  const header = JSON.parse(pkg.readHeader(bytes)) as {
+    model: ModelName;
+    tableHash: string;
+    sampleRate: number;
+  };
   const decoder = models.get(header.model)?.decoder;
   if (decoder === undefined || tables === null) {
     throw new Error(`model ${header.model} is not loaded; call loadModel("${header.model}") first`);
@@ -394,7 +403,7 @@ async function decode(request: DecodeRequest): Promise<void> {
         {
           type: "chunk",
           id: request.id,
-          sampleRate: decoder.sampleRate,
+          sampleRate: header.sampleRate,
           offset: chunk.offset,
           length: chunk.length,
           audioLength: stream.audioLength,
@@ -411,7 +420,7 @@ async function decode(request: DecodeRequest): Promise<void> {
       await yieldToEvents();
     }
     const decodeMs = performance.now() - t0;
-    const audioSeconds = (stream.audioLength - request.startSample) / decoder.sampleRate;
+    const audioSeconds = (stream.audioLength - request.startSample) / header.sampleRate;
     post({
       type: "done",
       id: request.id,
@@ -420,6 +429,8 @@ async function decode(request: DecodeRequest): Promise<void> {
         firstChunkMs,
         audioSeconds,
         speed: audioSeconds / (decodeMs / 1000),
+        cx2Ms: stream.cx2Ms,
+        networkMs: stream.networkMs,
         memoryBytes: memory.buffer.byteLength,
       },
     });

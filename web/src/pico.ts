@@ -142,6 +142,11 @@ export class Cx2Reader {
   /** Opens a file's codes; pages are range-decoded as {@link PicoCodes} asks for them. */
   open(bytes: Uint8Array, config: ModelConfig): PicoCodes {
     const header = parseHeader(bytes);
+    if (header.model === 'dac44') {
+      throw new PicoError(
+        'this is an HQ (dac44) file; the WebGPU decoder has no HQ network yet, so decode it with the WebAssembly decoder (wasm/)',
+      );
+    }
     if (!this.tables.has(header.tableHash)) {
       throw new PicoError(
         `this file was coded with cx2 table ${header.tableHash}, which cx2-tables.json does not list; ` +

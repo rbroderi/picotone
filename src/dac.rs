@@ -23,6 +23,7 @@ use anyhow::{Context as _, Result, ensure};
 use rayon::prelude::*;
 
 use crate::fastconv::FastConv;
+use crate::hqstream::{Context, HqDecoder};
 use crate::kernels;
 use crate::nn::{ConvGeometry, ConvKernel, ConvTranspose1d, Seq};
 use crate::weights::Weights;
@@ -49,6 +50,15 @@ const KERNEL: usize = 7;
 /// Latent frames of context on each side of a chunk. The receptive field is
 /// a little under 10 frames each way; the chunking test checks this margin.
 pub const CONTEXT: usize = 12;
+/// A decoded span starts and ends at multiples of this many frames.
+///
+/// The Winograd tiles start at a span's first output and hold 4 outputs of
+/// one dilation phase, so they repeat every `4 x 9` samples of the most
+/// dilated layer. Every stage's rate (8, 64, 256 and 512 samples per frame)
+/// times 9 frames is a multiple of 36, so spans on this grid tile every
+/// layer as a whole-file decode does (a span's last, partial tiles too), and
+/// a chunked decode equals it bit for bit.
+pub const ALIGN: usize = 9;
 /// Latent frames per chunk, before context (about 3 s).
 pub const CHUNK: usize = 256;
 
@@ -434,6 +444,15 @@ impl DacDecoder {
         Ok(y)
     }
 
+    /// Builds the decoder from the bytes of `dac44_student.safetensors`.
+    ///
+    /// # Errors
+    /// Fails when the bytes are not a valid decoder.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let w = Weights::from_bytes(bytes)?;
+        Self::from_weights(&w, 512).context("building the HQ decoder")
+    }
+
     /// Decodes codes `[frames][num_codebooks]` (row-major) to mono samples,
     /// `frames * 512` of them, chunk by chunk.
     ///
@@ -444,7 +463,8 @@ impl DacDecoder {
         self.decode_chunked(codes, num_codebooks, CHUNK)
     }
 
-    /// [`DacDecoder::decode`] with a given chunk length, for tests.
+    /// [`DacDecoder::decode`] with a given chunk length. Every chunk length
+    /// gives the same samples, bit for bit (see [`ALIGN`]).
     ///
     /// # Errors
     /// See [`DacDecoder::decode`].
@@ -454,18 +474,7 @@ impl DacDecoder {
         num_codebooks: usize,
         chunk: usize,
     ) -> Result<Vec<f32>> {
-        ensure!(
-            (1..=CODEBOOKS).contains(&num_codebooks),
-            "{num_codebooks} codebooks; the model has 1 to {CODEBOOKS}"
-        );
-        ensure!(
-            codes.len().is_multiple_of(num_codebooks),
-            "codes are not a whole number of frames"
-        );
-        ensure!(
-            codes.iter().all(|&c| usize::from(c) < CODEBOOK_SIZE),
-            "a code is out of range"
-        );
+        check_codes(codes, num_codebooks)?;
         ensure!(chunk > 0, "chunk length must be positive");
         let frames = codes.len() / num_codebooks;
         // Chunks run in parallel: much of a chunk's work (Snake, padding,
@@ -476,16 +485,50 @@ impl DacDecoder {
             .map(|i| {
                 let start = i * chunk;
                 let end = (start + chunk).min(frames);
-                // Context is clipped at the file's ends, where the whole-file
-                // decode pads with zeros too.
-                let lo = start.saturating_sub(CONTEXT);
-                let hi = (end + CONTEXT).min(frames);
-                let x = self.input_frames(codes, num_codebooks, lo, hi);
-                let y = self.decode_span(&x)?;
-                Ok(y[(start - lo) * HOP..(end - lo) * HOP].to_vec())
+                self.decode_range(codes, num_codebooks, 0, start..end, frames)
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(parts.concat())
+    }
+}
+
+/// Checks that `codes` are whole frames of `num_codebooks` valid codes.
+fn check_codes(codes: &[u16], num_codebooks: usize) -> Result<()> {
+    ensure!(
+        (1..=CODEBOOKS).contains(&num_codebooks),
+        "{num_codebooks} codebooks; the model has 1 to {CODEBOOKS}"
+    );
+    ensure!(
+        codes.len().is_multiple_of(num_codebooks),
+        "codes are not a whole number of frames"
+    );
+    ensure!(
+        codes.iter().all(|&c| usize::from(c) < CODEBOOK_SIZE),
+        "a code is out of range"
+    );
+    Ok(())
+}
+
+impl HqDecoder for DacDecoder {
+    fn name(&self) -> &'static str {
+        "dac44_student"
+    }
+
+    fn codebook_hash(&self) -> u64 {
+        Self::codebook_hash(self)
+    }
+
+    fn context(&self) -> Context {
+        Context {
+            frames: CONTEXT,
+            align: ALIGN,
+        }
+    }
+
+    fn decode_window(&self, codes: &[u16], num_codebooks: usize) -> Result<Vec<f32>> {
+        check_codes(codes, num_codebooks)?;
+        let x = self.input_frames(codes, num_codebooks, 0, codes.len() / num_codebooks);
+        self.decode_span(&x)
     }
 }
 

@@ -131,5 +131,27 @@ window.picotoneTest = {
     };
   },
 };
+/**
+ * Decodes one file in `workers` single-threaded decoders at once (one Web Worker each), as a
+ * player that decodes each coded channel in its own worker would: the wall time of all, and
+ * each decode's own stats.
+ */
+window.picotoneConcurrent = async (name, workers) => {
+  const bytes = new Uint8Array(await (await fetch(`/test-data/${name}.pico`)).arrayBuffer());
+  const info = readPicoHeader(bytes);
+  const decoders = await Promise.all(
+    Array.from({ length: workers }, () =>
+      PicotoneDecoder.create({ baseUrl: "./picotone/", modelsUrl: "./models/", build: "single", relaxedSimd: true, cacheName: null }),
+    ),
+  );
+  try {
+    await Promise.all(decoders.map((d) => d.loadModel(info.model)));
+    const t0 = performance.now();
+    const results = await Promise.all(decoders.map((d) => d.decode(bytes.slice())));
+    return { wallMs: performance.now() - t0, seconds: info.durationSeconds, stats: results.map((r) => r.stats) };
+  } finally {
+    for (const d of decoders) d.dispose();
+  }
+};
 window.picotoneInfo = (buffer) => readPicoHeader(buffer).audioLength;
 window.picotoneReady = true;

@@ -3,8 +3,12 @@
  * decoder worker (`worker.js`). Shared by both sides; no runtime code.
  */
 
-/** The two published EnCodec models. */
-export type ModelName = "encodec_24khz" | "encodec_48khz";
+/**
+ * The code spaces a `.pico` file can use, as its header names them: the two
+ * published EnCodec models, and `dac44`, the HQ codec's DAC 44.1 kHz codes
+ * (decoded by the `dac44_student` network).
+ */
+export type ModelName = "encodec_24khz" | "encodec_48khz" | "dac44";
 
 /** Which WebAssembly build to run. `auto` picks `threaded` when possible. */
 export type BuildPreference = "auto" | "threaded" | "single";
@@ -53,6 +57,10 @@ export interface DecodeStats {
   readonly audioSeconds: number;
   /** Audio seconds per wall-clock second (× realtime). */
   readonly speed: number;
+  /** Of `decodeMs`, the cx2 (entropy) decode of the codes, in milliseconds. */
+  readonly cx2Ms: number;
+  /** Of `decodeMs`, the network, stereo and trim, in milliseconds. */
+  readonly networkMs: number;
   /** WebAssembly memory size after the decode (its peak: it never shrinks). */
   readonly memoryBytes: number;
 }

@@ -360,7 +360,7 @@ fn main() -> Result<()> {
                         options.table.as_deref(),
                         stream.info.table_hash,
                     )?;
-                    let audio = hq::decode(&weights(), &table, &stream)?;
+                    let audio = hq::decode(&weights(), &table, stream)?;
                     write_wav(output, &audio, options)?;
                 }
                 Codec::Encodec(_) => {
@@ -383,7 +383,7 @@ fn main() -> Result<()> {
                 let stream = hq::parse(&bytes)?;
                 let table =
                     hq::find_table(&tables(), wav.table.as_deref(), stream.info.table_hash)?;
-                let audio = hq::decode(&weights(), &table, &stream)?;
+                let audio = hq::decode(&weights(), &table, stream)?;
                 write_wav(output, &audio, wav)?;
             }
             Encoded::Encodec { model, bytes, .. } => {

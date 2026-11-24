@@ -14,8 +14,8 @@ use anyhow::{Context as _, Result, ensure};
 use picotone::audio::Audio;
 use picotone::cx2::hq::HqModel;
 use picotone::dac::{self, DacDecoder, DacEncoder};
-use picotone::layout::{self, Trimmer};
-use picotone::nn::Seq;
+use picotone::hqstream::HqStream;
+use picotone::layout;
 use picotone::pico::{self, ChannelLayout, DacInfo, DacStream};
 use picotone::{pstereo, stereo};
 use rayon::prelude::*;
@@ -400,53 +400,15 @@ fn pick(
     Ok(layout)
 }
 
-/// Decodes an HQ stream to audio, trimmed for playback.
-pub(crate) fn decode(weights: &Path, table: &HqModel, stream: &DacStream) -> Result<Audio> {
+/// Decodes an HQ stream to audio, trimmed for playback, through the same
+/// [`HqStream`] as the WebAssembly decoder.
+pub(crate) fn decode(weights: &Path, table: &HqModel, stream: DacStream) -> Result<Audio> {
     let decoder = load_decoder(weights)?;
-    let info = &stream.info;
-    ensure!(
-        decoder.codebook_hash() == info.codebook_hash,
-        "the file's codes index codebooks {:016x}, the decoder has {:016x}",
-        info.codebook_hash,
-        decoder.codebook_hash()
-    );
     let start = Instant::now();
-    let all_codes = stream.decode_all(table)?;
+    let mut stream = HqStream::new(stream, table, &decoder, 0)?;
+    stream.fetch(usize::MAX)?;
     let cx2_seconds = start.elapsed().as_secs_f64();
-    let signals = all_codes
-        .par_iter()
-        .zip(&info.codebooks)
-        .map(|(c, &n)| decoder.decode(c, n))
-        .collect::<Result<Vec<_>>>()?;
-    let parameters = match info.layout {
-        ChannelLayout::Parametric(config) => {
-            let pages = (0..stream.pages.len())
-                .map(|p| stream.page_parameters(p))
-                .collect::<Result<Vec<_>>>()?;
-            Some((
-                pstereo::read_pages(&pages, &stream.spans, config)?,
-                stream.spans.as_slice(),
-            ))
-        }
-        _ => None,
-    };
-    let channels = output_channels(signals, info.layout, parameters.as_ref())?;
-    let rate = usize::try_from(dac::SAMPLE_RATE)?;
-    let raw = Audio {
-        sample_rate: dac::SAMPLE_RATE,
-        channels,
-    }
-    .to_seq()?;
-    let mut trimmer = Trimmer::new(
-        info.pre_skip,
-        info.playable_samples(),
-        info.looped,
-        rate,
-        raw.channels(),
-    )?;
-    let out: Seq = trimmer.push(&raw)?;
-    drop(raw);
-    trimmer.finish()?;
+    let out = stream.decode_rest()?;
     let audio = Audio::from_seq(&out, dac::SAMPLE_RATE);
     eprintln!(
         "decoded {:.2} s with dac44-student in {:.2} s (cx2 {cx2_seconds:.2} s)",

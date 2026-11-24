@@ -2,11 +2,15 @@
 //   www/models/<name>.safetensors  (decoder.* and quantizer.* tensors only)
 //   www/models/<name>.json         (the model config, copied unchanged)
 //   www/models/EnCodec-MIT.txt     (the weights' licence, beside every model file)
+//   www/models/dac44_student.*     (the HQ decoder, for model dac44: its weights, config,
+//                                   NOTICE and training credits, copied unchanged)
+//   www/models/DAC-MIT.txt         (the licence of DAC, which the HQ decoder derives from)
 //   www/models/<table>.ecxm        (the default cx2 table of each exported model)
 //   www/models/cx2-tables.json     ({ tables: [{ file, model, hash }] }; the worker reads it)
-// Reads ../weights/<name>.{json,safetensors} and ../models/*.ecxm; never modifies them.
+// Reads ../weights/* and ../models/*.ecxm; never modifies them.
 //
-// Usage: node tools/export-models.mjs [name ...]   (default: both models)
+// Usage: node tools/export-models.mjs [name ...]
+//   names: encodec_24khz, encodec_48khz, dac44 (HQ); default: all three
 
 import { mkdirSync, openSync, readSync, closeSync, writeFileSync, copyFileSync, statSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -18,12 +22,29 @@ const outDir = resolve(here, "..", "www", "models");
 const tablesDir = resolve(here, "..", "..", "models");
 const licence = resolve(here, "..", "..", "LICENSES", "EnCodec-MIT.txt");
 // The table each model codes with by default (as the picotone command line).
-const TABLES = { encodec_24khz: "cx2_encodec_24khz_v5.ecxm", encodec_48khz: "cx2_encodec_48khz_net2_v5.ecxm" };
+const TABLES = {
+  encodec_24khz: "cx2_encodec_24khz_v5.ecxm",
+  encodec_48khz: "cx2_encodec_48khz_net2_v5.ecxm",
+  dac44: "cx2_dac44.ecxm",
+};
+// The HQ decoder network of the dac44 code space, and the files shipped with it.
+const HQ_DECODER = "dac44_student";
+const HQ_FILES = [
+  `${HQ_DECODER}.safetensors`,
+  `${HQ_DECODER}.json`,
+  `${HQ_DECODER}.NOTICE.txt`,
+  `${HQ_DECODER}.credits.jsonl`,
+  "DAC-MIT.txt",
+];
 
-/** The hash a .pico stream stores for a self-contained table: FNV-1a 64 of its bytes, as 16 hex digits. */
+/**
+ * The hash a .pico stream stores for its table: FNV-1a 64 of the file's bytes, as 16 hex
+ * digits. Self-contained (version 5) EnCodec tables and HQ tables (ECXH) only.
+ */
 function tableHash(bytes) {
-  if (bytes.subarray(0, 4).toString("latin1") !== "ECXM" || bytes.readUInt32LE(4) !== 5) {
-    throw new Error("not a self-contained (version 5) cx2 table");
+  const magic = bytes.subarray(0, 4).toString("latin1");
+  if (magic !== "ECXH" && (magic !== "ECXM" || bytes.readUInt32LE(4) !== 5)) {
+    throw new Error("not a self-contained (version 5) cx2 table or an HQ table");
   }
   let h = 0xcbf29ce484222325n;
   for (const b of bytes) h = ((h ^ BigInt(b)) * 0x100000001b3n) & 0xffffffffffffffffn;
@@ -88,16 +109,27 @@ function exportModel(name) {
 }
 
 const requested = process.argv.slice(2);
-const names = requested.length > 0 ? requested : ["encodec_24khz", "encodec_48khz"];
+const names = requested.length > 0 ? requested : ["encodec_24khz", "encodec_48khz", "dac44"];
 const manifest = [];
+let encodec = false;
 for (const name of names) {
-  exportModel(name);
+  if (!(name in TABLES)) throw new Error(`unknown model ${name}`);
+  if (name === "dac44") {
+    mkdirSync(outDir, { recursive: true });
+    for (const file of HQ_FILES) {
+      copyFileSync(join(weightsDir, file), join(outDir, file));
+    }
+    console.log(`dac44: ${HQ_FILES.join(", ")} copied unchanged`);
+  } else {
+    exportModel(name);
+    encodec = true;
+  }
   const file = TABLES[name];
   const bytes = readFileSync(join(tablesDir, file));
   copyFileSync(join(tablesDir, file), join(outDir, file));
   manifest.push({ file, model: name, hash: tableHash(bytes) });
   console.log(`${name}: table ${file} (${(bytes.length / 1e6).toFixed(1)} MB, hash ${manifest.at(-1).hash})`);
 }
-copyFileSync(licence, join(outDir, "EnCodec-MIT.txt"));
+if (encodec) copyFileSync(licence, join(outDir, "EnCodec-MIT.txt"));
 writeFileSync(join(outDir, "cx2-tables.json"), JSON.stringify({ tables: manifest }, null, 2) + "\n");
-console.log(`wrote ${join(outDir, "cx2-tables.json")} and EnCodec-MIT.txt`);
+console.log(`wrote ${join(outDir, "cx2-tables.json")}${encodec ? " and EnCodec-MIT.txt" : ""}`);

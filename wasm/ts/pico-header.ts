@@ -38,14 +38,37 @@ export interface PicoInfo {
   readonly tags: readonly string[];
   /** Playback gain in dB (the stream's Q7.8 field; 0 when absent). */
   readonly outputGainDb: number;
+  /**
+   * HQ files (`dac44`): how the coded channels make the output, `mono`,
+   * `lr` (left/right), `ms` (mid/side) or `parametric` (a mid plus stereo
+   * parameters). `null` for EnCodec files.
+   */
+  readonly layout: HqLayout | null;
+  /** Codebooks per frame of each coded channel (EnCodec: one entry). */
+  readonly codebooks: readonly number[];
+  /** HQ files: hash of the DAC codebooks the codes index, 16 hex digits. */
+  readonly codebookHash: string | null;
 }
+
+/** How an HQ file's coded channels make its output. */
+export type HqLayout = "mono" | "lr" | "ms" | "parametric";
+
+const HQ_LAYOUTS: readonly HqLayout[] = ["mono", "lr", "ms", "parametric"];
 
 const MODELS: Readonly<
   Record<ModelName, { sampleRate: number; channels: number; frameRate: number; segmentLength: number }>
 > = {
   encodec_24khz: { sampleRate: 24_000, channels: 1, frameRate: 75, segmentLength: 0 },
   encodec_48khz: { sampleRate: 48_000, channels: 2, frameRate: 150, segmentLength: 48_000 },
+  dac44: { sampleRate: 44_100, channels: 2, frameRate: 44_100 / 512, segmentLength: 0 },
 };
+
+function hex64(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .reverse()
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 function toBytes(bytes: ArrayBuffer | ArrayBufferView): Uint8Array {
   return bytes instanceof ArrayBuffer
@@ -181,22 +204,42 @@ export function readPicoHeader(bytes: ArrayBuffer | ArrayBufferView): PicoInfo {
   const h = new Fields(f.take(f.varint()));
   const modelCode = h.u8();
   const name: ModelName | null =
-    modelCode === 0 ? "encodec_24khz" : modelCode === 1 ? "encodec_48khz" : null;
+    modelCode === 0 ? "encodec_24khz" : modelCode === 1 ? "encodec_48khz" : modelCode === 2 ? "dac44" : null;
   if (name === null) {
     throw new Error(`unknown model ${String(modelCode)}`);
   }
+  const hq = name === "dac44";
   const model = MODELS[name];
   const scheme = h.u8();
   if (scheme !== 2) {
     throw new Error(`unknown entropy coder ${String(scheme)}`);
   }
-  const tableHash = Array.from(h.take(8))
-    .reverse()
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  const numCodebooks = h.u8();
+  // HQ: the codebook hash comes before the table hash.
+  const codebookHash = hq ? hex64(h.take(8)) : null;
+  const tableHash = hex64(h.take(8));
+  let layout: HqLayout | null = null;
+  let codebooks: number[];
+  if (hq) {
+    const code = h.u8();
+    layout = HQ_LAYOUTS[code] ?? null;
+    if (layout === null) {
+      throw new Error(`unknown HQ channel layout ${String(code)}`);
+    }
+    if (layout === "parametric") {
+      h.u8(); // The parametric stereo configuration.
+    }
+    const coded = layout === "lr" || layout === "ms" ? 2 : 1;
+    codebooks = Array.from({ length: coded }, () => h.u8());
+    if (codebooks.some((n) => n < 1 || n > 9)) {
+      throw new Error("implausible HQ codebook count");
+    }
+  } else {
+    codebooks = [h.u8()];
+  }
+  const numCodebooks = Math.max(...codebooks);
   const flags = h.u8();
-  if ((flags & ~(HEAD_LOOP | HEAD_COMMENTS | HEAD_LENGTH | HEAD_EDGE)) !== 0) {
+  const known = HEAD_LOOP | HEAD_COMMENTS | HEAD_LENGTH | (hq ? 0 : HEAD_EDGE);
+  if ((flags & ~known) !== 0) {
     throw new Error(`unknown .pico header flags ${String(flags)}`);
   }
   const preSkip = h.varint();
@@ -246,14 +289,15 @@ export function readPicoHeader(bytes: ArrayBuffer | ArrayBufferView): PicoInfo {
   if (!(audioLength > 0)) {
     throw new Error(".pico file has no audio");
   }
-  const bandwidthKbps = (numCodebooks * model.frameRate * 10) / 1000;
+  const allCodebooks = codebooks.reduce((sum, n) => sum + n, 0);
+  const bandwidthKbps = (allCodebooks * model.frameRate * 10) / 1000;
   const durationSeconds = audioLength / model.sampleRate;
   return {
     model: name,
     audioLength,
     numCodebooks,
     sampleRate: model.sampleRate,
-    channels: model.channels,
+    channels: layout === null ? model.channels : layout === "mono" ? 1 : 2,
     durationSeconds,
     bandwidthKbps,
     bitrateKbps: (view.length * 8) / durationSeconds / 1000,
@@ -267,5 +311,8 @@ export function readPicoHeader(bytes: ArrayBuffer | ArrayBufferView): PicoInfo {
     pageLength,
     tags,
     outputGainDb,
+    layout,
+    codebooks,
+    codebookHash,
   };
 }
