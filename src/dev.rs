@@ -288,7 +288,11 @@ fn read_dac_clip(sidecar: &Path) -> Result<DacClip> {
         .as_array()
         .context("sidecar has no codebooks")?
         .iter()
-        .map(|v| v.as_u64().and_then(|n| usize::try_from(n).ok()).context("codebook count"))
+        .map(|v| {
+            v.as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .context("codebook count")
+        })
         .collect::<Result<_>>()?;
     let layout = match json["layout"].as_str().unwrap_or("") {
         // Parametric streams' parameters are not dumped; their mid codes code as a mono stream.
@@ -359,7 +363,11 @@ fn dac_pack(table: &Path, inputs: &[PathBuf], tiers: &[usize]) -> Result<()> {
                 .iter()
                 .zip(&clip.books)
                 .zip(&books)
-                .map(|((c, &n), &m)| c.chunks_exact(n).flat_map(|f| f[..m].iter().copied()).collect())
+                .map(|((c, &n), &m)| {
+                    c.chunks_exact(n)
+                        .flat_map(|f| f[..m].iter().copied())
+                        .collect()
+                })
                 .collect();
             let info = pico::DacInfo {
                 codebook_hash: 0,
@@ -385,8 +393,8 @@ fn dac_pack(table: &Path, inputs: &[PathBuf], tiers: &[usize]) -> Result<()> {
             ensure!(back == channels, "a clip did not decode back to its codes");
             codes += channels.iter().map(Vec::len).sum::<usize>();
             bytes += stream.coded_bytes().iter().sum::<usize>();
-            channel_seconds += to_f64(channels.len() * clip.audio_length)
-                / f64::from(picotone::dac::SAMPLE_RATE);
+            channel_seconds +=
+                to_f64(channels.len() * clip.audio_length) / f64::from(picotone::dac::SAMPLE_RATE);
         }
         let bits = to_f64(bytes * 8) / to_f64(codes.max(1));
         eprintln!(

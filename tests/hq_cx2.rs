@@ -12,7 +12,9 @@ fn root() -> PathBuf {
 
 fn model() -> Result<HqModel> {
     let path = root().join("models").join("cx2_dac44.ecxm");
-    HqModel::from_table(&std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?)
+    HqModel::from_table(
+        &std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
+    )
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -39,12 +41,18 @@ struct Case {
 }
 
 fn fixture() -> Result<(String, usize, usize, Vec<Case>)> {
-    let path = root().join("tests").join("data").join("cx2_dac44_fixture.json");
+    let path = root()
+        .join("tests")
+        .join("data")
+        .join("cx2_dac44_fixture.json");
     let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
     let get = |key: &str| json.get(key).context("fixture field missing");
     let frames = usize::try_from(get("frames")?.as_u64().context("frames")?)?;
     let page = usize::try_from(get("page")?.as_u64().context("page")?)?;
-    let hash = get("table_hash")?.as_str().context("table_hash")?.to_owned();
+    let hash = get("table_hash")?
+        .as_str()
+        .context("table_hash")?
+        .to_owned();
     let mut cases = Vec::new();
     for case in get("cases")?.as_array().context("cases")? {
         let field = |key: &str| case.get(key).context("case field missing");
@@ -55,7 +63,11 @@ fn fixture() -> Result<(String, usize, usize, Vec<Case>)> {
                 .as_array()
                 .context("codes")?
                 .iter()
-                .map(|v| v.as_u64().and_then(|c| u16::try_from(c).ok()).context("code"))
+                .map(|v| {
+                    v.as_u64()
+                        .and_then(|c| u16::try_from(c).ok())
+                        .context("code")
+                })
                 .collect::<Result<_>>()?,
             hashes: field("logit_hashes")?
                 .as_array()
@@ -74,7 +86,10 @@ fn logits_match_the_python_emulation_on_every_dispatch_path() -> Result<()> {
     let (hash, frames, page, cases) = fixture()?;
     for simd in [Simd::new(), Simd::baseline()] {
         let mut model = model()?;
-        ensure!(format!("{:016x}", model.hash()) == hash, "the fixture is for another table");
+        ensure!(
+            format!("{:016x}", model.hash()) == hash,
+            "the fixture is for another table"
+        );
         model.set_simd(simd);
         for case in &cases {
             let n = case.codebooks;
@@ -85,7 +100,11 @@ fn logits_match_the_python_emulation_on_every_dispatch_path() -> Result<()> {
                     predictor.reset();
                 }
                 for _ in 0..n {
-                    let logits: Vec<u8> = predictor.logits().iter().flat_map(|v| v.to_le_bytes()).collect();
+                    let logits: Vec<u8> = predictor
+                        .logits()
+                        .iter()
+                        .flat_map(|v| v.to_le_bytes())
+                        .collect();
                     assert_eq!(
                         format!("{:016x}", fnv1a(&logits)),
                         case.hashes[at],
@@ -113,11 +132,18 @@ fn pages_round_trip_at_the_fixture_size() -> Result<()> {
             let codes = &case.codes[start * n..end * n];
             let packed = hq::encode_page(&model, case.role, n, codes)?;
             bytes += packed.len();
-            assert_eq!(hq::decode_page(&model, case.role, n, codes.len(), &packed)?, codes);
+            assert_eq!(
+                hq::decode_page(&model, case.role, n, codes.len(), &packed)?,
+                codes
+            );
         }
         // The range coder adds at most a few bytes per page to the model's bits.
         let bits = cast(bytes) * 8.0;
-        assert!(bits >= case.bits - 1.0 && bits <= case.bits + 64.0 * cast(frames.div_ceil(page)), "{bits} vs {}", case.bits);
+        assert!(
+            bits >= case.bits - 1.0 && bits <= case.bits + 64.0 * cast(frames.div_ceil(page)),
+            "{bits} vs {}",
+            case.bits
+        );
     }
     Ok(())
 }

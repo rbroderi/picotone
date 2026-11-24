@@ -79,7 +79,10 @@ struct Reader<'a> {
 impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         let end = self.pos.checked_add(n).context("HQ table size overflow")?;
-        let out = self.bytes.get(self.pos..end).context("HQ table is truncated")?;
+        let out = self
+            .bytes
+            .get(self.pos..end)
+            .context("HQ table is truncated")?;
         self.pos = end;
         Ok(out)
     }
@@ -193,7 +196,10 @@ impl HqModel {
     /// # Errors
     /// Fails on a malformed or implausible table.
     pub fn from_table(table: &[u8]) -> Result<Self> {
-        let mut r = Reader { bytes: table, pos: 0 };
+        let mut r = Reader {
+            bytes: table,
+            pos: 0,
+        };
         ensure!(r.take(4)? == MAGIC, "not an HQ cx2 table (bad magic)");
         let version = r.u32()?;
         ensure!(version == VERSION, "unsupported HQ table version {version}");
@@ -225,7 +231,10 @@ impl HqModel {
         let exp = (0..1_usize << frac_bits)
             .map(|_| r.u32())
             .collect::<Result<Vec<_>>>()?;
-        ensure!(exp.iter().all(|&e| e <= 1 << 24), "exponential table entry is too large");
+        ensure!(
+            exp.iter().all(|&e| e <= 1 << 24),
+            "exponential table entry is too large"
+        );
         let freq: Vec<u32> = (0..=MAX_SHIFT)
             .flat_map(|shift| exp.iter().map(move |&e| (e >> shift) + floor))
             .collect();
@@ -236,9 +245,10 @@ impl HqModel {
         let b1 = r.i32s(h1, BIAS_LIMIT)?;
         let role_bias = r.i32s(roles * h1, BIAS_LIMIT)?;
         ensure!(
-            role_bias
-                .chunks_exact(h1)
-                .all(|row| row.iter().zip(&b1).all(|(a, b)| a.unsigned_abs() + b.unsigned_abs() <= BIAS_LIMIT)),
+            role_bias.chunks_exact(h1).all(|row| row
+                .iter()
+                .zip(&b1)
+                .all(|(a, b)| a.unsigned_abs() + b.unsigned_abs() <= BIAS_LIMIT)),
             "HQ table bias is out of range"
         );
         let s2 = r.shift()?;
@@ -462,7 +472,12 @@ impl HqPredictor<'_> {
 ///
 /// # Errors
 /// Fails when a code is out of range or `codebooks` is not 1 to 9.
-pub fn encode_page(model: &HqModel, role: Role, codebooks: usize, codes: &[u16]) -> Result<Vec<u8>> {
+pub fn encode_page(
+    model: &HqModel,
+    role: Role,
+    codebooks: usize,
+    codes: &[u16],
+) -> Result<Vec<u8>> {
     let mut predictor = model.predictor(role, codebooks)?;
     let mut encoder = Encoder::new();
     for &code in codes {
@@ -522,7 +537,8 @@ mod tests {
     fn limits_keep_accumulators_in_range() {
         for n in [1_i64, 128, 256, 384, 512, 1152] {
             let inputs = usize::try_from(n).unwrap_or(0);
-            let worst = i64::from(hidden_limit(inputs)) * i64::from(LIMIT) * n + i64::from(BIAS_LIMIT);
+            let worst =
+                i64::from(hidden_limit(inputs)) * i64::from(LIMIT) * n + i64::from(BIAS_LIMIT);
             assert!(worst <= i64::from(i32::MAX), "{n}");
             let worst = i64::from(out_limit(inputs)) * i64::from(LIMIT) * n;
             assert!(worst <= i64::from(i32::MAX), "{n}");

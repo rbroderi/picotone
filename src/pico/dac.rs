@@ -429,7 +429,11 @@ impl DacStream {
         // Every page costs at least an Ogg page header, so an honest file has
         // more bytes than pages; the bound keeps damaged lengths from sizing
         // allocations (decoding reserves only what a page's bytes could hold).
-        let per = if info.page_length == 0 { info.frames().max(1) } else { info.page_length };
+        let per = if info.page_length == 0 {
+            info.frames().max(1)
+        } else {
+            info.page_length
+        };
         ensure!(
             info.frames().div_ceil(per) <= bytes.len(),
             "stream length does not match its size"
@@ -583,8 +587,8 @@ mod tests {
         static TABLE: OnceLock<Option<HqModel>> = OnceLock::new();
         TABLE
             .get_or_init(|| {
-                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("models/cx2_dac44.ecxm");
+                let path =
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("models/cx2_dac44.ecxm");
                 HqModel::from_table(&std::fs::read(path).ok()?).ok()
             })
             .as_ref()
@@ -740,7 +744,14 @@ mod tests {
         // Another table is refused.
         let mut other = i;
         other.table_hash ^= 1;
-        assert!(write_dac(&other, table()?, &[codes(frames, 9, 1), codes(frames, 3, 2)]).is_err());
+        assert!(
+            write_dac(
+                &other,
+                table()?,
+                &[codes(frames, 9, 1), codes(frames, 3, 2)]
+            )
+            .is_err()
+        );
         // A truncated chunk is refused, not decoded into made-up codes.
         let mut cut = DacStream::parse(&bytes)?;
         if let Some(Some(page)) = cut.pages.get_mut(0) {

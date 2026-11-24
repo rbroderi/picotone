@@ -355,8 +355,11 @@ fn main() -> Result<()> {
             match pico::codec_of(&bytes)? {
                 Codec::Dac44 => {
                     let stream = hq::parse(&bytes)?;
-                    let table =
-                        hq::find_table(&tables(), options.table.as_deref(), stream.info.table_hash)?;
+                    let table = hq::find_table(
+                        &tables(),
+                        options.table.as_deref(),
+                        stream.info.table_hash,
+                    )?;
                     let audio = hq::decode(&weights(), &table, &stream)?;
                     write_wav(output, &audio, options)?;
                 }
@@ -378,7 +381,8 @@ fn main() -> Result<()> {
         } => match encode_file(&weights(), &tables(), input, encode, true)? {
             Encoded::Hq { bytes, .. } => {
                 let stream = hq::parse(&bytes)?;
-                let table = hq::find_table(&tables(), wav.table.as_deref(), stream.info.table_hash)?;
+                let table =
+                    hq::find_table(&tables(), wav.table.as_deref(), stream.info.table_hash)?;
                 let audio = hq::decode(&weights(), &table, &stream)?;
                 write_wav(output, &audio, wav)?;
             }

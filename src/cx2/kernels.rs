@@ -74,7 +74,12 @@ impl Simd {
         }
     }
 
-    fn multiply_add_with<const PAIRS: usize>(self, acc: &mut [i32], matrix: &Matrix, input: &[i16]) {
+    fn multiply_add_with<const PAIRS: usize>(
+        self,
+        acc: &mut [i32],
+        matrix: &Matrix,
+        input: &[i16],
+    ) {
         let mut active = [(0_usize, 0_i16, 0_i16); PAIRS];
         let mut used = 0;
         for (pair, values) in input.chunks(2).take(matrix.pairs).enumerate() {
@@ -239,7 +244,14 @@ mod tests {
 
     #[test]
     fn multiply_add_agrees_with_a_plain_loop_on_every_path() {
-        for (rows, columns) in [(1024, 64), (37, 5), (64, 384), (1, 1), (384, 512), (96, 1152)] {
+        for (rows, columns) in [
+            (1024, 64),
+            (37, 5),
+            (64, 384),
+            (1, 1),
+            (384, 512),
+            (96, 1152),
+        ] {
             let matrix: Vec<i16> = (0..rows * columns)
                 .map(|i| i16::try_from((i * 7919) % 4095).unwrap_or(0) - 2047)
                 .collect();
