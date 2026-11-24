@@ -16,6 +16,7 @@
 
 pub mod features;
 pub mod fit;
+pub mod hq;
 pub mod kernels;
 pub mod model;
 pub mod net;

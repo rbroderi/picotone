@@ -66,7 +66,16 @@ impl Simd {
     /// skipped. Entries of `input` beyond the matrix's columns are ignored and
     /// missing ones count as zero.
     pub fn multiply_add(self, acc: &mut [i32], matrix: &Matrix, input: &[i16]) {
-        let mut active = [(0_usize, 0_i16, 0_i16); MAX_PAIRS];
+        // Most matrices are narrow; only wide ones pay for the large list.
+        if matrix.pairs <= SMALL_PAIRS {
+            self.multiply_add_with::<SMALL_PAIRS>(acc, matrix, input);
+        } else {
+            self.multiply_add_with::<MAX_PAIRS>(acc, matrix, input);
+        }
+    }
+
+    fn multiply_add_with<const PAIRS: usize>(self, acc: &mut [i32], matrix: &Matrix, input: &[i16]) {
+        let mut active = [(0_usize, 0_i16, 0_i16); PAIRS];
         let mut used = 0;
         for (pair, values) in input.chunks(2).take(matrix.pairs).enumerate() {
             let left = values.first().copied().unwrap_or(0);
@@ -91,7 +100,9 @@ impl Simd {
 /// Rows per block of a [`Matrix`].
 const GROUP: usize = 32;
 /// Most column pairs a [`Matrix`] may have.
-const MAX_PAIRS: usize = 256;
+const MAX_PAIRS: usize = 1024;
+/// Column pairs up to which [`Simd::multiply_add`] keeps its work list small.
+const SMALL_PAIRS: usize = 256;
 
 /// A matrix laid out for [`Simd::multiply_add`].
 ///
@@ -110,7 +121,7 @@ pub struct Matrix {
 impl Matrix {
     /// Builds the layout from `columns`, which holds columns of `rows` entries.
     ///
-    /// Returns `None` if there are no rows or more than 512 columns.
+    /// Returns `None` if there are no rows or more than 2048 columns.
     #[must_use]
     pub fn from_columns(columns: &[i16], rows: usize) -> Option<Self> {
         if rows == 0 || !columns.len().is_multiple_of(rows) {
@@ -228,7 +239,7 @@ mod tests {
 
     #[test]
     fn multiply_add_agrees_with_a_plain_loop_on_every_path() {
-        for (rows, columns) in [(1024, 64), (37, 5), (64, 384), (1, 1), (384, 512)] {
+        for (rows, columns) in [(1024, 64), (37, 5), (64, 384), (1, 1), (384, 512), (96, 1152)] {
             let matrix: Vec<i16> = (0..rows * columns)
                 .map(|i| i16::try_from((i * 7919) % 4095).unwrap_or(0) - 2047)
                 .collect();
