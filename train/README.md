@@ -283,5 +283,9 @@ channel's role (left/right, mid or mono, side). Choices measured on the 23 test 
 - **Additive experts** (codebook pairs, the codebook geometry): under 0.006 bits together.
 - **More fit data and longer training** help: half the fit data costs 0.18 bits, and 12k steps
   beat 6k by 0.10 bits.
+- **Fit data, stage 1.** Going from 190 fit clips to 490 (fit plus fit2, 40k steps) saved 0.47
+  bits per code at q9, from 8.75 to 8.28.
+- **Head rank.** Rank 64 costs 0.085 bits at q9 and 0.048 at q3 against rank 128, and decodes only
+  about 1.2x faster. The shipped table keeps rank 128.
 
 The integer table codes within 0.002 bits per code of the float network.
