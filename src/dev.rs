@@ -147,6 +147,20 @@ pub(crate) enum DevCommand {
         #[arg(long)]
         latent: Option<PathBuf>,
     },
+    /// Pack dumped HQ codes (`dev codes` output: `.json` sidecars with their
+    /// `.npy` files) into cx2 HQ streams at each tier, check that they decode
+    /// back, and report bits per code and the cx2 time. Run it with
+    /// `--threads 1` for the cost on one core.
+    DacPack {
+        /// The HQ cx2 table (`cx2_dac44.ecxm`).
+        table: PathBuf,
+        /// Sidecars (`.json`), or directories of them.
+        #[arg(required = true)]
+        inputs: Vec<PathBuf>,
+        /// Codebook counts to cut each channel to.
+        #[arg(long, value_delimiter = ',', default_value = "9,8,7,6,5,4,3,2,1")]
+        tiers: Vec<usize>,
+    },
     /// Time each expert and the whole coder on one code bundle.
     Profile {
         /// cx2 table (.ecxm).
@@ -249,10 +263,141 @@ pub(crate) fn run(command: &DevCommand, tables: &Path) -> Result<()> {
             input,
             codec,
         } => profile(&load(table, codec)?, &read_bundle(tables, input)?),
+        DevCommand::DacPack {
+            table,
+            inputs,
+            tiers,
+        } => dac_pack(table, inputs, tiers),
         DevCommand::DacBench { .. }
         | DevCommand::DacDecode { .. }
         | DevCommand::DacEncode { .. } => run_dac(command),
     }
+}
+
+/// One dumped HQ clip: its layout and each coded channel's codes.
+struct DacClip {
+    layout: pico::ChannelLayout,
+    books: Vec<usize>,
+    channels: Vec<Vec<u16>>,
+    audio_length: usize,
+}
+
+fn read_dac_clip(sidecar: &Path) -> Result<DacClip> {
+    let json: serde_json::Value = serde_json::from_slice(&read(sidecar)?)?;
+    let books: Vec<usize> = json["codebooks"]
+        .as_array()
+        .context("sidecar has no codebooks")?
+        .iter()
+        .map(|v| v.as_u64().and_then(|n| usize::try_from(n).ok()).context("codebook count"))
+        .collect::<Result<_>>()?;
+    let layout = match json["layout"].as_str().unwrap_or("") {
+        // Parametric streams' parameters are not dumped; their mid codes code as a mono stream.
+        "Mono" | "Parametric" => pico::ChannelLayout::Mono,
+        "LeftRight" => pico::ChannelLayout::LeftRight,
+        "MidSide" => pico::ChannelLayout::MidSide,
+        other => bail!("{}: unknown layout {other}", sidecar.display()),
+    };
+    let mut channels = Vec::new();
+    for c in 0..books.len() {
+        let path = if books.len() == 1 {
+            sidecar.with_extension("npy")
+        } else {
+            sidecar.with_extension(format!("{c}.npy"))
+        };
+        let (codes, columns) = read_npy(&path)?;
+        ensure!(columns == books[c], "{}: {columns} columns", path.display());
+        channels.push(codes);
+    }
+    let audio_length = usize::try_from(json["audio_length"].as_u64().context("audio_length")?)?;
+    Ok(DacClip {
+        layout,
+        books,
+        channels,
+        audio_length,
+    })
+}
+
+/// `dev dac-pack`: cx2 sizes and times of dumped HQ codes, per tier.
+fn dac_pack(table: &Path, inputs: &[PathBuf], tiers: &[usize]) -> Result<()> {
+    use picotone::cx2::hq::HqModel;
+    let model = HqModel::from_table(&read(table)?)?;
+    let mut sidecars = Vec::new();
+    for input in inputs {
+        if input.is_dir() {
+            let mut found: Vec<PathBuf> = std::fs::read_dir(input)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|e| e == "json"))
+                .collect();
+            found.sort();
+            sidecars.extend(found);
+        } else {
+            sidecars.push(input.clone());
+        }
+    }
+    let clips = sidecars
+        .iter()
+        .map(|p| read_dac_clip(p))
+        .collect::<Result<Vec<_>>>()?;
+    let seconds: f64 = clips
+        .iter()
+        .map(|c| to_f64(c.audio_length) / f64::from(picotone::dac::SAMPLE_RATE))
+        .sum();
+    eprintln!(
+        "{} clips, {seconds:.0} s; table {:016x}, {} MAC per 9-codebook frame",
+        clips.len(),
+        model.hash(),
+        model.macs_per_frame(9)
+    );
+    eprintln!("tier  codes       bits/code  under 10  kbps/channel  encode s/ch-s  decode s/ch-s");
+    for &tier in tiers {
+        let (mut codes, mut bytes, mut channel_seconds) = (0_usize, 0_usize, 0.0);
+        let (mut encode, mut decode) = (0.0, 0.0);
+        for clip in &clips {
+            let books: Vec<usize> = clip.books.iter().map(|&n| n.min(tier)).collect();
+            let channels: Vec<Vec<u16>> = clip
+                .channels
+                .iter()
+                .zip(&clip.books)
+                .zip(&books)
+                .map(|((c, &n), &m)| c.chunks_exact(n).flat_map(|f| f[..m].iter().copied()).collect())
+                .collect();
+            let info = pico::DacInfo {
+                codebook_hash: 0,
+                table_hash: model.hash(),
+                layout: clip.layout,
+                codebooks: books,
+                looped: false,
+                pre_skip: 0,
+                page_length: pico::DEFAULT_PAGE_FRAMES,
+                audio_length: clip.audio_length,
+                end_trim: 0,
+                length_in_header: true,
+                output_gain: 0,
+                tags: Vec::new(),
+            };
+            let start = Instant::now();
+            let file = pico::write_dac(&info, &model, &channels)?;
+            encode += start.elapsed().as_secs_f64();
+            let stream = pico::DacStream::parse(&file)?;
+            let start = Instant::now();
+            let back = stream.decode_all(&model)?;
+            decode += start.elapsed().as_secs_f64();
+            ensure!(back == channels, "a clip did not decode back to its codes");
+            codes += channels.iter().map(Vec::len).sum::<usize>();
+            bytes += stream.coded_bytes().iter().sum::<usize>();
+            channel_seconds += to_f64(channels.len() * clip.audio_length)
+                / f64::from(picotone::dac::SAMPLE_RATE);
+        }
+        let bits = to_f64(bytes * 8) / to_f64(codes.max(1));
+        eprintln!(
+            "q{tier}    {codes:<10}  {bits:9.4}  {:7.2}%  {:12.2}  {:13.4}  {:13.4}",
+            100.0 * (1.0 - bits / 10.0),
+            to_f64(bytes * 8) / channel_seconds / 1000.0,
+            encode / channel_seconds,
+            decode / channel_seconds
+        );
+    }
+    Ok(())
 }
 
 /// The HQ codec's dev commands.
