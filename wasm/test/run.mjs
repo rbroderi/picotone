@@ -11,7 +11,7 @@
 // Exit code 1 when any case falls below 100 dB SNR or fails.
 
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -242,6 +242,12 @@ const decoderArgs = (c) => (c.decoder === undefined ? [] : ["--decoder", c.decod
 const exe = join(dir, "picotone.exe");
 if (!existsSync(exe) || statSync(exeSrc).mtimeMs > statSync(exe).mtimeMs) copyFileSync(exeSrc, exe);
 const weights = join(repo, "weights");
+// Size and modification time of the exe and of every weights and table file, so that new weights or a new
+// build regenerate the native references (they were once kept from a random-init stand-in decoder).
+const inputsStamp = [exeSrc, ...[weights, join(repo, "models")].flatMap((d) =>
+  readdirSync(d).filter((f) => /\.(safetensors|ecxm|json)$/.test(f)).sort().map((f) => join(d, f)))]
+  .map((p) => `${p}:${statSync(p).size}:${Math.round(statSync(p).mtimeMs)}`)
+  .join("|");
 
 function run(args) {
   const r = spawnSync(exe, ["--weights", weights, ...args], { encoding: "utf8" });
@@ -255,7 +261,8 @@ for (const c of CASES) {
   const ref = join(dir, `${c.name}.ref.wav`);
   const stamp = join(dir, `${c.name}.args`);
   const args = c.args ?? B6;
-  const stampText = [...args, ...decoderArgs(c)].join(" ");
+  // The references depend on the exe, the weights and the tables too, not only the arguments.
+  const stampText = [...args, ...decoderArgs(c), inputsStamp].join(" ");
   const stale = !existsSync(stamp) || readFileSync(stamp, "utf8") !== stampText;
   if (stale || !existsSync(ref) || !existsSync(pico) || process.argv.includes("--fresh")) {
     if (c.src) copyFileSync(c.src, wav);
