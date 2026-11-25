@@ -1,0 +1,39 @@
+{
+ "model": "dac44-stftenc",
+ "arch": {
+  "enc": "stft",
+  "dim": 512,
+  "blocks": 8,
+  "mlp": 1536,
+  "ffts": [
+   2048,
+   512
+  ],
+  "power": 0.3,
+  "embed_k": 1,
+  "latent": 1024
+ },
+ "sample_rate": 44100,
+ "frame": 512,
+ "channels": 4106,
+ "receptive_frames": 24,
+ "reach_samples": 768,
+ "params": 15274496,
+ "step": 20000,
+ "weights": "G_ema",
+ "licences": "sharealike",
+ "decoder": {
+  "arch": {
+   "arch": "vocos",
+   "dim": 512,
+   "blocks": 8,
+   "mlp": 1536,
+   "hop": 512
+  },
+  "sha": "d3e6ce309c5a7ad1",
+  "path": "runs/vocos_ft_cplx/ckpt_last.pt"
+ },
+ "source_sha256": {
+  "checkpoint": "900f0470d14b52d61cdd39c2e5390cf5a974110e89e507df4ed99a6add838c99"
+ }
+}

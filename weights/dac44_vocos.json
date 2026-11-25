@@ -1,26 +1,27 @@
 {
- "model": "dac44-student",
- "width": 512,
- "rates": [
-  8,
-  8,
-  4,
-  2
- ],
+ "model": "dac44-vocos",
+ "arch": {
+  "arch": "vocos",
+  "dim": 512,
+  "blocks": 8,
+  "mlp": 1536,
+  "hop": 512,
+  "n_fft": 2048
+ },
  "sample_rate": 44100,
- "hop": 512,
+ "frame": 512,
  "codebooks": 9,
  "codebook_size": 1024,
  "codebook_dim": 8,
  "input_per_codebook": 9,
- "receptive_frames": 9,
- "params": 5156129,
- "step": 172500,
+ "receptive_frames": 29,
+ "params": 14062594,
+ "step": 25000,
  "licences": "sharealike",
  "teacher": "descript-audio-codec 1.0.0, 44khz 8kbps weights (MIT, Copyright (c) 2023-present, Descript)",
  "source_sha256": {
-  "student": "1d680093188317c84d92d8ebd66f81014b6ba855bbd04943dcc2c61b9087cc8e",
+  "vocos": "5ad5ea8480c81b8994b0cacde6e328f17cbd1f397a97db98e158aac96b396496",
   "dac": "a88eed82a7024ccc1facdb1e605c4c2f99281c8118c22c9895ffa846d8fb61aa"
  },
- "fold_max_abs_dev": 3.5762786865234375e-07
+ "fold_max_rel_dev": 6.368717322402517e-07
 }

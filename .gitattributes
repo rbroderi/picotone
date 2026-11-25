@@ -9,5 +9,6 @@
 *.ps1 text eol=crlf
 
 # Model weights are stored with Git LFS: Meta's EnCodec (MIT; weights/EnCodec-MIT.txt), DAC 44 kHz's
-# encoder and the distilled HQ decoder (MIT; weights/DAC-MIT.txt and weights/dac44_student.NOTICE.txt).
+# weights (MIT; weights/DAC-MIT.txt) and our HQ encoder and decoder trained from them
+# (weights/dac44_stftenc.NOTICE.txt, weights/dac44_vocos.NOTICE.txt).
 weights/*.safetensors filter=lfs diff=lfs merge=lfs -text
