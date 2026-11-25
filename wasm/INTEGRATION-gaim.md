@@ -19,12 +19,14 @@ manifests now say `picotone-webgpu-weights`.)
 
 **HQ (M3):** to play HQ files, gaim must also re-copy the worker, `protocol.js`,
 `pico-header.js`, all three `pkg-*` builds and the three `.ts` files (the bindings changed),
-plus the new `dac44_student.*`, `DAC-MIT.txt`, `cx2_dac44.ecxm` and the new
-`cx2-tables.json` (§1). `DecodeStats` now also has `cx2Ms` and `networkMs`.
+plus `DAC-MIT.txt`, `cx2_dac44.ecxm` and the new `cx2-tables.json` (§1). `DecodeStats` now
+also has `cx2Ms` and `networkMs`.
 
-**Vocos HQ decoder:** re-copy the worker, `protocol.js`, all three `pkg-*` builds and the three
-`.ts` files again. `loadModel` takes `hqDecoder` and `ModelInfo` has `network`. Then copy
-`dac44_vocos.*` once a trained export exists (§1, §4).
+**Vocos is the only HQ decoder:** the distilled "student" decoder (`dac44_student.*`) is gone.
+Re-copy the worker, `protocol.js`, all three `pkg-*` builds and the three `.ts` files, copy
+`dac44_vocos.*` (§1), and delete any `dac44_student.*` from gaim's `models/`. `loadModel` no
+longer takes `hqDecoder`, and the `HqDecoderName` type is gone; `ModelInfo.network` is
+`dac44_vocos` for `dac44`.
 
 ## 1. Files to copy
 
@@ -39,9 +41,8 @@ files of `www/picotone/`, none of which are in git, and exports `www/models/`), 
 | `wasm/www/picotone/pkg-mt/` (whole folder, incl. `snippets/`) | `src/gaim/web/static/picotone/pkg-mt/` | threaded build + rayon pool worker |
 | `wasm/www/models/*.json`, `*.safetensors` | `src/gaim/web/static/picotone/models/` | decoder-only weights (63.4 MB mono, 46.6 MB stereo) |
 | `wasm/www/models/EnCodec-MIT.txt` | `src/gaim/web/static/picotone/models/` | the weights' MIT notice; it must travel with them |
-| `wasm/www/models/dac44_student.safetensors`, `dac44_student.json` | `src/gaim/web/static/picotone/models/` | the HQ decoder (20.6 MB), for `.pico` files of model `dac44` (the default `picotone encode` output) |
-| `wasm/www/models/dac44_student.NOTICE.txt`, `dac44_student.credits.jsonl`, `DAC-MIT.txt` | `src/gaim/web/static/picotone/models/` | the HQ decoder's notice, its training credits (10.9 MB) and DAC's MIT licence; the notice requires that they travel with the weights |
-| `wasm/www/models/dac44_vocos.safetensors`, `dac44_vocos.json`, `dac44_vocos.NOTICE.txt`, `dac44_vocos.credits.jsonl` (when exported) | `src/gaim/web/static/picotone/models/` | the Vocos HQ decoder (56 MB), an optional, about 5× faster decoder of the same `dac44` files; its notice and credits travel with it as the student's do |
+| `wasm/www/models/dac44_vocos.safetensors`, `dac44_vocos.json` | `src/gaim/web/static/picotone/models/` | the HQ decoder (Vocos, 56 MB), for `.pico` files of model `dac44` (the default `picotone encode` output) |
+| `wasm/www/models/dac44_vocos.NOTICE.txt`, `dac44_vocos.credits.jsonl`, `DAC-MIT.txt` | `src/gaim/web/static/picotone/models/` | the HQ decoder's notice, its training credits (10.9 MB) and DAC's MIT licence; the notice requires that they travel with the weights |
 | `wasm/www/models/cx2-tables.json`, `cx2_*.ecxm` | `src/gaim/web/static/picotone/models/` | the cx2 tables (7.4 MB stereo, 12.5 MB mono, 4.9 MB HQ `cx2_dac44.ecxm`) and their list |
 | `wasm/ts/picotone.ts`, `pico-header.ts`, `protocol.ts` | `web/src/picotone/` | typed client API, bundled by esbuild into console/table |
 
@@ -312,20 +313,16 @@ Do not pad loops by hand any more. Short effects need nothing.
 `picotone encode` with no preset or `--fast` writes the HQ codec (44.1 kHz, `model: "dac44"`
 in `readPicoHeader`), at 1 to 9 codebooks per channel (`--codebooks`, about 0.86 kbps each
 before entropy coding) in mono, left/right, mid/side or parametric stereo. This decoder plays
-it: `await decoder.loadModel("dac44")` (the worker fetches `dac44_student.*` and the HQ
+it: `await decoder.loadModel("dac44")` (the worker fetches `dac44_vocos.*` and the HQ
 table), then `play` / `decode` / `decodeToAudioBuffer` as for any file. HQ output is 44.1 kHz,
-so a 48 kHz `AudioContext` resamples it. It is much slower to decode than EnCodec (§5): use
-the threaded build (HTTPS, §3), or decode HQ music ahead of time on single-threaded pages.
+so a 48 kHz `AudioContext` resamples it. It decodes at about 4.4–4.7× realtime for
+single-threaded stereo (§5), so it suits plain-HTTP table pages too.
 `readPicoHeader` also gives HQ files' `layout` and per-channel `codebooks`. The WebGPU
 decoder in `web/` refuses HQ files for now.
 
-**Choosing the HQ decoder.** An HQ file names its code space, not a decoder, so either network
-plays any `dac44` file. `await decoder.loadModel("dac44", { hqDecoder: "dac44_vocos" })` loads the
-Vocos decoder (`dac44_vocos.*`) instead of the student. It is about 5× faster: 4.4–4.7× realtime
-for single-threaded stereo against 0.9× (§5), so it suits plain-HTTP table pages. It needs
-about 77 MiB of wasm memory single-threaded. `ModelInfo.network` says which network is in use.
-Loading `dac44` again with the other `hqDecoder` switches files of that model to it. The worker
-keeps both networks in memory, so switching back is free.
+An HQ file names its code space, not a decoder; the Vocos network (`dac44_vocos`) decodes
+every `dac44` file at every codebook count. It needs about 77 MiB of wasm memory
+single-threaded.
 
 ## 5. Performance and caveats
 
@@ -343,9 +340,23 @@ seconds ÷ decode wall time, including the cx2 decode; SNR is against the native
 | stereo music 75 s (`-b 6`) | 15.8× | 0.20 s | 6.8× | 5.6× | 0.27–0.31 s | 124 dB |
 | stereo 120 s, music12 | 11.9–12.4× | 0.18–0.20 s | 5.9–6.0× | 5.1× | 0.25–0.27 s | 104–118 dB |
 
-**HQ (`dac44`)**, same machine, all 16 threads for the threaded build, 30 s of music. cx2 is
-the entropy decode, net the student network (with stereo and trim); per channel-second of
-coded audio:
+**HQ (`dac44`), the Vocos decoder**, same machine, all 16 threads for the threaded build, 30 s
+of music. cx2 is the entropy decode, net the network (with stereo and trim). Speeds were
+measured with random-initialised stand-in weights (the speed does not depend on the values);
+the SNR is that of the trained weights:
+
+| case | threaded (16) | single, relaxed SIMD | single, plain | SNR |
+|---|---|---|---|---|
+| stereo q5 (L/R) | 13.0× | 4.7× (cx2 0.011 s, net 0.095 s per ch-s) | 3.8× | 116.7 dB |
+| stereo q9 (L/R) | 12.4× | 4.4× (cx2 0.015 s, net 0.098 s per ch-s) | 3.6× | 116.9–117.0 dB |
+| mono q9 | 18.0× | 8.9× | 6.6× | 117.1–117.2 dB |
+| 2 single-threaded workers, one mono q9 file each, at once | | 15.7 channel-s/s | | |
+
+wasm memory peaks at 71–77 MiB single-threaded and 125–151 MiB threaded (the weights are
+56 MB, packed 63 MiB).
+
+*History:* the retired distilled "student" decoder (`dac44_student`, DAC's decoder
+architecture at width 512) measured, per channel-second of coded audio:
 
 | case | threaded (16) | single, relaxed SIMD | single, plain | SNR |
 |---|---|---|---|---|
@@ -354,28 +365,9 @@ coded audio:
 | mono q9 | 7.5× | 1.45× | 1.29× | 117 dB |
 | 2 single-threaded workers, one mono q9 file each, at once | | 2.88 channel-s/s (1.44× for stereo) | | |
 
-**HQ with the Vocos decoder** (`hqDecoder: "dac44_vocos"`), the same files, measured with
-random-initialised stand-in weights (the speed does not depend on the values):
-
-| case | threaded (16) | single, relaxed SIMD | single, plain | SNR |
-|---|---|---|---|---|
-| stereo q5 (L/R) | 13.0× | 4.7× (cx2 0.011 s, net 0.095 s per ch-s) | 3.8× | 101 dB |
-| stereo q9 (L/R) | 12.4× | 4.4× (cx2 0.015 s, net 0.098 s per ch-s) | 3.6× | 101 dB |
-| mono q9 | 18.0× | 8.9× | 6.6× | 101 dB |
-| 2 single-threaded workers, one mono q9 file each, at once | | 15.7 channel-s/s | | |
-
-wasm memory peaks at 71–77 MiB single-threaded and 125–151 MiB threaded (Vocos alone; the
-weights are 56 MB, packed 63 MiB). The lower SNR against native (101 dB, against 111–117 dB for the student)
-comes from the random stand-in weights; it is still above the test's 100 dB bar.
-
-The student network dominates its decode (98%); its cost does not depend on the codebook count, and parametric
-stereo costs about the same as mono. **Single-threaded HQ stereo is slower than realtime**
-here, so on plain-HTTP pages `play()` buffers most of the file first: decode HQ music ahead of
-time there (`decodeToAudioBuffer`), or serve over HTTPS for the threaded build. One
-single-threaded worker per channel would give about 1.4× for stereo (measured as two
-workers decoding at once); the API does not split a file by channel yet. Threaded, the student
-uses about 200–220 MiB of wasm memory (it decodes at most 512 frames at once across threads, so
-this does not grow with the thread count); single-threaded 102 MiB.
+Its network dominated its decode (98%) and single-threaded stereo was slower than realtime,
+which is why Vocos (about 5× faster) replaced it. Threaded, it used about 200–220 MiB of wasm
+memory; single-threaded 102 MiB.
 
 **Memory.** wasm memory never shrinks, so its peak is what a worker keeps. The weights are not
 copied into wasm: `new Decoder(name, config, bytes)` takes the `Uint8Array` and reads each
@@ -385,8 +377,7 @@ Drop the buffer after the constructor returns. Peaks measured with `node wasm/te
 
 | network | threaded: built / peak | single: built / peak |
 |---|---|---|
-| HQ student (stereo / mono) | 57 / 220, 200–217 MiB | 25 / 102 MiB |
-| HQ Vocos (stereo / mono) | 97 / 151, 125 MiB | 64 / 77, 71 MiB |
+| HQ, Vocos (stereo / mono) | 97 / 151, 125 MiB | 64 / 77, 71 MiB |
 | EnCodec 48 kHz stereo | 71 / 169 MiB | 40 / 100 MiB |
 | EnCodec 24 kHz mono | 79 / 127 MiB | 47 / 79 MiB |
 

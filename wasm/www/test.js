@@ -84,15 +84,11 @@ window.picotoneTest = {
     return { build: decoder.build, isSecureContext: self.isSecureContext, crossOriginIsolated: self.crossOriginIsolated, hardwareConcurrency: navigator.hardwareConcurrency };
   },
 
-  async runCase(name, { stream = true, chunkSegments = undefined, firstChunkSegments = undefined, seamCheck = false, loopRegion = null, startSample = 0, hqDecoder = undefined } = {}) {
+  async runCase(name, { stream = true, chunkSegments = undefined, firstChunkSegments = undefined, seamCheck = false, loopRegion = null, startSample = 0 } = {}) {
     const bytes = new Uint8Array(await (await fetch(`/test-data/${name}.pico`)).arrayBuffer());
     const info = readPicoHeader(bytes);
-    // HQ files play with either network; switching reloads (the worker keeps one per model).
-    const key = `${info.model}/${hqDecoder ?? ""}`;
-    if (!loaded.has(key)) {
-      for (const k of [...loaded.keys()]) if (k.startsWith(`${info.model}/`)) loaded.delete(k);
-      loaded.set(key, await decoder.loadModel(info.model, { hqDecoder }));
-    }
+    const key = info.model;
+    if (!loaded.has(key)) loaded.set(key, await decoder.loadModel(info.model));
     const ref = readWavFloat(await (await fetch(`/test-data/${name}.ref.wav`)).arrayBuffer());
     let result;
     let startedMs = null;
@@ -142,7 +138,7 @@ window.picotoneTest = {
  * player that decodes each coded channel in its own worker would: the wall time of all, and
  * each decode's own stats.
  */
-window.picotoneConcurrent = async (name, workers, hqDecoder = undefined) => {
+window.picotoneConcurrent = async (name, workers) => {
   const bytes = new Uint8Array(await (await fetch(`/test-data/${name}.pico`)).arrayBuffer());
   const info = readPicoHeader(bytes);
   const decoders = await Promise.all(
@@ -151,7 +147,7 @@ window.picotoneConcurrent = async (name, workers, hqDecoder = undefined) => {
     ),
   );
   try {
-    await Promise.all(decoders.map((d) => d.loadModel(info.model, { hqDecoder })));
+    await Promise.all(decoders.map((d) => d.loadModel(info.model)));
     const t0 = performance.now();
     const results = await Promise.all(decoders.map((d) => d.decode(bytes.slice())));
     return { wallMs: performance.now() - t0, seconds: info.durationSeconds, stats: results.map((r) => r.stats) };
@@ -163,12 +159,12 @@ window.picotoneConcurrent = async (name, workers, hqDecoder = undefined) => {
  * Memory of one network in a fresh worker (wasm memory never shrinks, so every figure is the
  * peak up to that point): the load's phases, then after the first chunk and after the decode.
  */
-window.picotoneMemory = async (name, { build = "auto", threads = 0, relaxedSimd = true, hqDecoder = undefined, chunkSegments = undefined } = {}) => {
+window.picotoneMemory = async (name, { build = "auto", threads = 0, relaxedSimd = true, chunkSegments = undefined } = {}) => {
   const bytes = new Uint8Array(await (await fetch(`/test-data/${name}.pico`)).arrayBuffer());
   const info = readPicoHeader(bytes);
   const fresh = await PicotoneDecoder.create({ baseUrl: "./picotone/", modelsUrl: "./models/", build, threads, relaxedSimd, cacheName: null });
   try {
-    const model = await fresh.loadModel(info.model, { hqDecoder });
+    const model = await fresh.loadModel(info.model);
     const result = await fresh.decode(bytes, { chunkSegments });
     return { build: fresh.build, model, stats: result.stats, seconds: info.durationSeconds };
   } finally {

@@ -1,13 +1,13 @@
-//! The Vocos HQ decoder (`dac44_vocos`) of DAC 44 kHz codes.
+//! The HQ decoder (`dac44_vocos`) of DAC 44 kHz codes.
 //!
 //! Its layers all run at the latent frame rate (86.13 Hz) and its samples
-//! come from an inverse STFT: about a fifth of the student's work per second.
-//! The design follows Vocos (Siuzdak 2023, MIT, Copyright (c) 2023 Charactr
+//! come from an inverse STFT: about a fifth of the work per second of the
+//! DAC-architecture decoder it replaced. The design follows Vocos (Siuzdak 2023, MIT, Copyright (c) 2023 Charactr
 //! Inc.); the network is `distill/vocos_student.py`, converted by
 //! `tools/export_vocos.py`:
 //!
-//! - **The input.** As for the student ([`crate::dac`]), the codebook
-//!   projections are folded into the embed conv: 81 values per frame.
+//! - **The input.** The codebook projections are folded into the embed conv
+//!   ([`crate::dac`]): 81 values per frame.
 //! - **The backbone.** A k7 conv to `dim` channels and a `LayerNorm`, then
 //!   `ConvNeXt` blocks: a depthwise k7 conv, `LayerNorm`, a Linear to `mlp`,
 //!   exact GELU, a Linear back, a per-channel layer scale, plus the input.

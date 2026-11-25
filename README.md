@@ -50,8 +50,10 @@ when `PICOTONE_WEIGHTS` is not set). The cx2 tables are read from `models/` (or 
 `PICOTONE_TABLES`).
 
 The HQ codec's weights sit beside them: `dac44_encoder.safetensors` (DAC 44 kHz's encoder and quantiser) and
-`dac44_student.safetensors` (picotone's distilled decoder), with DAC's licence in `weights/DAC-MIT.txt` and the
-decoder's training-data notice and credits in `weights/dac44_student.NOTICE.txt` and `.credits.jsonl`.
+`dac44_vocos.safetensors` (picotone's Vocos decoder, the only HQ decoder at every codebook count), with DAC's
+licence in `weights/DAC-MIT.txt` and the decoder's training-data notice and credits in
+`weights/dac44_vocos.NOTICE.txt` and `.credits.jsonl`. The decoder's weights are not in the repository yet
+(`tools/export_vocos.py` converts the trained export).
 
 Encode with the HQ codec (the default: 44.1 kHz, about 8 kbps per channel at its full 9 codebooks), or with
 EnCodec (`--fast`, or a preset):
@@ -95,7 +97,7 @@ search in the quantiser, which gives slightly better quality at no decode cost.
 | Option | Default | Meaning |
 |---|---|---|
 | `--fast` | off | EnCodec instead of HQ: `encodec-24k` for mono, `encodec-48k` for stereo |
-| `--model` | HQ | The exact model: `dac44-student`, `encodec-48k` or `encodec-24k`; overrides `--fast` and presets |
+| `--model` | HQ | The exact model: `hq`, `encodec-48k` or `encodec-24k`; overrides `--fast` and presets |
 | `--channel-format` | `auto` | `auto` (follow the input), `mono` or `stereo`. With HQ, `auto` codes a stereo input whose side is over 40 dB under its mid as mono. A model that can't give the format is an error |
 | `--stereo` | `pick` | HQ only: `lr`, `ms` (mid/side), or `pick` the better on sampled excerpts |
 | `--codebooks` | HQ: 9; EnCodec: from `-b` | Codebooks per frame (HQ: per channel, 1–9, 0.86 kbps each) |
@@ -111,9 +113,7 @@ search in the quantiser, which gives slightly better quality at no decode cost.
 | `--threads` | all cores | Worker threads |
 
 `decode` takes `--float` (32-bit float WAV) and `--rescale` (scale down to avoid clipping, instead of
-limiting). For HQ files, `--decoder vocos` decodes with the Vocos (iSTFT) decoder,
-`weights/dac44_vocos.safetensors`, instead of the student: about six times faster. Any HQ file plays with
-either decoder. Its trained weights are not in the repository yet (`tools/export_vocos.py` makes them). `roundtrip` encodes and decodes in one step. `info` prints the headers, the tags and the bitrate.
+limiting). HQ files decode with the Vocos (iSTFT) decoder, `weights/dac44_vocos.safetensors`. `roundtrip` encodes and decodes in one step. `info` prints the headers, the tags and the bitrate.
 
 ## The `.pico` format
 

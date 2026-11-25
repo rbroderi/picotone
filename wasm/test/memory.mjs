@@ -34,10 +34,8 @@ const only = option("--only", null)?.split(",") ?? null;
 const threads = Number(option("--threads", "0"));
 
 const CASES = [
-  { name: "student_stereo_q9_30s", file: "hq_stereo_q9_30s" },
-  { name: "vocos_stereo_q9_30s", file: "hq_stereo_q9_30s", hqDecoder: "dac44_vocos" },
-  { name: "student_mono_q9_30s", file: "hq_mono_q9_30s" },
-  { name: "vocos_mono_q9_30s", file: "hq_mono_q9_30s", hqDecoder: "dac44_vocos" },
+  { name: "hq_stereo_q9_30s", file: "hq_stereo_q9_30s" },
+  { name: "hq_mono_q9_30s", file: "hq_mono_q9_30s" },
   { name: "encodec48_stereo_8s", file: "stereo_8s" },
   { name: "encodec24_mono_6s", file: "mono_6s" },
 ].filter((c) => only === null || only.includes(c.name));
@@ -86,7 +84,7 @@ try {
         const r = await page.evaluate(
           (file, options) => window.picotoneMemory(file, options),
           c.file,
-          { build: variant.build, threads, relaxedSimd: variant.relaxed, hqDecoder: c.hqDecoder },
+          { build: variant.build, threads, relaxedSimd: variant.relaxed },
         );
         const phases = { ...r.model.loadMemory, loaded: r.model.memoryBytes, first: r.stats.firstChunkMemoryBytes, peak: r.stats.memoryBytes };
         results.push({ variant: variant.label, case: c.name, threads: r.build.threads, speed: r.stats.speed, phases });

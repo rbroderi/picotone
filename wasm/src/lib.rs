@@ -2,8 +2,7 @@
 //!
 //! A [`Tables`] holds the cx2 entropy tables, found by the hash a `.pico`
 //! stream stores. A [`Decoder`] holds one decoder network: a decoder-only
-//! EnCodec model, or an HQ decoder of DAC 44 kHz codes (`dac44_student` or
-//! `dac44_vocos`; any of them plays any HQ file).
+//! EnCodec model, or the HQ decoder of DAC 44 kHz codes (`dac44_vocos`).
 //! [`Decoder::open`] parses a `.pico` file into a [`Stream`], and
 //! [`Stream::decode_next`] decodes the next part of it, returning only samples
 //! that later input can no longer change, so playback can start before the
@@ -27,7 +26,7 @@ use std::collections::VecDeque;
 use anyhow::{Context as _, Result, bail, ensure};
 use picotone::cx2;
 use picotone::cx2::hq::HqModel;
-use picotone::dac::{self, DacDecoder};
+use picotone::dac;
 use picotone::hqstream::{HqDecoder, HqStream};
 use picotone::layout::Trimmer;
 use picotone::model::{Encodec, EncodedFrame, OverlapAdd, StreamDecoder};
@@ -37,8 +36,6 @@ use picotone::vocos::{self, VocosDecoder};
 use picotone::weights::Weights;
 use wasm_bindgen::prelude::*;
 
-/// Name of the HQ decoder network, and of its weight files.
-const HQ_DECODER: &str = "dac44_student";
 /// Name of the HQ code space in headers (`model`), whatever decodes it.
 const HQ_MODEL: &str = "dac44";
 
@@ -448,7 +445,7 @@ enum Net {
 }
 
 /// A decoder network: a decoder-only EnCodec model (`encodec_24khz`,
-/// `encodec_48khz`) or the HQ decoder (`dac44_student`).
+/// `encodec_48khz`) or the HQ decoder (`dac44_vocos`).
 ///
 /// The network lives as long as the module instance: streams borrow it
 /// across calls, so `free()` releases only the handle, not the weights. Load
@@ -470,7 +467,7 @@ pub struct Decoder {
 impl Decoder {
     /// Builds network `name` from its `.json` config text and `.safetensors`
     /// bytes. For EnCodec those need to hold only the decoder and quantizer
-    /// tensors; `dac44_student` takes its weight file as it is.
+    /// tensors; `dac44_vocos` takes its weight file as it is.
     ///
     /// The bytes stay in JavaScript: each tensor is read from them when it is
     /// packed, a piece at a time, so WebAssembly memory never holds the file.
@@ -509,7 +506,7 @@ impl Decoder {
         self.load_memory.clone()
     }
 
-    /// Network name, e.g. `encodec_48khz` or `dac44_student`.
+    /// Network name, e.g. `encodec_48khz` or `dac44_vocos`.
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn name(&self) -> String {
@@ -585,19 +582,8 @@ impl Decoder {
     fn build(name: &str, config_json: &str, w: &Weights<'_>) -> Result<Self> {
         let mut phases = Phases::default();
         phases.mark("parsed");
-        let net = if name == HQ_DECODER {
-            let config: serde_json::Value =
-                serde_json::from_str(config_json).context("parsing the decoder's config")?;
-            let width = config.get("width").and_then(serde_json::Value::as_u64);
-            ensure!(
-                width.is_none_or(|w| w == 512),
-                "this build decodes the width-512 HQ student only"
-            );
-            let decoder = DacDecoder::from_weights(w, 512).context("building the HQ decoder")?;
-            let decoder: &'static DacDecoder = Box::leak(Box::new(decoder));
-            Net::Hq(decoder)
-        } else if name == vocos::NAME {
-            let decoder = VocosDecoder::from_weights(w).context("building the Vocos HQ decoder")?;
+        let net = if name == vocos::NAME {
+            let decoder = VocosDecoder::from_weights(w).context("building the HQ decoder")?;
             let decoder: &'static VocosDecoder = Box::leak(Box::new(decoder));
             Net::Hq(decoder)
         } else {
@@ -1461,10 +1447,10 @@ mod tests {
         })
     }
 
-    /// The Vocos decoder builds by its name and plays HQ files: they name
-    /// their code space, not a decoder.
+    /// The HQ decoder builds by its name and reads DAC's own codebooks, the
+    /// encoder's: HQ files name their code space, not a decoder.
     #[test]
-    fn vocos_builds_as_an_hq_decoder() -> Result<()> {
+    fn hq_decoder_builds_by_its_name() -> Result<()> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let weights = std::fs::read(root.join("tests/data/vocos_tiny.safetensors"))?;
         let config = std::fs::read_to_string(root.join("tests/data/vocos_tiny.json"))?;
@@ -1474,30 +1460,28 @@ mod tests {
         let Net::Hq(hq) = decoder.net else {
             bail!("dac44_vocos built an EnCodec decoder");
         };
-        let student = DacDecoder::from_bytes(&std::fs::read(
-            root.join("weights/dac44_student.safetensors"),
-        )?)?;
-        assert_eq!(hq.codebook_hash(), student.codebook_hash());
+        let encoder = dac::DacEncoder::load(&root.join("weights/dac44_encoder.safetensors"))?;
+        assert_eq!(hq.codebook_hash(), encoder.codebook_hash());
         Ok(())
     }
 
     /// An HQ parametric stereo file through the bindings: the header, the
     /// tables, the streamed decode (equal to the library's whole-stream
-    /// decode) and the refusals.
+    /// decode) and the refusals. The decoder is the small Vocos fixture.
     #[test]
     fn hq_stream_decodes_through_the_bindings() -> Result<()> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let weights = std::fs::read(root.join("weights/dac44_student.safetensors"))?;
-        let config = std::fs::read_to_string(root.join("weights/dac44_student.json"))?;
+        let weights = std::fs::read(root.join("tests/data/vocos_tiny.safetensors"))?;
+        let config = std::fs::read_to_string(root.join("tests/data/vocos_tiny.json"))?;
         let table_bytes = std::fs::read(root.join("models/cx2_dac44.ecxm"))?;
-        let decoder = Decoder::build(HQ_DECODER, &config, &Weights::from_bytes(&weights)?)?;
+        let decoder = Decoder::build(vocos::NAME, &config, &Weights::from_bytes(&weights)?)?;
         let mut tables = Tables::new();
         let hash = tables.add_table(&table_bytes)?;
         let table = HqModel::from_table(&table_bytes)?;
         assert_eq!(hash, format!("{:016x}", table.hash()));
         assert!(tables.has(&hash));
         let Net::Hq(hq) = decoder.net else {
-            bail!("dac44_student built an EnCodec decoder");
+            bail!("dac44_vocos built an EnCodec decoder");
         };
         let cfg = picotone::pstereo::Config::DEFAULT;
         let frames = 170;
@@ -1559,7 +1543,7 @@ mod tests {
             }
             assert_eq!(covered, total);
             assert_eq!(stream.units_done(), stream.unit_count());
-            assert!(stream.cx2_ms > 0.0 && stream.network_ms > stream.cx2_ms);
+            assert!(stream.cx2_ms > 0.0 && stream.network_ms > 0.0);
         }
         // An EnCodec decoder refuses the file.
         let model: &'static Encodec =

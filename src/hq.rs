@@ -1,5 +1,5 @@
-//! The HQ codec in the command line: DAC 44 kHz's encoder, the distilled
-//! decoder (`dac44-student`), and the stereo decisions.
+//! The HQ codec in the command line: DAC 44 kHz's encoder, the Vocos
+//! decoder (`dac44-vocos`), and the stereo decisions.
 
 #![expect(
     clippy::redundant_pub_crate,
@@ -13,8 +13,8 @@ use std::time::Instant;
 use anyhow::{Context as _, Result, ensure};
 use picotone::audio::Audio;
 use picotone::cx2::hq::HqModel;
-use picotone::dac::{self, DacDecoder, DacEncoder};
-use picotone::hqstream::{HqDecoder, HqStream};
+use picotone::dac::{self, DacEncoder};
+use picotone::hqstream::HqStream;
 use picotone::layout;
 use picotone::pico::{self, ChannelLayout, DacInfo, DacStream};
 use picotone::vocos::VocosDecoder;
@@ -23,48 +23,11 @@ use rayon::prelude::*;
 
 /// Encoder weights in the weights directory.
 pub(crate) const ENCODER_FILE: &str = "dac44_encoder.safetensors";
-/// Decoder weights in the weights directory.
-pub(crate) const DECODER_FILE: &str = "dac44_student.safetensors";
-/// The Vocos decoder's weights in the weights directory.
-pub(crate) const VOCOS_FILE: &str = "dac44_vocos.safetensors";
+/// The HQ decoder's (Vocos) weights in the weights directory.
+pub(crate) const DECODER_FILE: &str = "dac44_vocos.safetensors";
+/// The HQ decoder's name in messages.
+const DECODER_NAME: &str = "dac44-vocos";
 
-/// Which network turns HQ codes into audio. A file names only its code
-/// space (the codebook hash), so any decoder of DAC 44 kHz codes can play
-/// it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
-pub(crate) enum DecoderChoice {
-    /// The distilled DAC-architecture decoder (`dac44_student`).
-    #[default]
-    Student,
-    /// The Vocos (iSTFT) decoder (`dac44_vocos`): about a fifth of the work.
-    Vocos,
-}
-
-impl DecoderChoice {
-    /// The decoder's name.
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Student => "dac44-student",
-            Self::Vocos => "dac44-vocos",
-        }
-    }
-}
-
-/// A loaded HQ decoder.
-fn load_any_decoder(weights: &Path, choice: DecoderChoice) -> Result<Box<dyn HqDecoder>> {
-    Ok(match choice {
-        DecoderChoice::Student => Box::new(load_decoder(weights)?),
-        DecoderChoice::Vocos => {
-            let start = Instant::now();
-            let decoder = VocosDecoder::load(&file(weights, VOCOS_FILE)?)?;
-            eprintln!(
-                "loaded the Vocos HQ decoder in {:.2} s",
-                start.elapsed().as_secs_f64()
-            );
-            Box::new(decoder)
-        }
-    })
-}
 /// The cx2 table HQ streams are coded with, in the tables directory.
 pub(crate) const TABLE_FILE: &str = "cx2_dac44.ecxm";
 
@@ -180,11 +143,11 @@ fn load_encoder(weights: &Path) -> Result<DacEncoder> {
     Ok(encoder)
 }
 
-fn load_decoder(weights: &Path) -> Result<DacDecoder> {
+fn load_decoder(weights: &Path) -> Result<VocosDecoder> {
     let start = Instant::now();
-    let decoder = DacDecoder::load(&file(weights, DECODER_FILE)?)?;
+    let decoder = VocosDecoder::load(&file(weights, DECODER_FILE)?)?;
     eprintln!(
-        "loaded the HQ decoder in {:.2} s",
+        "loaded the HQ decoder ({DECODER_NAME}) in {:.2} s",
         start.elapsed().as_secs_f64()
     );
     Ok(decoder)
@@ -362,7 +325,7 @@ pub(crate) fn encode(
     let bytes = pico::write_dac_parametric(&info, s.table, &codes, &parameters)?;
     let cx2_seconds = coding.elapsed().as_secs_f64();
     eprintln!(
-        "encoded with dac44-student ({}, {} codebooks{}) in {:.2} s (cx2 {:.2} s)",
+        "encoded HQ ({}, {} codebooks{}) in {:.2} s (cx2 {:.2} s)",
         layout.name(),
         codebooks
             .iter()
@@ -447,19 +410,17 @@ pub(crate) fn decode(
     weights: &Path,
     table: &HqModel,
     stream: DacStream,
-    choice: DecoderChoice,
 ) -> Result<Audio> {
-    let decoder = load_any_decoder(weights, choice)?;
+    let decoder = load_decoder(weights)?;
     let start = Instant::now();
-    let mut stream = HqStream::new(stream, table, decoder.as_ref(), 0)?;
+    let mut stream = HqStream::new(stream, table, &decoder, 0)?;
     stream.fetch(usize::MAX)?;
     let cx2_seconds = start.elapsed().as_secs_f64();
     let out = stream.decode_rest()?;
     let audio = Audio::from_seq(&out, dac::SAMPLE_RATE);
     eprintln!(
-        "decoded {:.2} s with {} in {:.2} s (cx2 {cx2_seconds:.2} s)",
+        "decoded {:.2} s with {DECODER_NAME} in {:.2} s (cx2 {cx2_seconds:.2} s)",
         audio.seconds(),
-        choice.name(),
         start.elapsed().as_secs_f64()
     );
     Ok(audio)
@@ -475,7 +436,7 @@ pub(crate) fn print_info(stream: &DacStream, size: usize) {
     let info = &stream.info;
     let playable = info.playable_samples();
     let seconds = picotone::config::to_f64(playable) / f64::from(dac::SAMPLE_RATE);
-    eprintln!("model:      DAC 44 kHz codes (HQ; decoder dac44-student or dac44-vocos)");
+    eprintln!("model:      DAC 44 kHz codes (HQ; decoder {DECODER_NAME})");
     eprintln!(
         "samples:    {playable} ({seconds:.2} s at {} Hz)",
         dac::SAMPLE_RATE

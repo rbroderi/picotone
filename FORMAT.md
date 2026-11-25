@@ -159,11 +159,10 @@ length in its header needs an intact last page; a player that streams can instea
 
 ## HQ streams (model 2)
 
-The HQ codec (`dac44-student`, the encoder's default) codes 44.1 kHz audio with DAC 44 kHz's encoder and
+The HQ codec (`--model hq`, the encoder's default) codes 44.1 kHz audio with DAC 44 kHz's encoder and
 residual quantiser: one frame per 512 samples, up to 9 codebooks of 1024 entries per frame, a lower codebook
-count being a prefix of the full one. picotone decodes it with a distilled student of DAC's decoder
-(`dac44-student`, the default) or a Vocos (iSTFT) decoder trained on the same codes (`dac44-vocos`, chosen at
-decode time with `--decoder vocos`). Ogg
+count being a prefix of the full one. picotone decodes it with a Vocos (iSTFT) decoder trained on those codes
+(`dac44-vocos`). Ogg
 framing, the comment header, extensions (TLVs), pre-skip, granules, damage handling and loops work as for
 EnCodec; only the fixed part and the audio packets differ. The implementation is `src/pico/dac.rs`.
 
@@ -184,8 +183,8 @@ EnCodec; only the fixed part and the audio packets differ. The implementation is
 | varint | playable length | samples after trimming; only with flag bit 2 |
 | varint | end trim | decoded samples after the playable end that are padding; only with flag bit 2 |
 
-The hash names the code space, not a decoder: any decoder of DAC 44 kHz's codes (the student, the Vocos
-decoder, a later student, or DAC's own decoder) can play the stream, and a decoder must refuse a stream whose hash differs from its own
+The hash names the code space, not a decoder: any decoder of DAC 44 kHz's codes (picotone's Vocos
+decoder, a later one, or DAC's own decoder) can play the stream, and a decoder must refuse a stream whose hash differs from its own
 codebooks. The table hash names the entropy coder's model: a decoder needs that exact table (picotone looks for
 it by hash in its tables directory; it ships as `models/cx2_dac44.ecxm`) and refuses the stream without it.
 

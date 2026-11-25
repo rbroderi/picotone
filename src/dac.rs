@@ -1,31 +1,20 @@
-//! The HQ codec (`dac44-student`): DAC 44 kHz's own encoder and quantiser
-//! ([`DacEncoder`]), and a 512-wide student of its decoder ([`DacDecoder`]).
+//! The HQ codec's codes: DAC 44 kHz's own encoder and quantiser
+//! ([`DacEncoder`]), and the code-space helpers its decoder
+//! ([`crate::vocos::VocosDecoder`]) shares.
 //!
 //! DAC (descript-audio-codec, MIT, Copyright (c) 2023-present, Descript) codes
 //! mono 44.1 kHz audio as 9 codebooks of 1024 entries per latent frame, one
-//! frame per 512 samples. The student was distilled from DAC's decoder in
-//! `distill/` and exported by `distill/export_rust.py`:
-//!
-//! - **The input.** The codebook projections are folded into the input conv,
-//!   so each frame is 81 values: for each codebook, its 8 embedding values and
-//!   a 1 meaning "present". Codebooks above the tier give 9 zeros.
-//! - **The layers.** A k7 conv to 512 channels, then four blocks: Snake, a
-//!   transposed conv (stride 8, 8, 4, 2, halving the width), then three
-//!   residual units (Snake, a k7 conv dilated 1, 3 or 9, Snake, a 1x1 conv,
-//!   plus the input). Then Snake, a k7 conv to one channel and tanh. Every
-//!   conv is zero padded to keep its length; there is no normalisation and no
-//!   recurrence.
-//! - **Chunking.** An output sample depends on about ±10 latent frames, so a
-//!   long file is decoded in chunks with [`CONTEXT`] frames of context on each
-//!   side, which gives the same output as one whole-file decode.
+//! frame per 512 samples. A decoder reads the codes as a folded input: the
+//! codebook projections are folded into its first conv, so each frame is 81
+//! values: for each codebook, its 8 embedding values and a 1 meaning
+//! "present". Codebooks above the tier give 9 zeros.
 
 use anyhow::{Context as _, Result, ensure};
 use rayon::prelude::*;
 
 use crate::fastconv::FastConv;
-use crate::hqstream::{Context, HqDecoder};
 use crate::kernels;
-use crate::nn::{ConvGeometry, ConvKernel, ConvTranspose1d, Seq};
+use crate::nn::{ConvKernel, Seq};
 use crate::weights::Weights;
 use crate::winograd::WinogradConv;
 
@@ -43,34 +32,14 @@ pub(crate) const CODEBOOK_DIM: usize = 8;
 const IN_PER_CODEBOOK: usize = CODEBOOK_DIM + 1;
 /// Folded input values per frame, all codebooks.
 pub(crate) const FOLDED_INPUT: usize = CODEBOOKS * IN_PER_CODEBOOK;
-/// Upsampling of each block.
-const RATES: [usize; 4] = [8, 8, 4, 2];
 /// Dilations of each block's residual units.
 const DILATIONS: [usize; 3] = [1, 3, 9];
-/// Kernel size of every non-transposed conv except the 1x1s.
+/// Kernel size of every conv except the 1x1s, the k3 output and the strided ones.
 const KERNEL: usize = 7;
-/// Latent frames of context on each side of a chunk. The receptive field is
-/// a little under 10 frames each way; the chunking test checks this margin.
+/// Latent frames of context on each side of an encoder chunk.
 pub const CONTEXT: usize = 12;
-/// A decoded span starts and ends at multiples of this many frames.
-///
-/// The Winograd tiles start at a span's first output and hold 4 outputs of
-/// one dilation phase, so they repeat every `4 x 9` samples of the most
-/// dilated layer. Every stage's rate (8, 64, 256 and 512 samples per frame)
-/// times 9 frames is a multiple of 36, so spans on this grid tile every
-/// layer as a whole-file decode does (a span's last, partial tiles too), and
-/// a chunked decode equals it bit for bit.
-pub const ALIGN: usize = 9;
 /// Latent frames per chunk, before context (about 3 s).
 pub const CHUNK: usize = 256;
-/// Most frames (with their context) decoded at once across threads. The
-/// last block's activations take 64 KiB per frame and copy, three or four
-/// at a time, so this bounds the decode's memory at about 150 MiB above the
-/// weights however many threads there are; past that, the threads share
-/// each piece's convs. Unbounded, a 16-thread wasm decode of 30 s stereo
-/// peaked at 430–670 MiB, against 215–230 MiB at 512 and at the same speed
-/// within noise; 256 was about 15% slower.
-const FRAMES_IN_FLIGHT: usize = 512;
 
 /// FNV-1a 64 of codebook values as little-endian f32, `[codebook][entry][value]`.
 ///
@@ -116,28 +85,18 @@ struct SnakeConv {
     pad: usize,
 }
 
-/// Which kernel a conv runs on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Backend {
-    Packed,
-    Fast,
-}
-
-/// The stride-1 k7 convs run on Winograd in both models. Of the rest, the
-/// decoder's are packed and the encoder's run on faer (faster there; see
-/// [`crate::fastconv`]). All match PyTorch to float rounding.
+/// The wide stride-1 k7 convs run on Winograd; the rest run on faer
+/// (see [`crate::fastconv`]). Both match PyTorch to float rounding.
 #[derive(Debug, Clone)]
 enum Conv {
-    Packed(ConvKernel),
     Fast(FastConv),
-    /// The residual units' k7 convs, in both models (see [`crate::winograd`]).
+    /// The residual units' k7 convs (see [`crate::winograd`]).
     Winograd(WinogradConv),
 }
 
 impl Conv {
     fn apply(&self, x: &Seq) -> Result<Seq> {
         match self {
-            Self::Packed(c) => c.apply(x),
             Self::Fast(c) => c.apply(x),
             Self::Winograd(c) => c.apply(x),
         }
@@ -145,7 +104,7 @@ impl Conv {
 }
 
 /// Channels in and out from which a stride-1 k7 conv runs on Winograd; the
-/// narrow ends of the models gain little from it.
+/// narrow end of the encoder gains little from it.
 const WINOGRAD_MIN_CHANNELS: usize = 16;
 
 impl SnakeConv {
@@ -156,7 +115,6 @@ impl SnakeConv {
         conv: &str,
         (cout, cin, kernel): (usize, usize, usize),
         dilation: usize,
-        backend: Backend,
     ) -> Result<Self> {
         Self::build(
             w,
@@ -164,7 +122,6 @@ impl SnakeConv {
             (cout, cin, kernel),
             (1, dilation),
             (kernel - 1) * dilation / 2,
-            backend,
         )
     }
 
@@ -183,7 +140,6 @@ impl SnakeConv {
             (cout, cin, 2 * stride),
             (stride, 1),
             stride.div_ceil(2),
-            Backend::Fast,
         )
     }
 
@@ -193,35 +149,26 @@ impl SnakeConv {
         (cout, cin, kernel): (usize, usize, usize),
         (stride, dilation): (usize, usize),
         pad: usize,
-        backend: Backend,
     ) -> Result<Self> {
         let weight = w.get(&format!("{conv}.weight"), &[cout, cin, kernel])?;
         let bias = w.get(&format!("{conv}.bias"), &[cout])?;
         Ok(Self {
             snake: Snake::load(w, snake, cin)?,
-            conv: match backend {
-                _ if kernel == KERNEL && stride == 1 && cin.min(cout) >= WINOGRAD_MIN_CHANNELS => {
-                    Conv::Winograd(WinogradConv::from_torch(
-                        &weight,
-                        &bias,
-                        (cout, cin),
-                        dilation,
-                    )?)
-                }
-                Backend::Packed => Conv::Packed(ConvKernel::from_torch(
+            conv: if kernel == KERNEL && stride == 1 && cin.min(cout) >= WINOGRAD_MIN_CHANNELS {
+                Conv::Winograd(WinogradConv::from_torch(
+                    &weight,
+                    &bias,
+                    (cout, cin),
+                    dilation,
+                )?)
+            } else {
+                Conv::Fast(FastConv::from_torch(
                     &weight,
                     &bias,
                     (cout, cin, kernel),
                     stride,
                     dilation,
-                )?),
-                Backend::Fast => Conv::Fast(FastConv::from_torch(
-                    &weight,
-                    &bias,
-                    (cout, cin, kernel),
-                    stride,
-                    dilation,
-                )?),
+                )?)
             },
             pad,
         })
@@ -257,13 +204,7 @@ struct Residual {
 
 impl Residual {
     /// Residual unit `r` of the block at `prefix`, `channels` wide.
-    fn load(
-        w: &Weights<'_>,
-        prefix: &str,
-        channels: usize,
-        dilation: usize,
-        backend: Backend,
-    ) -> Result<Self> {
+    fn load(w: &Weights<'_>, prefix: &str, channels: usize, dilation: usize) -> Result<Self> {
         Ok(Self {
             first: SnakeConv::load(
                 w,
@@ -271,7 +212,6 @@ impl Residual {
                 &format!("{prefix}.conv1"),
                 (channels, channels, KERNEL),
                 dilation,
-                backend,
             )?,
             second: SnakeConv::load(
                 w,
@@ -279,24 +219,16 @@ impl Residual {
                 &format!("{prefix}.conv2"),
                 (channels, channels, 1),
                 1,
-                backend,
             )?,
         })
     }
 
     /// The three residual units of the block at `prefix`.
-    fn load_three(
-        w: &Weights<'_>,
-        prefix: &str,
-        channels: usize,
-        backend: Backend,
-    ) -> Result<Vec<Self>> {
+    fn load_three(w: &Weights<'_>, prefix: &str, channels: usize) -> Result<Vec<Self>> {
         DILATIONS
             .iter()
             .enumerate()
-            .map(|(r, &dilation)| {
-                Self::load(w, &format!("{prefix}.res{r}"), channels, dilation, backend)
-            })
+            .map(|(r, &dilation)| Self::load(w, &format!("{prefix}.res{r}"), channels, dilation))
             .collect()
     }
 
@@ -305,198 +237,6 @@ impl Residual {
         let mut out = x;
         out.add_assign(&y)?;
         Ok(out)
-    }
-}
-
-/// Snake, a transposed conv, then three residual units.
-#[derive(Debug, Clone)]
-struct Block {
-    snake: Snake,
-    up: ConvTranspose1d,
-    residuals: Vec<Residual>,
-}
-
-impl Block {
-    fn forward(&self, x: Seq) -> Result<Seq> {
-        let mut x = x;
-        self.snake.apply(x.data_mut());
-        let mut h = self.up.forward(&x, false)?;
-        drop(x);
-        for residual in &self.residuals {
-            h = residual.forward(h)?;
-        }
-        Ok(h)
-    }
-}
-
-/// The student decoder.
-#[derive(Debug, Clone)]
-pub struct DacDecoder {
-    width: usize,
-    /// `[codebook][entry][value]`.
-    codebooks: Vec<f32>,
-    input: ConvKernel,
-    blocks: Vec<Block>,
-    output: SnakeConv,
-}
-
-impl DacDecoder {
-    /// Builds the decoder from `export_rust.py`'s tensors.
-    ///
-    /// # Errors
-    /// Fails when a tensor is missing or has the wrong shape.
-    pub fn from_weights(w: &Weights<'_>, width: usize) -> Result<Self> {
-        ensure!(
-            width.is_multiple_of(1 << RATES.len()),
-            "width {width} does not halve {} times",
-            RATES.len()
-        );
-        let codebooks = w.get("codebooks", &[CODEBOOKS, CODEBOOK_SIZE, CODEBOOK_DIM])?;
-        let cin = CODEBOOKS * IN_PER_CODEBOOK;
-        let input = ConvKernel::from_torch(
-            &w.get("input.weight", &[width, cin, KERNEL])?,
-            &w.get("input.bias", &[width])?,
-            (width, cin, KERNEL),
-            1,
-            1,
-        )?;
-        let mut blocks = Vec::with_capacity(RATES.len());
-        let mut c = width;
-        for (b, &stride) in RATES.iter().enumerate() {
-            let cout = c / 2;
-            let p = format!("block{b}");
-            let up = ConvTranspose1d::new(
-                &w.get(&format!("{p}.up.weight"), &[c, cout, 2 * stride])?,
-                &w.get(&format!("{p}.up.bias"), &[cout])?,
-                ConvGeometry {
-                    in_channels: c,
-                    out_channels: cout,
-                    kernel: 2 * stride,
-                    stride,
-                    dilation: 1,
-                },
-                false,
-                0.0,
-                None,
-            )?;
-            let residuals = Residual::load_three(w, &p, cout, Backend::Packed)?;
-            blocks.push(Block {
-                snake: Snake::load(w, &format!("{p}.snake.alpha"), c)?,
-                up,
-                residuals,
-            });
-            c = cout;
-        }
-        let output = SnakeConv::load(
-            w,
-            "output.snake.alpha",
-            "output.conv",
-            (1, c, KERNEL),
-            1,
-            Backend::Packed,
-        )?;
-        Ok(Self {
-            width,
-            codebooks,
-            input,
-            blocks,
-            output,
-        })
-    }
-
-    /// Loads `dac44_student.safetensors` (width 512).
-    ///
-    /// # Errors
-    /// Fails when the file is missing or invalid.
-    pub fn load(path: &std::path::Path) -> Result<Self> {
-        let w = Weights::load(path)?;
-        Self::from_weights(&w, 512)
-            .with_context(|| format!("building the decoder from {}", path.display()))
-    }
-
-    /// Channels after the input conv.
-    #[must_use]
-    pub const fn width(&self) -> usize {
-        self.width
-    }
-
-    /// Hash of the codebooks the decoder reads codes with; a stream must name
-    /// the same.
-    #[must_use]
-    pub fn codebook_hash(&self) -> u64 {
-        codebook_hash(&self.codebooks)
-    }
-
-    /// The folded input of frames `start..end`: `[frames, 81]`.
-    fn input_frames(&self, codes: &[u16], num_codebooks: usize, start: usize, end: usize) -> Seq {
-        let mut x = Seq::zeros(end - start, FOLDED_INPUT);
-        write_folded_input(
-            &self.codebooks,
-            &codes[start * num_codebooks..end * num_codebooks],
-            num_codebooks,
-            x.data_mut(),
-        );
-        x
-    }
-
-    /// Decodes one span of frames as if it were the whole file: `[frames * 512]` samples.
-    fn decode_span(&self, x: &Seq) -> Result<Vec<f32>> {
-        let mut h = conv_same(&self.input, x)?;
-        for block in &self.blocks {
-            h = block.forward(h)?;
-        }
-        let mut y = self.output.forward(&h)?.into_data();
-        for v in &mut y {
-            *v = v.tanh();
-        }
-        Ok(y)
-    }
-
-    /// Builds the decoder from the bytes of `dac44_student.safetensors`.
-    ///
-    /// # Errors
-    /// Fails when the bytes are not a valid decoder.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let w = Weights::from_bytes(bytes)?;
-        Self::from_weights(&w, 512).context("building the HQ decoder")
-    }
-
-    /// Decodes codes `[frames][num_codebooks]` (row-major) to mono samples,
-    /// `frames * 512` of them, chunk by chunk.
-    ///
-    /// # Errors
-    /// Fails when `num_codebooks` is not 1 to 9, a code is out of range or the
-    /// length is not a whole number of frames.
-    pub fn decode(&self, codes: &[u16], num_codebooks: usize) -> Result<Vec<f32>> {
-        self.decode_chunked(codes, num_codebooks, CHUNK)
-    }
-
-    /// [`DacDecoder::decode`] with a given chunk length. Every chunk length
-    /// gives the same samples, bit for bit (see [`ALIGN`]).
-    ///
-    /// # Errors
-    /// See [`DacDecoder::decode`].
-    pub fn decode_chunked(
-        &self,
-        codes: &[u16],
-        num_codebooks: usize,
-        chunk: usize,
-    ) -> Result<Vec<f32>> {
-        check_codes(codes, num_codebooks)?;
-        ensure!(chunk > 0, "chunk length must be positive");
-        let frames = codes.len() / num_codebooks;
-        // Chunks run in parallel: much of a chunk's work (Snake, padding,
-        // the transposed convs) is element-wise and runs on one thread, so
-        // splitting only the matrix products leaves most cores idle.
-        let parts = (0..frames.div_ceil(chunk))
-            .into_par_iter()
-            .map(|i| {
-                let start = i * chunk;
-                let end = (start + chunk).min(frames);
-                self.decode_range(codes, num_codebooks, 0, start..end, frames)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(parts.concat())
     }
 }
 
@@ -542,33 +282,6 @@ pub(crate) fn check_codes(codes: &[u16], num_codebooks: usize) -> Result<()> {
         "a code is out of range"
     );
     Ok(())
-}
-
-impl HqDecoder for DacDecoder {
-    fn name(&self) -> &'static str {
-        "dac44_student"
-    }
-
-    fn codebook_hash(&self) -> u64 {
-        Self::codebook_hash(self)
-    }
-
-    fn context(&self) -> Context {
-        Context {
-            frames: CONTEXT,
-            align: ALIGN,
-        }
-    }
-
-    fn frames_in_flight(&self) -> usize {
-        FRAMES_IN_FLIGHT
-    }
-
-    fn decode_window(&self, codes: &[u16], num_codebooks: usize) -> Result<Vec<f32>> {
-        check_codes(codes, num_codebooks)?;
-        let x = self.input_frames(codes, num_codebooks, 0, codes.len() / num_codebooks);
-        self.decode_span(&x)
-    }
 }
 
 /// A plain k7 conv that keeps its input's length (zero padding 3 each side).
@@ -683,11 +396,12 @@ impl Quantizer {
 }
 
 /// DAC 44 kHz's encoder and quantiser (MIT, Descript), as exported by
-/// `distill/export_encoder.py`. The HQ codec's codes are DAC's own: the
-/// student replaces only the decoder.
+/// `distill/export_encoder.py`. The HQ codec's codes are DAC's own: only
+/// the decoder is picotone's.
 ///
 /// The encoder is a k7 conv to 64 channels, four blocks (three residual
-/// units like the decoder's, then Snake and a conv of stride 2, 4, 8, 8 that
+/// units, each Snake, a k7 conv dilated 1, 3 or 9, Snake, a 1x1 conv, plus
+/// the input; then Snake and a conv of stride 2, 4, 8, 8 that
 /// doubles the width), then Snake and a k3 conv to the 1024-wide latent.
 /// The quantiser is 9 residual stages, each projecting to 8 values and
 /// picking the entry with the largest cosine.
@@ -717,7 +431,7 @@ impl DacEncoder {
         for (b, &stride) in ENCODER_STRIDES.iter().enumerate() {
             let p = format!("block{b}");
             blocks.push(EncoderBlock {
-                residuals: Residual::load_three(w, &p, c, Backend::Fast)?,
+                residuals: Residual::load_three(w, &p, c)?,
                 down: SnakeConv::load_down(
                     w,
                     &format!("{p}.snake.alpha"),
@@ -734,7 +448,6 @@ impl DacEncoder {
             "output.conv",
             (LATENT_DIM, c, 3),
             1,
-            Backend::Fast,
         )?;
         let quantizers = (0..CODEBOOKS)
             .map(|i| Quantizer::load(w, i))
@@ -757,7 +470,8 @@ impl DacEncoder {
             .with_context(|| format!("building the encoder from {}", path.display()))
     }
 
-    /// Hash of the codebooks the codes index (the same as the decoder's).
+    /// Hash of the codebooks the codes index (the same as the decoder's,
+    /// [`crate::hqstream::HqDecoder::codebook_hash`]).
     #[must_use]
     pub fn codebook_hash(&self) -> u64 {
         codebook_hash(self.quantizers.iter().flat_map(|q| &q.codebook))

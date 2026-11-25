@@ -27,7 +27,7 @@ use picotone::{ModelKind, cx2};
 )]
 struct Cli {
     /// Directory holding the model weights: `dac44_encoder.safetensors` and
-    /// `dac44_student.safetensors` (HQ), `encodec_24khz.{json,safetensors}` and
+    /// `dac44_vocos.safetensors` (HQ), `encodec_24khz.{json,safetensors}` and
     /// `encodec_48khz.{json,safetensors}`. Defaults to `$PICOTONE_WEIGHTS` (or the older
     /// `$ENCODEC_WEIGHTS`), then `weights/` next to the executable, then the project.
     #[arg(long, global = true)]
@@ -90,10 +90,9 @@ enum Command {
 /// The models `--model` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ModelName {
-    /// HQ (the default): DAC 44 kHz's encoder and picotone's distilled decoder; 44.1 kHz, mono
-    /// or stereo, 1 to 9 codebooks per channel (0.86 kbps each).
-    #[value(name = "dac44-student")]
-    Dac44Student,
+    /// HQ (the default): DAC 44 kHz's encoder and picotone's Vocos decoder (`dac44-vocos`);
+    /// 44.1 kHz, mono or stereo, 1 to 9 codebooks per channel (0.86 kbps each).
+    Hq,
     /// `encodec_48khz`: 48 kHz stereo, bandwidths 3, 6, 12, 24 kbps.
     #[value(name = "encodec-48k")]
     Encodec48k,
@@ -144,7 +143,7 @@ fn plan(options: &EncodeOptions, input_channels: usize) -> Result<Plan> {
     let stereo_input = options.preset.is_some() || input_channels >= 2;
     let model = options.model.unwrap_or_else(|| {
         if !options.fast && options.preset.is_none() {
-            ModelName::Dac44Student
+            ModelName::Hq
         } else if format == ChannelFormat::Stereo || (format == ChannelFormat::Auto && stereo_input)
         {
             ModelName::Encodec48k
@@ -153,15 +152,15 @@ fn plan(options: &EncodeOptions, input_channels: usize) -> Result<Plan> {
         }
     });
     let plan = match (model, format) {
-        (ModelName::Dac44Student, ChannelFormat::Mono) => Plan::Hq {
+        (ModelName::Hq, ChannelFormat::Mono) => Plan::Hq {
             channels: 1,
             auto_mono: false,
         },
-        (ModelName::Dac44Student, ChannelFormat::Stereo) => Plan::Hq {
+        (ModelName::Hq, ChannelFormat::Stereo) => Plan::Hq {
             channels: 2,
             auto_mono: false,
         },
-        (ModelName::Dac44Student, ChannelFormat::Auto) => Plan::Hq {
+        (ModelName::Hq, ChannelFormat::Auto) => Plan::Hq {
             channels: if input_channels >= 2 { 2 } else { 1 },
             auto_mono: true,
         },
@@ -316,9 +315,6 @@ struct WavOptions {
     /// cx2 table to decode with, instead of the one the tables directory holds for the file.
     #[arg(long)]
     table: Option<PathBuf>,
-    /// HQ decoder: any decoder of DAC 44 kHz codes plays any HQ file.
-    #[arg(long, value_enum, default_value_t = hq::DecoderChoice::Student)]
-    decoder: hq::DecoderChoice,
 }
 
 fn main() -> Result<()> {
@@ -363,7 +359,7 @@ fn main() -> Result<()> {
                         options.table.as_deref(),
                         stream.info.table_hash,
                     )?;
-                    let audio = hq::decode(&weights(), &table, stream, options.decoder)?;
+                    let audio = hq::decode(&weights(), &table, stream)?;
                     write_wav(output, &audio, options)?;
                 }
                 Codec::Encodec(_) => {
@@ -386,7 +382,7 @@ fn main() -> Result<()> {
                 let stream = hq::parse(&bytes)?;
                 let table =
                     hq::find_table(&tables(), wav.table.as_deref(), stream.info.table_hash)?;
-                let audio = hq::decode(&weights(), &table, stream, wav.decoder)?;
+                let audio = hq::decode(&weights(), &table, stream)?;
                 write_wav(output, &audio, wav)?;
             }
             Encoded::Encodec { model, bytes, .. } => {

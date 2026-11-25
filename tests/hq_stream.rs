@@ -1,30 +1,32 @@
-//! The HQ decoder in parts: chunked network decodes, the streaming decode of
-//! [`HqStream`] (every layout, part size and seek point) and its agreement
-//! with a whole-file decode, bit for bit.
+//! The streaming decode of [`HqStream`] (every layout, part size and seek
+//! point) and its agreement with a whole-file decode, bit for bit. The
+//! decoder is the small Vocos fixture (`tests/data/vocos_tiny`), so the test
+//! needs no weights.
 
 use std::path::Path;
 use std::sync::OnceLock;
 
 use anyhow::{Context as _, Result};
 use picotone::cx2::hq::HqModel;
-use picotone::dac::{DacDecoder, HOP};
+use picotone::dac::HOP;
 use picotone::hqstream::{HqDecoder, HqStream};
 use picotone::layout::Trimmer;
 use picotone::nn::Seq;
 use picotone::pico::{self, ChannelLayout, DacInfo, DacStream};
 use picotone::pstereo;
+use picotone::vocos::VocosDecoder;
 
-fn decoder() -> Result<&'static DacDecoder> {
-    static DECODER: OnceLock<Option<DacDecoder>> = OnceLock::new();
+fn decoder() -> Result<&'static VocosDecoder> {
+    static DECODER: OnceLock<Option<VocosDecoder>> = OnceLock::new();
     DECODER
         .get_or_init(|| {
-            DacDecoder::load(
-                &Path::new(env!("CARGO_MANIFEST_DIR")).join("weights/dac44_student.safetensors"),
+            VocosDecoder::load(
+                &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/vocos_tiny.safetensors"),
             )
             .ok()
         })
         .as_ref()
-        .context("weights/dac44_student.safetensors is missing or malformed")
+        .context("tests/data/vocos_tiny.safetensors is missing or malformed")
 }
 
 fn table() -> Result<&'static HqModel> {
@@ -48,37 +50,6 @@ fn codes(frames: usize, n: usize, seed: u32) -> Vec<u16> {
             u16::try_from(state >> 22).unwrap_or(0)
         })
         .collect()
-}
-
-#[test]
-fn chunked_decodes_equal_the_whole_file_bit_for_bit() -> Result<()> {
-    let d = decoder()?;
-    for (frames, n) in [(300, 9), (131, 3)] {
-        let c = codes(frames, n, 11);
-        let whole = d.decode_chunked(&c, n, 100_000)?;
-        assert_eq!(whole.len(), frames * HOP);
-        for chunk in [1, 7, 40, 80, 256] {
-            let parts = d.decode_chunked(&c, n, chunk)?;
-            let bad: Vec<usize> = whole
-                .iter()
-                .zip(&parts)
-                .enumerate()
-                .filter(|(_, (a, b))| a.to_bits() != b.to_bits())
-                .map(|(i, _)| i)
-                .collect();
-            let max = whole
-                .iter()
-                .zip(&parts)
-                .map(|(a, b)| (a - b).abs())
-                .fold(0.0_f32, f32::max);
-            assert!(
-                bad.is_empty(),
-                "{frames} frames q{n}, chunk {chunk}: {} samples differ, by up to {max:e}",
-                bad.len()
-            );
-        }
-    }
-    Ok(())
 }
 
 /// A test stream and its expected output.

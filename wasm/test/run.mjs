@@ -163,9 +163,8 @@ const SEEK_CASES = [
   "hq_lr_q5_4s",
   "hq_ms_q9_streamed",
   "hq_ps_q3_4s",
-  "hqv_ms_q9_streamed",
 ];
-const HQ = "dac44-student";
+const HQ = "hq";
 const CASES = [
   { name: "mono_sfx_1s", mode: "mono", rate: 24000, make: () => effect(24000, 1.2, 7) },
   { name: "mono_6s_streamed", mode: "mono", rate: 24000, make: () => effect(24000, 6, 11), args: [...["-b", "6"], "--no-length", "--page-length", "30"] },
@@ -182,7 +181,7 @@ const CASES = [
   { name: "stereo_loop_4s_gapless", mode: "stereo", rate: 48000, make: () => loop(48000, 4), args: [...B6, "--loop"], seam: true, maxSeamRatio: 3 },
   { name: "stereo_music_6s_gapless", mode: "stereo", rate: 48000, make: () => music(48000, 6, 8), args: ["--preset", "music6", "--beam", "1", "--loop"], seam: true, maxSeamRatio: 3 },
   { name: "mono_loop_3s_gapless", mode: "mono", rate: 24000, make: () => [loop(24000, 3)[0]], args: [...B6, "--loop"], seam: true, maxSeamRatio: 3 },
-  // HQ (DAC 44.1 kHz codes, the student decoder): every layout, several codebook counts.
+  // HQ (DAC 44.1 kHz codes, the Vocos decoder): every layout, several codebook counts.
   { name: "hq_mono_q9_3s", model: HQ, rate: 44100, make: () => effect(44100, 3, 21), args: ["--codebooks", "9", "--channel-format", "mono"] },
   { name: "hq_lr_q5_4s", model: HQ, rate: 44100, make: () => music(44100, 4, 31), args: ["--codebooks", "5", "--stereo", "lr"] },
   {
@@ -207,34 +206,7 @@ const CASES = [
         { name: "stereo_music_75s", mode: "stereo", rate: 48000, make: () => music(48000, 75, 2) },
         ...listenCases,
       ]),
-  // The same HQ files decoded by the Vocos network (when ../weights has it), last, so the
-  // worker switches its HQ decoder once. Native references use `--decoder vocos`.
-  ...(existsSync(join(repo, "weights", "dac44_vocos.safetensors"))
-    ? [
-        { name: "hqv_mono_q9_3s", model: HQ, decoder: "vocos", rate: 44100, make: () => effect(44100, 3, 21), args: ["--codebooks", "9", "--channel-format", "mono"] },
-        {
-          name: "hqv_ms_q9_streamed",
-          model: HQ,
-          decoder: "vocos",
-          rate: 44100,
-          make: () => music(44100, 4, 32),
-          args: ["--codebooks", "9", "--side-codebooks", "4", "--stereo", "ms", "--no-length", "--page-length", "30"],
-        },
-        { name: "hqv_ps_q3_4s", model: HQ, decoder: "vocos", rate: 44100, make: () => music(44100, 4, 33), args: ["--codebooks", "3", "--stereo", "parametric"] },
-        ...(quick
-          ? []
-          : [
-              { name: "hqv_stereo_q5_30s", model: HQ, decoder: "vocos", rate: 44100, make: () => music(44100, 30, 35), args: ["--codebooks", "5", "--stereo", "lr"] },
-              { name: "hqv_stereo_q9_30s", model: HQ, decoder: "vocos", rate: 44100, make: () => music(44100, 30, 35), args: ["--codebooks", "9", "--stereo", "lr"] },
-              { name: "hqv_mono_q9_30s", model: HQ, decoder: "vocos", rate: 44100, make: () => [music(44100, 30, 35)[0]], args: ["--codebooks", "9", "--channel-format", "mono"] },
-            ]),
-      ]
-    : []),
 ].filter((c) => only === null || only.includes(c.name));
-/** The browser's name for a case's HQ network (undefined: the default). */
-const hqDecoderOf = (c) => (c.decoder === "vocos" ? "dac44_vocos" : undefined);
-/** The `picotone decode` arguments that pick a case's HQ network. */
-const decoderArgs = (c) => (c.decoder === undefined ? [] : ["--decoder", c.decoder]);
 
 // ---------- native references ----------
 
@@ -262,26 +234,26 @@ for (const c of CASES) {
   const stamp = join(dir, `${c.name}.args`);
   const args = c.args ?? B6;
   // The references depend on the exe, the weights and the tables too, not only the arguments.
-  const stampText = [...args, ...decoderArgs(c), inputsStamp].join(" ");
+  const stampText = [...args, inputsStamp].join(" ");
   const stale = !existsSync(stamp) || readFileSync(stamp, "utf8") !== stampText;
   if (stale || !existsSync(ref) || !existsSync(pico) || process.argv.includes("--fresh")) {
     if (c.src) copyFileSync(c.src, wav);
     else writeWav16(wav, c.rate, c.make());
     run(["encode", wav, pico, "--model", c.model ?? (c.mode === "mono" ? "encodec-24k" : "encodec-48k"), ...args]);
     writeFileSync(stamp, stampText);
-    run(["decode", pico, ref, "--float", ...decoderArgs(c)]);
+    run(["decode", pico, ref, "--float"]);
     console.log(`made ${c.name}: ${statSync(pico).size} bytes .pico`);
   }
 }
 
 // Native speed for comparison (single thread and all threads).
 const nativeSpeed = {};
-const NATIVE_TIMED = ["stereo_8s", "mono_6s", "hq_stereo_q5_30s", "hq_stereo_q9_30s", "hqv_stereo_q5_30s", "hqv_stereo_q9_30s"];
+const NATIVE_TIMED = ["stereo_8s", "mono_6s", "hq_stereo_q5_30s", "hq_stereo_q9_30s"];
 for (const c of CASES.filter((k) => NATIVE_TIMED.includes(k.name))) {
   for (const threads of [1, 0]) {
     const args = threads ? ["--threads", "1"] : [];
     const t0 = performance.now();
-    const r = spawnSync(exe, ["--weights", weights, ...args, "decode", join(dir, `${c.name}.pico`), join(dir, "native-tmp.wav"), ...decoderArgs(c)]);
+    const r = spawnSync(exe, ["--weights", weights, ...args, "decode", join(dir, `${c.name}.pico`), join(dir, "native-tmp.wav")]);
     if (r.status !== 0) throw new Error(`native decode failed`);
     const secs = (performance.now() - t0) / 1000;
     nativeSpeed[`${c.name}/${threads ? 1 : "all"}`] = secs;
@@ -341,10 +313,9 @@ try {
       }
       for (const c of CASES) {
         const r = await page.evaluate(
-          (name, seamCheck, hqDecoder) => window.picotoneTest.runCase(name, { stream: true, seamCheck, hqDecoder }),
+          (name, seamCheck) => window.picotoneTest.runCase(name, { stream: true, seamCheck }),
           c.name,
           c.seam === true,
-          hqDecoderOf(c),
         );
         r.label = c.name;
         r.build = env.build.kind;
@@ -379,15 +350,12 @@ try {
       for (const c of CASES.filter((k) => SEEK_CASES.includes(k.name))) {
         for (const fraction of [0.37, 0.81]) {
           const r = await page.evaluate(
-            (name, f, hqDecoder) =>
+            (name, f) =>
               fetch(`/test-data/${name}.pico`)
                 .then((res) => res.arrayBuffer())
-                .then((b) =>
-                  window.picotoneTest.runCase(name, { stream: false, startSample: Math.floor(f * window.picotoneInfo(b)), hqDecoder }),
-                ),
+                .then((b) => window.picotoneTest.runCase(name, { stream: false, startSample: Math.floor(f * window.picotoneInfo(b)) })),
             c.name,
             fraction,
-            hqDecoderOf(c),
           );
           const ok = r.parity.snrDb === null || r.parity.snrDb >= MIN_SNR_DB;
           if (!ok) failed = true;
@@ -398,10 +366,10 @@ try {
         }
       }
       // One single-threaded worker per coded channel: n workers decoding a mono file at once.
-      for (const c of CASES.filter((k) => ["hq_mono_q9_30s", "hqv_mono_q9_30s"].includes(k.name))) {
+      for (const c of CASES.filter((k) => k.name === "hq_mono_q9_30s")) {
         if (quick || env.build.kind !== "single" || !env.build.relaxedSimd) break;
         for (const workers of [1, 2]) {
-          const r = await page.evaluate((name, n, d) => window.picotoneConcurrent(name, n, d), c.name, workers, hqDecoderOf(c));
+          const r = await page.evaluate((name, n) => window.picotoneConcurrent(name, n), c.name, workers);
           const channelSeconds = r.seconds * workers;
           console.log(
             `   ${workers} worker(s) x ${c.name} at once: ${(r.wallMs / 1000).toFixed(2)} s wall = ` +

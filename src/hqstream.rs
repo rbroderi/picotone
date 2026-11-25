@@ -11,8 +11,8 @@
 //! before it.
 //!
 //! [`HqDecoder`] is the seam between the stream and the network:
-//! [`crate::dac::DacDecoder`] (the distilled student) implements it, and any
-//! other decoder of DAC 44 kHz codes can too. The stream needs only to know
+//! [`crate::vocos::VocosDecoder`] implements it, and any other decoder of
+//! DAC 44 kHz codes can too. The stream needs only to know
 //! how much context the network needs around a span of frames.
 
 use std::fmt;
@@ -60,14 +60,6 @@ pub trait HqDecoder: fmt::Debug + Send + Sync {
     /// pieces, which recompute less of it.
     fn piece(&self) -> usize {
         dac::CHUNK
-    }
-
-    /// Most frames, counting each piece's context, that should be decoded
-    /// at once across threads. A decoder whose activations are large per
-    /// frame bounds this, so that its memory does not grow with the thread
-    /// count; the threads then share each piece's layers instead.
-    fn frames_in_flight(&self) -> usize {
-        usize::MAX
     }
 
     /// Decodes `codes`, `[frames][num_codebooks]`, as if they were a whole
@@ -436,12 +428,8 @@ impl<'a> HqStream<'a> {
         let shortest = MIN_PIECE_CONTEXTS * context.frames.max(1);
         // The frames a piece decodes beyond its own: context both sides,
         // rounded out to the alignment.
-        let extra = 2 * context.frames + context.align;
-        let budget = self.decoder.frames_in_flight();
-        let at_once = rayon::current_num_threads()
-            .min(budget / (shortest + extra))
-            .max(1);
-        let spread = at_once
+        let spread = rayon::current_num_threads()
+            .max(1)
             .div_ceil(channels)
             .min(range.len() / shortest)
             .max(1);
@@ -458,25 +446,18 @@ impl<'a> HqStream<'a> {
                 })
             })
             .collect();
-        // Jobs run in waves of at most `budget` frames in flight.
-        let wave = (budget / (size + extra)).max(1);
-        let mut decoded = Vec::with_capacity(jobs.len());
-        for batch in jobs.chunks(wave) {
-            decoded.extend(
-                batch
-                    .par_iter()
-                    .map(|(c, piece)| {
-                        self.decoder.decode_range(
-                            &self.codes[*c],
-                            self.stream.info.codebooks[*c],
-                            self.codes_first,
-                            piece.clone(),
-                            self.frames,
-                        )
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            );
-        }
+        let decoded = jobs
+            .par_iter()
+            .map(|(c, piece)| {
+                self.decoder.decode_range(
+                    &self.codes[*c],
+                    self.stream.info.codebooks[*c],
+                    self.codes_first,
+                    piece.clone(),
+                    self.frames,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(decoded
             .chunks(pieces.max(1))
             .map(<[Vec<f32>]>::concat)

@@ -18,7 +18,6 @@ import type {
   BuildPreference,
   ChunkResponse,
   DecodeStats,
-  HqDecoderName,
   ModelInfo,
   ModelName,
   Request,
@@ -29,7 +28,6 @@ export type {
   BuildInfo,
   BuildPreference,
   DecodeStats,
-  HqDecoderName,
   ModelInfo,
   ModelName,
 } from "./protocol.js";
@@ -240,17 +238,13 @@ export class PicotoneDecoder {
    * Fetches (once; later calls hit the cache) and builds a decoder-only model,
    * with the cx2 tables `cx2-tables.json` lists for it. Both models can be
    * loaded at the same time; `decode` picks the one the file names and the
-   * table by the hash the file stores.
-   *
-   * For `dac44`, `hqDecoder` picks the network (default `dac44_student`;
-   * `dac44_vocos` does about a fifth of the work). Loading again with the
-   * other one switches to it; the old weights stay in the worker's memory.
+   * table by the hash the file stores. `dac44` (HQ) loads the `dac44_vocos`
+   * network.
    */
   loadModel(
     name: ModelName,
     options: {
       readonly onProgress?: (loaded: number, total: number) => void;
-      readonly hqDecoder?: HqDecoderName;
     } = {},
   ): Promise<ModelInfo> {
     const id = this.#nextId++;
@@ -262,7 +256,6 @@ export class PicotoneDecoder {
           model: name,
           modelsUrl: this.#modelsUrl,
           cacheName: this.#cacheName,
-          ...(options.hqDecoder === undefined ? {} : { hqDecoder: options.hqDecoder }),
         },
         (message) => {
           if (message.type === "loadProgress") {

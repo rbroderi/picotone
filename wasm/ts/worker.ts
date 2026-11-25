@@ -89,8 +89,6 @@ interface Built {
   readonly network: string;
   readonly tables: string[];
 }
-/** Every network built so far, by network name. */
-const built = new Map<string, Built>();
 /** The network each model's files decode with, by model name. */
 const models = new Map<string, Built>();
 let tables: WasmTables | null = null;
@@ -303,14 +301,12 @@ async function openCache(name: string | null): Promise<Cache | null> {
 async function load(request: LoadRequest): Promise<void> {
   const { pkg, memory } = await ready();
   const t0 = performance.now();
-  // HQ files (`dac44` codes) name their code space, not a decoder: any
-  // decoder of DAC 44 kHz codes plays them.
-  const network = request.model === "dac44" ? (request.hqDecoder ?? "dac44_student") : request.model;
-  const existing = built.get(network);
+  // HQ files (`dac44` codes) name their code space, not a decoder; the
+  // `dac44_vocos` network decodes them.
+  const network = request.model === "dac44" ? "dac44_vocos" : request.model;
+  const existing = models.get(request.model);
   if (existing !== undefined) {
-    // Weights stay in wasm memory for the worker's lifetime; reuse them, and
-    // make this network the one the model's files decode with.
-    models.set(request.model, existing);
+    // Weights stay in wasm memory for the worker's lifetime; reuse them.
     post({
       type: "loaded",
       id: request.id,
@@ -366,10 +362,7 @@ async function load(request: LoadRequest): Promise<void> {
     loadedTables.push(hash);
     tableBytes += table.fetched;
   }
-  // Switching HQ decoders keeps both in wasm memory (it never shrinks), so
-  // switching back costs nothing; terminate the worker to release them.
   const entry = { decoder, network, tables: loadedTables };
-  built.set(network, entry);
   models.set(request.model, entry);
   post({
     type: "loaded",

@@ -6,17 +6,9 @@
 /**
  * The code spaces a `.pico` file can use, as its header names them: the two
  * published EnCodec models, and `dac44`, the HQ codec's DAC 44.1 kHz codes
- * (decoded by the `dac44_student` or `dac44_vocos` network).
+ * (decoded by the `dac44_vocos` network).
  */
 export type ModelName = "encodec_24khz" | "encodec_48khz" | "dac44";
-
-/**
- * The networks that decode `dac44` codes. An HQ file names its code space,
- * not a decoder, so either plays any HQ file: `dac44_student` (the default,
- * a distilled DAC decoder) or `dac44_vocos` (Vocos, an iSTFT decoder with
- * about a fifth of the work).
- */
-export type HqDecoderName = "dac44_student" | "dac44_vocos";
 
 /** Which WebAssembly build to run. `auto` picks `threaded` when possible. */
 export type BuildPreference = "auto" | "threaded" | "single";
@@ -43,7 +35,7 @@ export interface BuildInfo {
 /** A loaded decoder model. */
 export interface ModelInfo {
   readonly name: ModelName;
-  /** The network that decodes it: the model name, or for `dac44` an {@link HqDecoderName}. */
+  /** The network that decodes it: the model name, or `dac44_vocos` for `dac44`. */
   readonly network: string;
   readonly sampleRate: number;
   readonly channels: number;
@@ -111,8 +103,6 @@ export interface LoadRequest {
   readonly modelsUrl: string;
   /** Cache Storage bucket for model files, or null to rely on the HTTP cache. */
   readonly cacheName: string | null;
-  /** For `dac44`, the network to decode with (default `dac44_student`). */
-  readonly hqDecoder?: HqDecoderName;
 }
 
 export interface DecodeRequest {
