@@ -1,0 +1,25 @@
+{
+ "model": "dac44-stftenc",
+ "arch": {
+  "enc": "stft",
+  "dim": 8,
+  "blocks": 8,
+  "mlp": 24,
+  "ffts": [
+   2048,
+   512
+  ],
+  "power": 0.3,
+  "embed_k": 1,
+  "latent": 32
+ },
+ "sample_rate": 44100,
+ "frame": 512,
+ "channels": 4106,
+ "receptive_frames": 24,
+ "reach_samples": 768,
+ "params": 37208,
+ "step": 0,
+ "weights": "random init (tools/stftenc_fixture.py)",
+ "licences": "none (random-init test fixture)"
+}

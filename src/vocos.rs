@@ -50,14 +50,14 @@ const KERNEL: usize = 7;
 const EPS: f32 = 1e-6;
 /// Frames per tile of the Linears: the wide activations of one tile stay in
 /// cache, and only the residual stream spans the whole window.
-const TILE: usize = 64;
+pub(crate) const TILE: usize = 64;
 /// Most frames one network call decodes (before context): with 29 frames of
 /// context per side, long pieces recompute little of it.
 pub const PIECE: usize = 1024;
 
-/// One `ConvNeXt` block, folded.
+/// One `ConvNeXt` block, folded (shared with [`crate::stftenc`]).
 #[derive(Debug, Clone)]
-struct Block {
+pub(crate) struct Block {
     /// The depthwise conv, `[tap][channel]`.
     taps: Vec<f32>,
     dw_bias: Vec<f32>,
@@ -98,7 +98,7 @@ pub struct VocosDecoder {
 /// optional `LayerNorm` affine part before it folded in (`w diag(scale)`,
 /// `b + w shift`) and an optional per-output scale after it, in double
 /// precision. Each folded value is written straight into the packed matrix.
-fn fold_linear(
+pub(crate) fn fold_linear(
     weight: &[f32],
     bias: &[f32],
     (outputs, inputs): (usize, usize),
@@ -159,8 +159,38 @@ fn hann_windows(n: usize) -> (Vec<f32>, Vec<f32>) {
 }
 
 impl Block {
+    /// Width of the block's hidden layer.
+    pub(crate) const fn mlp(&self) -> usize {
+        self.pw1_bias.len()
+    }
+
+    /// The block on time-major frames `x` (`[frames, dim]`), in place: `h`
+    /// is `x.len()` values of working memory, `wide` at least
+    /// `TILE.min(frames) * mlp`.
+    pub(crate) fn forward(&self, x: &mut [f32], h: &mut [f32], wide: &mut [f32]) -> Result<()> {
+        let (dim, mlp) = (self.dw_bias.len(), self.pw1_bias.len());
+        let frames = x.len() / dim;
+        let prof = crate::prof::scope("vocos dw+ln", dim, KERNEL, frames);
+        kernels::depthwise7_layer_norm(x, &self.taps, &self.dw_bias, EPS, h);
+        prof.stop();
+        for (x_tile, h_tile) in x.chunks_mut(TILE * dim).zip(h.chunks(TILE * dim)) {
+            let rows = h_tile.len() / dim;
+            let u = &mut wide[..rows * mlp];
+            let prof = crate::prof::scope("vocos pw1", dim, mlp, rows);
+            self.pw1.mul(h_tile, dim, Some(&self.pw1_bias), u)?;
+            prof.stop();
+            let prof = crate::prof::scope("vocos gelu", mlp, 0, rows);
+            kernels::gelu_in_place(u);
+            prof.stop();
+            let _prof = crate::prof::scope("vocos pw2", mlp, dim, rows);
+            kernels::map_in_place(x_tile, Some(&self.pw2_bias), false);
+            self.pw2.mul(u, mlp, None, x_tile)?;
+        }
+        Ok(())
+    }
+
     /// Block `index` of the checkpoint, folded.
-    fn load(w: &Weights<'_>, index: usize, dim: usize, mlp: usize) -> Result<Self> {
+    pub(crate) fn load(w: &Weights<'_>, index: usize, dim: usize, mlp: usize) -> Result<Self> {
         let p = format!("block{index}");
         let taps_in = w.get(&format!("{p}.dwconv.weight"), &[dim, KERNEL])?;
         let mut taps = vec![0.0; KERNEL * dim];
@@ -394,22 +424,7 @@ impl VocosDecoder {
         let h = sized(h, frames * dim);
         let wide = sized(wide, TILE.min(frames) * self.mlp);
         for block in &self.blocks {
-            let prof = crate::prof::scope("vocos dw+ln", dim, KERNEL, frames);
-            kernels::depthwise7_layer_norm(x, &block.taps, &block.dw_bias, EPS, h);
-            prof.stop();
-            for (x_tile, h_tile) in x.chunks_mut(TILE * dim).zip(h.chunks(TILE * dim)) {
-                let rows = h_tile.len() / dim;
-                let u = &mut wide[..rows * self.mlp];
-                let prof = crate::prof::scope("vocos pw1", dim, self.mlp, rows);
-                block.pw1.mul(h_tile, dim, Some(&block.pw1_bias), u)?;
-                prof.stop();
-                let prof = crate::prof::scope("vocos gelu", self.mlp, 0, rows);
-                kernels::gelu_in_place(u);
-                prof.stop();
-                let _prof = crate::prof::scope("vocos pw2", self.mlp, dim, rows);
-                kernels::map_in_place(x_tile, Some(&block.pw2_bias), false);
-                block.pw2.mul(u, self.mlp, None, x_tile)?;
-            }
+            block.forward(x, h, wide)?;
         }
         kernels::layer_norm_in_place(x, dim, EPS, None);
         let (n_fft, bins) = (self.n_fft, self.n_fft / 2 + 1);

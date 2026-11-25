@@ -32,6 +32,7 @@ pub mod prof;
 pub mod pstereo;
 pub mod scale;
 pub mod stereo;
+pub mod stftenc;
 pub mod vocos;
 pub mod weights;
 mod winograd;
