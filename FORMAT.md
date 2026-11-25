@@ -68,7 +68,7 @@ are critical**: a decoder that does not know one must refuse the stream. Even ty
 | 2 | output gain | defined, optional | `i16`, dB in Q7.8, applied on playback (0 = none; parsed, not yet applied by picotone's decoders) |
 | 3 | reset interval | reserved, critical | predictor resets (keyframes) less often than once per page |
 | 5 | stride schedule | reserved, critical | a stride per segment |
-| 7 | layer | reserved, critical | marks an enhancement layer (`.picol`); see below |
+| 7 | layer | specified (HQ), not implemented, critical | marks an enhancement layer (`.picol`): base serial, base id; see [below](#enhancement-layers-picol-hq-only) |
 
 picotone's decoders refuse every reserved type today. They are listed so that later versions of the encoder can
 use them without a new version number.
@@ -263,23 +263,62 @@ The implementation is `src/pstereo.rs`; the measurements behind it are in `tools
   edge (within 512 samples) uses the neighbouring page's parameters, and D reaches 54 ms back into the mid.
   So, as with the codes, a player seeking to a page decodes from a little earlier.
 
-## Enhancement layers (`.picol`), reserved
+## Enhancement layers (`.picol`, HQ only)
 
-Not implemented yet; the format keeps room for it. A **base** `.pico` (for example 4 codebooks, music6) plays on
-its own. A `.picol` sidecar holds codebooks `first..=last` of the **same encode** (same model, stride, segments
-and trims), so base plus sidecar decodes with `last + 1` codebooks (music12 or music24). Copying only the
-`.pico` gives the small file.
+Specified, not implemented yet. A **base** `.pico` plays on its own. A `.picol` **layer** adds the upper
+codebooks of the **same encode**, so base plus layer decodes as the full encode would: the same codes, so the
+same audio. A player can start on the small base and pick the layer up later (gaim's case: play at once, then
+upgrade when the layer has loaded). Copying only the `.pico` gives the small file. There is one layer per base.
 
-- A `.picol` is structurally a `.pico`: the same Ogg framing, one page per chunk, and the **same page boundaries
-  and granule positions** as its base, so a decoder pairs pages by granule position.
-- Its identification header repeats the base's fields, with `codebooks = last + 1`, and carries the critical
-  **layer** TLV (type 7): varint layer index (1 for the first sidecar), `u32` serial number of the base stream,
-  `u64` base stream id (FNV-1a 64 of the base's identification packet followed by its first audio packet), varint
-  first codebook, varint last codebook. Because the type is critical, a decoder that does not know layers refuses
-  a `.picol` on its own instead of playing it.
-- Its chunks hold no scales (the base has them). Each chunk codes, per frame, codebooks `first..=last`, with the
-  predictor conditioned on codebooks `0..first` of the same frame and the frames before it, as decoded from the
-  base. The cx2 predictor already allows this: it is updated with every code of a frame in order, and a code
-  need not be range-coded to be fed to it.
-- The base stays coded exactly as today, with a predictor that sees only its own codebooks, so it always decodes
-  alone.
+### Base and combined layouts
+
+The **combined** stream is what base plus layer decode as: its layout and its codebooks per coded channel.
+
+| base layout | combined layout | the layer holds |
+|---|---|---|
+| mono (0) | mono | the mid's codebooks `b..n` |
+| left/right (1) | left/right | each channel's codebooks `b..n` |
+| mid/side (2) | mid/side | each channel's codebooks `b..n` (the side's base count may differ from the mid's) |
+| parametric (3) | **mid/side** | the mid's codebooks `b..n`, and the whole side, codebooks `0..n_s` |
+
+A combined channel has at least as many codebooks as the same channel in the base. With a parametric base the
+encoder codes the full encode as mid/side, whatever the stereo pick would choose. The base's mid is then the
+combined mid's first codebooks, and with the layer a decoder ignores the base's stereo parameters. A parametric
+base cannot have a left/right layer.
+
+### The `.picol` stream
+
+- Ogg, with its own serial number. Its identification header is an HQ header (model 2) whose layout and
+  codebooks are the **combined** stream's. Its codebook hash and table hash equal the base's. Its flags,
+  pre-skip, page length, playable length and end trim equal the base's, with no comment header (bit 1 clear).
+- It carries the critical **layer** TLV (type 7): `u32` serial number of the base stream, then `u64` base
+  stream id: FNV-1a 64 over the base's identification packet followed by its first audio packet. A decoder
+  refuses a layer whose base id does not match the base it is given. Because the type is critical, a decoder
+  that does not know layers refuses a `.picol` given alone, instead of playing it.
+- **The same pages as the base:** page `i` of the layer covers the same frames and has the same granule
+  position as page `i` of the base. A decoder pairs pages by granule position.
+
+### Layer audio packets
+
+| size | field |
+|---|---|
+| per combined coded channel: varint, then that many bytes | the size of the channel's layer codes, then the codes (size 0 when the layer adds nothing to that channel) |
+
+There are no stereo parameters and no end trim (the base has them). For combined channel `c` with `n` codebooks,
+whose base holds its first `b` (0 for the side of a parametric base), the chunk range-codes, frame by frame, the
+codes of codebooks `b..n`. It uses a fresh `n`-codebook predictor with the combined channel's role (left/right,
+mid or side). Each frame's codebooks `0..b` come from the base's page: they are fed to the predictor in order, but
+not coded. So the predictor sees exactly what it would see coding the full encode. The base is coded exactly as
+any `.pico`, with a predictor that sees only its own codebooks, so it always decodes alone.
+
+### Decoding
+
+Base plus layer: per page, decode the base's codes, then the layer's, and decode the combined codes. When a
+layer page is missing or damaged, that page plays from the base alone at the base's codebooks. With a parametric
+base, it also plays with the base's stereo parameters. Near such a page's edges, the output depends on the
+decoder's context (as for seeking) and is not specified exactly.
+
+A decoder must refuse:
+- a layer given without its base;
+- a layer whose base id, table hash or codebook hash differs from the base's;
+- a combined layout that the table above does not allow for the base's layout.

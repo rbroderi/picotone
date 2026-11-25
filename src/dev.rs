@@ -161,6 +161,28 @@ pub(crate) enum DevCommand {
         #[arg(long, value_delimiter = ',', default_value = "9,8,7,6,5,4,3,2,1")]
         tiers: Vec<usize>,
     },
+    /// Measure what an enhancement layer (`.picol`) would cost: a base file at
+    /// each `--bases` tier plus a layer holding codebooks `base..top`, against one
+    /// file at `--top`. The layer's codes are range-coded with the predictor of
+    /// the full encode, fed the base's codes uncoded. For a base of 3 codebooks or
+    /// fewer on a mid/side clip, the base is parametric (the mid alone, plus
+    /// `--ps-kbps` of stereo parameters) and the layer also carries the side.
+    LayerCost {
+        /// The HQ cx2 table (`cx2_dac44.ecxm`).
+        table: PathBuf,
+        /// Sidecars (`.json`), or directories of them, dumped at `--top` codebooks.
+        #[arg(required = true)]
+        inputs: Vec<PathBuf>,
+        /// Base tiers.
+        #[arg(long, value_delimiter = ',', default_value = "1,2,3,4,5,6,7,8")]
+        bases: Vec<usize>,
+        /// Codebooks of the full encode.
+        #[arg(long, default_value_t = 9)]
+        top: usize,
+        /// Parametric stereo parameter rate, kbps (`src/pstereo.rs`: about 1).
+        #[arg(long, default_value_t = 1.0)]
+        ps_kbps: f64,
+    },
     /// Time each expert and the whole coder on one code bundle.
     Profile {
         /// cx2 table (.ecxm).
@@ -270,7 +292,8 @@ pub(crate) fn run(command: &DevCommand, tables: &Path) -> Result<()> {
         } => dac_pack(table, inputs, tiers),
         DevCommand::DacBench { .. }
         | DevCommand::DacDecode { .. }
-        | DevCommand::DacEncode { .. } => run_dac(command),
+        | DevCommand::DacEncode { .. }
+        | DevCommand::LayerCost { .. } => run_dac(command),
     }
 }
 
@@ -319,6 +342,229 @@ fn read_dac_clip(sidecar: &Path) -> Result<DacClip> {
         channels,
         audio_length,
     })
+}
+
+/// Sidecars named by `inputs`: files, or every `.json` in a directory.
+fn dac_sidecars(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut sidecars = Vec::new();
+    for input in inputs {
+        if input.is_dir() {
+            let mut found: Vec<PathBuf> = std::fs::read_dir(input)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|e| e == "json"))
+                .collect();
+            found.sort();
+            sidecars.extend(found);
+        } else {
+            sidecars.push(input.clone());
+        }
+    }
+    Ok(sidecars)
+}
+
+/// A channel's codes cut to their first `m` of `n` codebooks per frame.
+fn cut_codes(codes: &[u16], n: usize, m: usize) -> Vec<u16> {
+    codes
+        .chunks_exact(n)
+        .flat_map(|f| f[..m].iter().copied())
+        .collect()
+}
+
+/// An HQ header for a dumped clip (no tags, default pages).
+const fn dac_info(
+    model: &cx2::hq::HqModel,
+    layout: pico::ChannelLayout,
+    codebooks: Vec<usize>,
+    audio_length: usize,
+) -> pico::DacInfo {
+    pico::DacInfo {
+        codebook_hash: 0,
+        table_hash: model.hash(),
+        layout,
+        codebooks,
+        looped: false,
+        pre_skip: 0,
+        page_length: pico::DEFAULT_PAGE_FRAMES,
+        audio_length,
+        end_trim: 0,
+        length_in_header: true,
+        output_gain: 0,
+        tags: Vec::new(),
+    }
+}
+
+/// Bytes of one page of a layer: the codes of codebooks `first..top` of each
+/// frame, range-coded with a fresh `top`-codebook predictor that is also fed
+/// the frame's codebooks below `first` (from the base) without coding them.
+fn layer_chunk(
+    model: &cx2::hq::HqModel,
+    role: cx2::hq::Role,
+    top: usize,
+    first: usize,
+    codes: &[u16],
+) -> Result<usize> {
+    let mut predictor = model.predictor(role, top)?;
+    let mut encoder = cx2::rangecoder::Encoder::new();
+    for (i, &code) in codes.iter().enumerate() {
+        if i % top >= first {
+            let index = usize::from(code);
+            let (freqs, total) = predictor.frequencies();
+            let freq = u64::from(freqs[index]);
+            encoder.encode(predictor.cumulative(index), freq, total)?;
+        }
+        predictor.update(code)?;
+    }
+    Ok(encoder.finish().len())
+}
+
+/// Bytes a varint size prefix takes.
+const fn size_bytes(n: usize) -> usize {
+    let mut bytes = 1;
+    let mut n = n >> 7;
+    while n > 0 {
+        bytes += 1;
+        n >>= 7;
+    }
+    bytes
+}
+
+/// One clip's base file and layer, in bytes.
+struct LayerPair {
+    base_file: usize,
+    /// The base file's bytes outside its coded chunks (Ogg pages, headers, size prefixes).
+    framing: usize,
+    /// The layer's audio packets.
+    packets: usize,
+    /// Codes the layer codes.
+    codes: usize,
+}
+
+/// Codes `clip` (dumped at `top`) as a base of `base` codebooks plus a layer.
+/// With `parametric`, the base is the mid alone and the layer also holds the side.
+fn layer_pair(
+    model: &cx2::hq::HqModel,
+    clip: &DacClip,
+    base: usize,
+    top: usize,
+    parametric: bool,
+) -> Result<LayerPair> {
+    let pages = dac_info(model, clip.layout, clip.books.clone(), clip.audio_length).pages();
+    let base_channels = if parametric { 1 } else { clip.channels.len() };
+    let base_layout = if parametric {
+        pico::ChannelLayout::Mono
+    } else {
+        clip.layout
+    };
+    let cut: Vec<Vec<u16>> = clip.channels[..base_channels]
+        .iter()
+        .map(|c| cut_codes(c, top, base))
+        .collect();
+    let info = dac_info(model, base_layout, vec![base; base_channels], clip.audio_length);
+    let base_file = pico::write_dac(&info, model, &cut)?;
+    let base_coded: usize = pico::DacStream::parse(&base_file)?.coded_bytes().iter().sum();
+    // Per page, a size-prefixed chunk per channel.
+    let roles = clip.layout.roles();
+    let (mut packets, mut codes) = (0, 0);
+    for span in &pages {
+        for (c, (channel, &role)) in clip.channels.iter().zip(roles).enumerate() {
+            let page = &channel[span.start * top..span.end * top];
+            // The side of a parametric base is all in the layer, coded as in the full encode.
+            let first = if c < base_channels { base } else { 0 };
+            codes += (span.end - span.start) * (top - first);
+            let bytes = layer_chunk(model, role, top, first, page)?;
+            packets += size_bytes(bytes) + bytes;
+        }
+    }
+    Ok(LayerPair {
+        base_file: base_file.len(),
+        framing: base_file.len() - base_coded,
+        packets,
+        codes,
+    })
+}
+
+/// `dev layer-cost`: a base file plus a `.picol` layer against one file.
+fn layer_cost(table: &Path, inputs: &[PathBuf], bases: &[usize], top: usize, ps_kbps: f64) -> Result<()> {
+    use picotone::cx2::hq::HqModel;
+    use pico::ChannelLayout;
+    let model = HqModel::from_table(&read(table)?)?;
+    let clips = dac_sidecars(inputs)?
+        .iter()
+        .map(|p| read_dac_clip(p))
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        clips.iter().all(|c| c.books.iter().all(|&n| n == top)),
+        "every clip must be dumped at {top} codebooks"
+    );
+    let seconds = |c: &DacClip| to_f64(c.audio_length) / f64::from(picotone::dac::SAMPLE_RATE);
+    let total_seconds: f64 = clips.iter().map(seconds).sum();
+    let count = |l: ChannelLayout| clips.iter().filter(|c| c.layout == l).count();
+    eprintln!(
+        "{} clips, {total_seconds:.0} s ({} mono, {} left/right, {} mid/side); table {:016x}; full encode q{top}",
+        clips.len(),
+        count(ChannelLayout::Mono),
+        count(ChannelLayout::LeftRight),
+        count(ChannelLayout::MidSide),
+        model.hash()
+    );
+    // The single file at `top`, per clip, in bytes.
+    let full = clips
+        .iter()
+        .map(|clip| {
+            let info = dac_info(&model, clip.layout, clip.books.clone(), clip.audio_length);
+            Ok(pico::write_dac(&info, &model, &clip.channels)?.len())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    eprintln!(
+        "base  stereo base   clips  full kB   base kB  layer kB  base+layer kB  extra   (of it, layer framing)  layer bits/code  base kbps  base+layer kbps"
+    );
+    for &base in bases {
+        ensure!((1..top).contains(&base), "base tier {base} must be 1 to {}", top - 1);
+        for parametric in [false, true] {
+            if parametric && base > 3 {
+                continue;
+            }
+            let (mut n, mut full_bytes, mut base_bytes, mut layer_bytes, mut layer_codes, mut secs) =
+                (0, 0, 0.0, 0, 0, 0.0);
+            let mut framing = 0;
+            for (clip, &full_file) in clips.iter().zip(&full) {
+                // Parametric rows: mid/side clips only (a left/right clip has no mid to keep).
+                // Plain rows: every clip, at its own layout.
+                let use_ps = parametric && clip.layout == ChannelLayout::MidSide;
+                if parametric != use_ps {
+                    continue;
+                }
+                let pair = layer_pair(&model, clip, base, top, use_ps)?;
+                let ps = if use_ps { ps_kbps * 1000.0 / 8.0 * seconds(clip) } else { 0.0 };
+                n += 1;
+                full_bytes += full_file;
+                base_bytes += to_f64(pair.base_file) + ps;
+                // Container framing: as the base's own (Ogg pages, ID header), plus a layer TLV.
+                layer_bytes += pair.packets + pair.framing + 24;
+                framing += pair.framing + 24;
+                layer_codes += pair.codes;
+                secs += seconds(clip);
+            }
+            if n == 0 {
+                continue;
+            }
+            let pair = base_bytes + to_f64(layer_bytes);
+            eprintln!(
+                "q{base}    {:<11}  {n:5}  {:8.1}  {:8.1}  {:8.1}  {:13.1}  {:+5.1}%  {:+5.1}%  {:8.3} bits/code   {:9.2}  {:15.2}",
+                if parametric { "parametric" } else { "as full" },
+                to_f64(full_bytes) / 1000.0,
+                base_bytes / 1000.0,
+                to_f64(layer_bytes) / 1000.0,
+                pair / 1000.0,
+                100.0 * (pair / to_f64(full_bytes) - 1.0),
+                100.0 * to_f64(framing) / to_f64(full_bytes),
+                to_f64(layer_bytes * 8) / to_f64(layer_codes.max(1)),
+                base_bytes * 8.0 / secs / 1000.0,
+                pair * 8.0 / secs / 1000.0
+            );
+        }
+    }
+    Ok(())
 }
 
 /// `dev dac-pack`: cx2 sizes and times of dumped HQ codes, per tier.
@@ -431,6 +677,13 @@ fn run_dac(command: &DevCommand) -> Result<()> {
             chunk,
             latent,
         } => dac_encode(weights, input, output, *chunk, latent.as_deref()),
+        DevCommand::LayerCost {
+            table,
+            inputs,
+            bases,
+            top,
+            ps_kbps,
+        } => layer_cost(table, inputs, bases, *top, *ps_kbps),
         _ => anyhow::bail!("not an HQ codec command"),
     }
 }
