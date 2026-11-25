@@ -68,7 +68,7 @@ are critical**: a decoder that does not know one must refuse the stream. Even ty
 | 2 | output gain | defined, optional | `i16`, dB in Q7.8, applied on playback (0 = none; parsed, not yet applied by picotone's decoders) |
 | 3 | reset interval | reserved, critical | predictor resets (keyframes) less often than once per page |
 | 5 | stride schedule | reserved, critical | a stride per segment |
-| 7 | layer | specified (HQ), not implemented, critical | marks an enhancement layer (`.picol`): base serial, base id; see [below](#enhancement-layers-picol-hq-only) |
+| 7 | layer | specified (HQ), not implemented, critical | marks an enhancement layer (`.picol`): base serial, base id, pages per group; see [below](#enhancement-layers-picol-hq-only) |
 
 picotone's decoders refuse every reserved type today. They are listed so that later versions of the encoder can
 use them without a new version number.
@@ -291,20 +291,27 @@ base cannot have a left/right layer.
 - Ogg, with its own serial number. Its identification header is an HQ header (model 2) whose layout and
   codebooks are the **combined** stream's. Its codebook hash and table hash equal the base's. Its flags,
   pre-skip, page length, playable length and end trim equal the base's, with no comment header (bit 1 clear).
-- It carries the critical **layer** TLV (type 7): `u32` serial number of the base stream, then `u64` base
-  stream id: FNV-1a 64 over the base's identification packet followed by its first audio packet. A decoder
-  refuses a layer whose base id does not match the base it is given. Because the type is critical, a decoder
-  that does not know layers refuses a `.picol` given alone, instead of playing it.
-- **The same pages as the base:** page `i` of the layer covers the same frames and has the same granule
-  position as page `i` of the base. A decoder pairs pages by granule position.
+- It carries the critical **layer** TLV (type 7): `u32` serial number of the base stream, `u64` base stream
+  id (FNV-1a 64 over the base's identification packet followed by its first audio packet), then varint
+  **group**, the base pages per layer page (1 or more; the encoder writes 4). A decoder refuses a layer whose
+  base id does not match the base it is given. Because the type is critical, a decoder that does not know
+  layers refuses a `.picol` given alone, instead of playing it.
+- **Pages in groups:** layer page `j` covers base pages `j x group` to `j x group + group - 1` (the last layer
+  page may cover fewer), and its granule position is that of the last base page it covers. A decoder pairs
+  them by granule position. Grouping saves Ogg page overhead: on the test clips the layer's framing is about
+  2.3% of a single file's size at group 1 and 0.8% at 4 (`picotone dev layer-cost`); the cost is that a damaged layer page drops `group` base pages (about 3.7 s at 4) to base
+  quality.
 
 ### Layer audio packets
 
+For each base page the layer page covers, in order:
+
 | size | field |
 |---|---|
-| per combined coded channel: varint, then that many bytes | the size of the channel's layer codes, then the codes (size 0 when the layer adds nothing to that channel) |
+| per combined coded channel: varint, then that many bytes | the size of the channel's layer codes for that base page, then the codes (size 0 when the layer adds nothing to that channel) |
 
-There are no stereo parameters and no end trim (the base has them). For combined channel `c` with `n` codebooks,
+There are no stereo parameters and no end trim (the base has them). Each base page's chunks are coded on their
+own, as below, so grouping changes only the framing. For combined channel `c` with `n` codebooks,
 whose base holds its first `b` (0 for the side of a parametric base), the chunk range-codes, frame by frame, the
 codes of codebooks `b..n`. It uses a fresh `n`-codebook predictor with the combined channel's role (left/right,
 mid or side). Each frame's codebooks `0..b` come from the base's page: they are fed to the predictor in order, but
@@ -313,8 +320,8 @@ any `.pico`, with a predictor that sees only its own codebooks, so it always dec
 
 ### Decoding
 
-Base plus layer: per page, decode the base's codes, then the layer's, and decode the combined codes. When a
-layer page is missing or damaged, that page plays from the base alone at the base's codebooks. With a parametric
+Base plus layer: per base page, decode the base's codes, then the layer's, and decode the combined codes. When a
+layer page is missing or damaged, the base pages it covers play from the base alone at the base's codebooks. With a parametric
 base, it also plays with the base's stereo parameters. Near such a page's edges, the output depends on the
 decoder's context (as for seeking) and is not specified exactly.
 

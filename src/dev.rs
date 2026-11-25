@@ -182,6 +182,9 @@ pub(crate) enum DevCommand {
         /// Parametric stereo parameter rate, kbps (`src/pstereo.rs`: about 1).
         #[arg(long, default_value_t = 1.0)]
         ps_kbps: f64,
+        /// Base pages per layer page.
+        #[arg(long, default_value_t = 4)]
+        group: usize,
     },
     /// Time each expert and the whole coder on one code bundle.
     Profile {
@@ -431,7 +434,7 @@ const fn size_bytes(n: usize) -> usize {
 /// One clip's base file and layer, in bytes.
 struct LayerPair {
     base_file: usize,
-    /// The base file's bytes outside its coded chunks (Ogg pages, headers, size prefixes).
+    /// The layer's Ogg framing: its identification page, and each page's header and lacing.
     framing: usize,
     /// The layer's audio packets.
     packets: usize,
@@ -447,6 +450,7 @@ fn layer_pair(
     base: usize,
     top: usize,
     parametric: bool,
+    group: usize,
 ) -> Result<LayerPair> {
     let pages = dac_info(model, clip.layout, clip.books.clone(), clip.audio_length).pages();
     let base_channels = if parametric { 1 } else { clip.channels.len() };
@@ -461,32 +465,47 @@ fn layer_pair(
         .collect();
     let info = dac_info(model, base_layout, vec![base; base_channels], clip.audio_length);
     let base_file = pico::write_dac(&info, model, &cut)?;
-    let base_coded: usize = pico::DacStream::parse(&base_file)?.coded_bytes().iter().sum();
-    // Per page, a size-prefixed chunk per channel.
+    // Per base page, a size-prefixed chunk per channel; `group` base pages per layer page.
     let roles = clip.layout.roles();
-    let (mut packets, mut codes) = (0, 0);
-    for span in &pages {
-        for (c, (channel, &role)) in clip.channels.iter().zip(roles).enumerate() {
-            let page = &channel[span.start * top..span.end * top];
-            // The side of a parametric base is all in the layer, coded as in the full encode.
-            let first = if c < base_channels { base } else { 0 };
-            codes += (span.end - span.start) * (top - first);
-            let bytes = layer_chunk(model, role, top, first, page)?;
-            packets += size_bytes(bytes) + bytes;
+    let (mut packets, mut codes, mut framing) = (0, 0, 0);
+    for spans in pages.chunks(group.max(1)) {
+        let mut packet = 0;
+        for span in spans {
+            for (c, (channel, &role)) in clip.channels.iter().zip(roles).enumerate() {
+                let page = &channel[span.start * top..span.end * top];
+                // The side of a parametric base is all in the layer, coded as in the full encode.
+                let first = if c < base_channels { base } else { 0 };
+                codes += (span.end - span.start) * (top - first);
+                let bytes = layer_chunk(model, role, top, first, page)?;
+                packet += size_bytes(bytes) + bytes;
+            }
         }
+        // An Ogg page: a 27-byte header and one lacing byte per 255 bytes of packet (and one more).
+        framing += 27 + packet / 255 + 1;
+        packets += packet;
     }
+    // The identification page: an HQ header of about 40 bytes plus the layer TLV (about 16).
+    framing += 27 + 1 + 56;
     Ok(LayerPair {
         base_file: base_file.len(),
-        framing: base_file.len() - base_coded,
+        framing,
         packets,
         codes,
     })
 }
 
 /// `dev layer-cost`: a base file plus a `.picol` layer against one file.
-fn layer_cost(table: &Path, inputs: &[PathBuf], bases: &[usize], top: usize, ps_kbps: f64) -> Result<()> {
+fn layer_cost(
+    table: &Path,
+    inputs: &[PathBuf],
+    bases: &[usize],
+    top: usize,
+    ps_kbps: f64,
+    group: usize,
+) -> Result<()> {
     use picotone::cx2::hq::HqModel;
     use pico::ChannelLayout;
+    ensure!(group >= 1, "--group must be 1 or more");
     let model = HqModel::from_table(&read(table)?)?;
     let clips = dac_sidecars(inputs)?
         .iter()
@@ -534,14 +553,13 @@ fn layer_cost(table: &Path, inputs: &[PathBuf], bases: &[usize], top: usize, ps_
                 if parametric != use_ps {
                     continue;
                 }
-                let pair = layer_pair(&model, clip, base, top, use_ps)?;
+                let pair = layer_pair(&model, clip, base, top, use_ps, group)?;
                 let ps = if use_ps { ps_kbps * 1000.0 / 8.0 * seconds(clip) } else { 0.0 };
                 n += 1;
                 full_bytes += full_file;
                 base_bytes += to_f64(pair.base_file) + ps;
-                // Container framing: as the base's own (Ogg pages, ID header), plus a layer TLV.
-                layer_bytes += pair.packets + pair.framing + 24;
-                framing += pair.framing + 24;
+                layer_bytes += pair.packets + pair.framing;
+                framing += pair.framing;
                 layer_codes += pair.codes;
                 secs += seconds(clip);
             }
@@ -683,7 +701,8 @@ fn run_dac(command: &DevCommand) -> Result<()> {
             bases,
             top,
             ps_kbps,
-        } => layer_cost(table, inputs, bases, *top, *ps_kbps),
+            group,
+        } => layer_cost(table, inputs, bases, *top, *ps_kbps, *group),
         _ => anyhow::bail!("not an HQ codec command"),
     }
 }
