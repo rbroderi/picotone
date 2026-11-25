@@ -1,14 +1,13 @@
 //! The STFT encoder against PyTorch (a random-init fixture written by
 //! `tools/stftenc_fixture.py`), its chunked and span encodes against a
 //! whole-signal encode, bit for bit, and (ignored, with the real weights)
-//! parity files for `tools/stftenc_parity.py` and a speed comparison with
-//! DAC's encoder.
+//! parity files for `tools/stftenc_parity.py` and the encode speed.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context as _, Result};
-use picotone::dac::HOP;
+use picotone::dac::{DacQuantizer, HOP};
 use picotone::stftenc::StftEncoder;
 
 fn root() -> PathBuf {
@@ -145,6 +144,38 @@ fn weights_dir() -> PathBuf {
     std::env::var_os("PICOTONE_WEIGHTS").map_or_else(|| root().join("weights"), PathBuf::from)
 }
 
+/// DAC's quantiser (`weights/dac44_quantizer.safetensors`, made by
+/// `tools/export_quantizer.py`) indexes the decoder's codebooks, and codes a
+/// latent the same in parallel pieces as in short calls.
+#[test]
+fn quantizer_matches_the_decoder_and_codes_in_pieces() -> Result<()> {
+    use picotone::hqstream::HqDecoder as _;
+    let quantizer = DacQuantizer::load(&weights_dir().join("dac44_quantizer.safetensors"))?;
+    let decoder =
+        picotone::vocos::VocosDecoder::load(&root().join("tests/data/vocos_tiny.safetensors"))?;
+    assert_eq!(quantizer.codebook_hash(), decoder.codebook_hash());
+    let frames = 700;
+    let mut state = 7_u32;
+    let values: Vec<f32> = (0..frames * picotone::dac::LATENT_DIM)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            #[expect(clippy::cast_precision_loss, reason = "test values")]
+            let v = (state >> 8) as f32 / 16_777_216.0 - 0.5;
+            4.0 * v
+        })
+        .collect();
+    let latent = picotone::nn::Seq::from_vec(frames, picotone::dac::LATENT_DIM, values)?;
+    let whole = quantizer.quantize(latent.clone())?;
+    assert_eq!(whole.len(), latent.len() * picotone::dac::CODEBOOKS);
+    let mut parts = Vec::new();
+    for start in (0..latent.len()).step_by(100) {
+        let end = (start + 100).min(latent.len());
+        parts.extend(quantizer.quantize(latent.slice_rows(start, end))?);
+    }
+    assert_eq!(whole, parts);
+    Ok(())
+}
+
 /// Real-weights parity: for each `<dir>/<clip>.in.f32` written by
 /// `tools/stftenc_parity.py prepare` (default dir `work/stftenc`), writes the
 /// Rust latent `<clip>.rust.f32` and prints its SNR against PyTorch's.
@@ -182,14 +213,14 @@ fn real_weights_parity_files() -> Result<()> {
     Ok(())
 }
 
-/// Encode speed per second of mono audio, on one thread and on all, with
-/// DAC's encoder (`dac44_encoder.safetensors`) when it is there.
+/// Encode speed per second of mono audio, on one thread and on all: the
+/// latent, then DAC's quantiser (`dac44_quantizer.safetensors`).
 #[test]
 #[ignore = "a benchmark; needs the real weights"]
 fn speed() -> Result<()> {
     let dir = weights_dir();
     let enc = StftEncoder::load(&dir.join("dac44_stftenc.safetensors"))?;
-    let dac = picotone::dac::DacEncoder::load(&dir.join("dac44_encoder.safetensors")).ok();
+    let quantizer = DacQuantizer::load(&dir.join("dac44_quantizer.safetensors"))?;
     let seconds = 30;
     let mut state = 1_u32;
     let audio: Vec<f32> = (0..seconds * 44_100)
@@ -210,22 +241,16 @@ fn speed() -> Result<()> {
         pool.install(|| -> Result<()> {
             drop(enc.latent(&audio[..44_100])?);
             let t = Instant::now();
-            drop(enc.latent(&audio)?);
+            let latent = enc.latent(&audio)?;
             let ours = t.elapsed().as_secs_f64() / f64::from(seconds);
+            let t = Instant::now();
+            drop(quantizer.quantize(latent)?);
+            let quantize = t.elapsed().as_secs_f64() / f64::from(seconds);
             eprintln!(
-                "{threads} thread(s): STFT encoder {:.2} ms per channel-second",
-                ours * 1e3
+                "{threads} thread(s): STFT encoder {:.2} ms, quantiser {:.2} ms per channel-second",
+                ours * 1e3,
+                quantize * 1e3
             );
-            if let Some(dac) = &dac {
-                let t = Instant::now();
-                drop(dac.latent_chunked(&audio, picotone::dac::CHUNK)?);
-                let theirs = t.elapsed().as_secs_f64() / f64::from(seconds);
-                eprintln!(
-                    "{threads} thread(s): DAC encoder {:.2} ms per channel-second ({:.1}x)",
-                    theirs * 1e3,
-                    theirs / ours
-                );
-            }
             Ok(())
         })?;
     }

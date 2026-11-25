@@ -159,8 +159,9 @@ length in its header needs an intact last page; a player that streams can instea
 
 ## HQ streams (model 2)
 
-The HQ codec (`--model hq`, the encoder's default) codes 44.1 kHz audio with DAC 44 kHz's encoder and
-residual quantiser: one frame per 512 samples, up to 9 codebooks of 1024 entries per frame, a lower codebook
+The HQ codec (`--model hq`, the encoder's default) codes 44.1 kHz audio as DAC 44 kHz codes: picotone's
+STFT encoder (`dac44_stftenc`) makes DAC's latent and DAC's own residual quantiser codes it, one frame per 512
+samples, up to 9 codebooks of 1024 entries per frame, a lower codebook
 count being a prefix of the full one. picotone decodes it with a Vocos (iSTFT) decoder trained on those codes
 (`dac44-vocos`). Ogg
 framing, the comment header, extensions (TLVs), pre-skip, granules, damage handling and loops work as for

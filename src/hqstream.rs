@@ -58,9 +58,7 @@ pub trait HqDecoder: fmt::Debug + Send + Sync {
     /// (before context); longer spans are split into pieces of at most this
     /// many, decoded in parallel. A decoder with a wide context wants long
     /// pieces, which recompute less of it.
-    fn piece(&self) -> usize {
-        dac::CHUNK
-    }
+    fn piece(&self) -> usize;
 
     /// Decodes `codes`, `[frames][num_codebooks]`, as if they were a whole
     /// file: `frames * 512` samples.

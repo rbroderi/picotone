@@ -113,7 +113,7 @@ impl ChannelLayout {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DacInfo {
     /// FNV-1a 64 of the DAC codebooks the codes index
-    /// ([`crate::dac::DacEncoder::codebook_hash`]).
+    /// ([`crate::dac::DacQuantizer::codebook_hash`]).
     pub codebook_hash: u64,
     /// FNV-1a 64 of the cx2 table the pages are coded with ([`HqModel::hash`]).
     pub table_hash: u64,

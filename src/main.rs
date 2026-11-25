@@ -26,8 +26,9 @@ use picotone::{ModelKind, cx2};
     about = "picotone: neural audio in .pico files (HQ 44.1 kHz by default; EnCodec with --fast)"
 )]
 struct Cli {
-    /// Directory holding the model weights: `dac44_encoder.safetensors` and
-    /// `dac44_vocos.safetensors` (HQ), `encodec_24khz.{json,safetensors}` and
+    /// Directory holding the model weights: `dac44_stftenc.safetensors`,
+    /// `dac44_quantizer.safetensors` and `dac44_vocos.safetensors` (HQ),
+    /// `encodec_24khz.{json,safetensors}` and
     /// `encodec_48khz.{json,safetensors}`. Defaults to `$PICOTONE_WEIGHTS` (or the older
     /// `$ENCODEC_WEIGHTS`), then `weights/` next to the executable, then the project.
     #[arg(long, global = true)]
@@ -90,8 +91,8 @@ enum Command {
 /// The models `--model` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ModelName {
-    /// HQ (the default): DAC 44 kHz's encoder and picotone's Vocos decoder (`dac44-vocos`);
-    /// 44.1 kHz, mono or stereo, 1 to 9 codebooks per channel (0.86 kbps each).
+    /// HQ (the default): picotone's STFT encoder with DAC 44 kHz's quantiser, and
+    /// picotone's Vocos decoder (`dac44-vocos`); 44.1 kHz, mono or stereo, 1 to 9 codebooks per channel (0.86 kbps each).
     Hq,
     /// `encodec_48khz`: 48 kHz stereo, bandwidths 3, 6, 12, 24 kbps.
     #[value(name = "encodec-48k")]

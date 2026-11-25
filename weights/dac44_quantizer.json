@@ -1,19 +1,12 @@
 {
- "model": "dac44-encoder",
+ "model": "dac44-quantizer",
  "sample_rate": 44100,
  "hop": 512,
- "strides": [
-  2,
-  4,
-  8,
-  8
- ],
- "encoder_dim": 64,
  "latent_dim": 1024,
  "codebooks": 9,
  "codebook_size": 1024,
  "codebook_dim": 8,
- "params": 22603400,
+ "params": 304200,
  "licence": "MIT (descript-audio-codec, Copyright (c) 2023-present, Descript)",
  "source_sha256": {
   "dac": "a88eed82a7024ccc1facdb1e605c4c2f99281c8118c22c9895ffa846d8fb61aa"

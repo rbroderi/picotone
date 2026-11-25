@@ -1448,7 +1448,7 @@ mod tests {
     }
 
     /// The HQ decoder builds by its name and reads DAC's own codebooks, the
-    /// encoder's: HQ files name their code space, not a decoder.
+    /// quantiser's: HQ files name their code space, not a decoder.
     #[test]
     fn hq_decoder_builds_by_its_name() -> Result<()> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -1460,8 +1460,9 @@ mod tests {
         let Net::Hq(hq) = decoder.net else {
             bail!("dac44_vocos built an EnCodec decoder");
         };
-        let encoder = dac::DacEncoder::load(&root.join("weights/dac44_encoder.safetensors"))?;
-        assert_eq!(hq.codebook_hash(), encoder.codebook_hash());
+        let quantizer =
+            dac::DacQuantizer::load(&root.join("weights/dac44_quantizer.safetensors"))?;
+        assert_eq!(hq.codebook_hash(), quantizer.codebook_hash());
         Ok(())
     }
 

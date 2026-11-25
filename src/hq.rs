@@ -1,5 +1,6 @@
-//! The HQ codec in the command line: DAC 44 kHz's encoder, the Vocos
-//! decoder (`dac44-vocos`), and the stereo decisions.
+//! The HQ codec in the command line: the STFT encoder (`dac44_stftenc`)
+//! with DAC 44 kHz's quantiser, the Vocos decoder (`dac44-vocos`), and the
+//! stereo decisions.
 
 #![expect(
     clippy::redundant_pub_crate,
@@ -13,16 +14,19 @@ use std::time::Instant;
 use anyhow::{Context as _, Result, ensure};
 use picotone::audio::Audio;
 use picotone::cx2::hq::HqModel;
-use picotone::dac::{self, DacEncoder};
+use picotone::dac::{self, DacQuantizer};
 use picotone::hqstream::HqStream;
 use picotone::layout;
 use picotone::pico::{self, ChannelLayout, DacInfo, DacStream};
+use picotone::stftenc::StftEncoder;
 use picotone::vocos::VocosDecoder;
 use picotone::{pstereo, stereo};
 use rayon::prelude::*;
 
-/// Encoder weights in the weights directory.
-pub(crate) const ENCODER_FILE: &str = "dac44_encoder.safetensors";
+/// The HQ encoder's (STFT encoder) weights in the weights directory.
+pub(crate) const ENCODER_FILE: &str = "dac44_stftenc.safetensors";
+/// DAC's quantiser's weights in the weights directory.
+pub(crate) const QUANTIZER_FILE: &str = "dac44_quantizer.safetensors";
 /// The HQ decoder's (Vocos) weights in the weights directory.
 pub(crate) const DECODER_FILE: &str = "dac44_vocos.safetensors";
 /// The HQ decoder's name in messages.
@@ -133,14 +137,44 @@ fn file(weights: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn load_encoder(weights: &Path) -> Result<DacEncoder> {
+/// The HQ encoder: the STFT encoder makes the latent, DAC's quantiser its
+/// codes.
+#[derive(Debug)]
+pub(crate) struct Encoder {
+    pub net: StftEncoder,
+    pub quantizer: DacQuantizer,
+}
+
+impl Encoder {
+    /// Hash of the codebooks the codes index.
+    pub(crate) fn codebook_hash(&self) -> u64 {
+        self.quantizer.codebook_hash()
+    }
+
+    /// Codes of mono 44.1 kHz `audio`, `[frames][9]` (row-major),
+    /// `ceil(len / 512)` frames (the audio read as zero padded at the end).
+    pub(crate) fn encode(&self, audio: &[f32]) -> Result<Vec<u16>> {
+        self.quantizer.quantize(self.net.latent(audio)?)
+    }
+}
+
+/// Loads the HQ encoder from the weights directory.
+pub(crate) fn load_encoder(weights: &Path) -> Result<Encoder> {
     let start = Instant::now();
-    let encoder = DacEncoder::load(&file(weights, ENCODER_FILE)?)?;
+    let net = StftEncoder::load(&file(weights, ENCODER_FILE)?)?;
+    ensure!(
+        net.latent_dim() == dac::LATENT_DIM,
+        "{ENCODER_FILE} makes a latent {} wide; DAC's quantiser reads {}",
+        net.latent_dim(),
+        dac::LATENT_DIM
+    );
+    let quantizer = DacQuantizer::load(&file(weights, QUANTIZER_FILE)?)?;
     eprintln!(
-        "loaded the HQ encoder in {:.2} s",
+        "loaded the HQ encoder ({}) in {:.2} s",
+        picotone::stftenc::NAME,
         start.elapsed().as_secs_f64()
     );
-    Ok(encoder)
+    Ok(Encoder { net, quantizer })
 }
 
 fn load_decoder(weights: &Path) -> Result<VocosDecoder> {
@@ -228,7 +262,7 @@ fn stereo_parameters(
 
 /// Codes of each signal, cut to its tier: `[frame][codebook]`.
 fn encode_signals(
-    encoder: &DacEncoder,
+    encoder: &Encoder,
     signals: &[Vec<f32>],
     codebooks: &[usize],
 ) -> Result<Vec<Vec<u16>>> {
@@ -342,7 +376,7 @@ pub(crate) fn encode(
 /// Picks left/right or mid/side from sampled excerpts.
 fn pick(
     weights: &Path,
-    encoder: &DacEncoder,
+    encoder: &Encoder,
     channels: &[Vec<f32>],
     s: &Settings<'_>,
 ) -> Result<ChannelLayout> {
@@ -406,11 +440,7 @@ fn pick(
 
 /// Decodes an HQ stream to audio, trimmed for playback, through the same
 /// [`HqStream`] as the WebAssembly decoder.
-pub(crate) fn decode(
-    weights: &Path,
-    table: &HqModel,
-    stream: DacStream,
-) -> Result<Audio> {
+pub(crate) fn decode(weights: &Path, table: &HqModel, stream: DacStream) -> Result<Audio> {
     let decoder = load_decoder(weights)?;
     let start = Instant::now();
     let mut stream = HqStream::new(stream, table, &decoder, 0)?;

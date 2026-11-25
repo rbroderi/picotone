@@ -19,7 +19,6 @@ pub mod audio;
 pub mod config;
 pub mod cx2;
 pub mod dac;
-mod fastconv;
 mod fft;
 pub mod hqstream;
 mod kernels;
@@ -35,7 +34,6 @@ pub mod stereo;
 pub mod stftenc;
 pub mod vocos;
 pub mod weights;
-mod winograd;
 
 use std::path::{Path, PathBuf};
 

@@ -49,11 +49,13 @@ with Meta's licence notice in `weights/EnCodec-MIT.txt`). To use another folder,
 when `PICOTONE_WEIGHTS` is not set). The cx2 tables are read from `models/` (or `--tables` /
 `PICOTONE_TABLES`).
 
-The HQ codec's weights sit beside them: `dac44_encoder.safetensors` (DAC 44 kHz's encoder and quantiser) and
-`dac44_vocos.safetensors` (picotone's Vocos decoder, the only HQ decoder at every codebook count), with DAC's
-licence in `weights/DAC-MIT.txt` and the decoder's training-data notice and credits in
-`weights/dac44_vocos.NOTICE.txt` and `.credits.jsonl`. The decoder's weights are not in the repository yet
-(`tools/export_vocos.py` converts the trained export).
+The HQ codec's weights sit beside them: `dac44_stftenc.safetensors` (picotone's STFT encoder, which makes
+DAC's latent), `dac44_quantizer.safetensors` (DAC 44 kHz's quantiser, which turns the latent into DAC's codes)
+and `dac44_vocos.safetensors` (picotone's Vocos decoder, the only HQ decoder at every codebook count), with
+DAC's licence in `weights/DAC-MIT.txt` and the decoder's training-data notice and credits in
+`weights/dac44_vocos.NOTICE.txt` and `.credits.jsonl`. These weights are not in the repository yet:
+`tools/export_stftenc.py` and `tools/export_vocos.py` convert the trained exports, and
+`tools/export_quantizer.py` takes the quantiser from DAC's own weights (`weights_44khz_8kbps_0.0.1.pth`).
 
 Encode with the HQ codec (the default: 44.1 kHz, about 8 kbps per channel at its full 9 codebooks), or with
 EnCodec (`--fast`, or a preset):

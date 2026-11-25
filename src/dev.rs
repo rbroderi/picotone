@@ -132,9 +132,11 @@ pub(crate) enum DevCommand {
         chunk: Option<usize>,
     },
     /// Encode raw little-endian f32 mono 44.1 kHz samples with the HQ encoder
-    /// (DAC's) to a `.npy` of codes `[frames, 9]`, for parity checks.
+    /// (the STFT encoder, then DAC's quantiser) to a `.npy` of codes
+    /// `[frames, 9]`, for parity checks.
     DacEncode {
-        /// The encoder weights (`dac44_encoder.safetensors`).
+        /// The weights directory, holding `dac44_stftenc.safetensors` and
+        /// `dac44_quantizer.safetensors`.
         weights: PathBuf,
         /// Input: raw f32 samples.
         input: PathBuf,
@@ -463,7 +465,12 @@ fn layer_pair(
         .iter()
         .map(|c| cut_codes(c, top, base))
         .collect();
-    let info = dac_info(model, base_layout, vec![base; base_channels], clip.audio_length);
+    let info = dac_info(
+        model,
+        base_layout,
+        vec![base; base_channels],
+        clip.audio_length,
+    );
     let base_file = pico::write_dac(&info, model, &cut)?;
     // Per base page, a size-prefixed chunk per channel; `group` base pages per layer page.
     let roles = clip.layout.roles();
@@ -503,8 +510,8 @@ fn layer_cost(
     ps_kbps: f64,
     group: usize,
 ) -> Result<()> {
-    use picotone::cx2::hq::HqModel;
     use pico::ChannelLayout;
+    use picotone::cx2::hq::HqModel;
     ensure!(group >= 1, "--group must be 1 or more");
     let model = HqModel::from_table(&read(table)?)?;
     let clips = dac_sidecars(inputs)?
@@ -538,7 +545,11 @@ fn layer_cost(
         "base  stereo base   clips  full kB   base kB  layer kB  base+layer kB  extra   (of it, layer framing)  layer bits/code  base kbps  base+layer kbps"
     );
     for &base in bases {
-        ensure!((1..top).contains(&base), "base tier {base} must be 1 to {}", top - 1);
+        ensure!(
+            (1..top).contains(&base),
+            "base tier {base} must be 1 to {}",
+            top - 1
+        );
         for parametric in [false, true] {
             if parametric && base > 3 {
                 continue;
@@ -554,7 +565,11 @@ fn layer_cost(
                     continue;
                 }
                 let pair = layer_pair(&model, clip, base, top, use_ps, group)?;
-                let ps = if use_ps { ps_kbps * 1000.0 / 8.0 * seconds(clip) } else { 0.0 };
+                let ps = if use_ps {
+                    ps_kbps * 1000.0 / 8.0 * seconds(clip)
+                } else {
+                    0.0
+                };
                 n += 1;
                 full_bytes += full_file;
                 base_bytes += to_f64(pair.base_file) + ps;
@@ -715,8 +730,8 @@ fn dac_encode(
     chunk: Option<usize>,
     latent_out: Option<&Path>,
 ) -> Result<()> {
-    use picotone::dac::{CODEBOOKS, DacEncoder, SAMPLE_RATE};
-    let encoder = DacEncoder::load(weights)?;
+    use picotone::dac::{CODEBOOKS, SAMPLE_RATE};
+    let encoder = crate::hq::load_encoder(weights)?;
     let bytes = read(input)?;
     let audio: Vec<f32> = bytes
         .as_chunks::<4>()
@@ -725,14 +740,17 @@ fn dac_encode(
         .map(|&b| f32::from_le_bytes(b))
         .collect();
     let t = Instant::now();
-    let latent = encoder.latent_chunked(&audio, chunk.unwrap_or(picotone::dac::CHUNK))?;
+    let latent = match chunk {
+        Some(chunk) => encoder.net.latent_chunked(&audio, chunk)?,
+        None => encoder.net.latent(&audio)?,
+    };
     let took = t.elapsed().as_secs_f64();
     if let Some(path) = latent_out {
         let raw: Vec<u8> = latent.data().iter().flat_map(|v| v.to_le_bytes()).collect();
         std::fs::write(path, raw).with_context(|| format!("writing {}", path.display()))?;
     }
     let t = Instant::now();
-    let codes = encoder.quantize(latent)?;
+    let codes = encoder.quantizer.quantize(latent)?;
     let seconds = to_f64(audio.len()) / f64::from(SAMPLE_RATE);
     eprintln!(
         "encoded {seconds:.1} s: encoder {took:.2} s ({:.2}x real time), quantiser {:.3} s",

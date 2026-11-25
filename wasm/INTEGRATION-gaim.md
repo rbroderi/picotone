@@ -321,7 +321,9 @@ single-threaded stereo (§5), so it suits plain-HTTP table pages too.
 decoder in `web/` refuses HQ files for now.
 
 An HQ file names its code space, not a decoder; the Vocos network (`dac44_vocos`) decodes
-every `dac44` file at every codebook count. It needs about 77 MiB of wasm memory
+every `dac44` file at every codebook count. The same holds on the encoding side: `picotone encode`
+makes HQ codes with picotone's STFT encoder in front of DAC's quantiser, and the files are the
+same format and code space as before, so nothing changes in the decoder or its weights. It needs about 77 MiB of wasm memory
 single-threaded.
 
 ## 5. Performance and caveats
