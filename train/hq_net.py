@@ -8,7 +8,7 @@
 
 The code dumps come from `tools/dac_codes.py` (or `picotone dev codes`): per clip one `[frames, 9]` u16 `.npy`
 per coded channel and a `.json` sidecar with the layout. Nothing here depends on how the encoder made the codes,
-only on the codebook vectors (`quantK.codebook_unit` in `dac44_encoder.safetensors`), so a new encoder over the
+only on the codebook vectors (`quantK.codebook_unit` in `dac44_quantizer.safetensors`), so a new encoder over the
 same codebooks means: dump its codes, rerun `train` and `export`, and commit the new table.
 
 The net (see `src/cx2/hq.rs` for the integer definition) predicts each code of a channel from that channel's 8
@@ -61,7 +61,7 @@ def roles_of(layout, channels):
 
 def load_units(weights: Path) -> torch.Tensor:
     """DAC's unit-norm codebook vectors, `[9, 1024, 8]`."""
-    raw = (weights / "dac44_encoder.safetensors").read_bytes()
+    raw = (weights / "dac44_quantizer.safetensors").read_bytes()
     n = int.from_bytes(raw[:8], "little")
     header = json.loads(raw[8: 8 + n])
     out = []
@@ -462,7 +462,7 @@ def main():
     t.add_argument("--rank", type=int, default=128)
     t.add_argument("--tier-probs", default="0.08,0.08,0.08,0.15,0.15,0.15,0,0,0.31",
                    help="probability of each codebook count 1..9 per training channel")
-    t.add_argument("--steps", type=int, default=20000)
+    t.add_argument("--steps", type=int, default=80000)
     t.add_argument("--batch", type=int, default=1024)
     t.add_argument("--lr", type=float, default=2e-3)
     t.add_argument("--threads", type=int, default=6)

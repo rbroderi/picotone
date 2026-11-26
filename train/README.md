@@ -244,21 +244,32 @@ ranks (a 1024 x rank product per code), so check speed after converting.
 HQ streams (DAC 44 kHz codes) are coded by a separate cx2 model: one integer network, no other
 experts (`../src/cx2/hq.rs`). `hq_net.py` trains it and writes its table. The table depends only
 on the codes it is trained on and on DAC's 9 x 1024 codebook vectors (`quantK.codebook_unit` in
-`dac44_encoder.safetensors`, a fixed half of each code's embedding). So a new encoder that keeps
+`dac44_quantizer.safetensors`, a fixed half of each code's embedding). So a new encoder that keeps
 those codebooks needs only the three steps below, and nothing else changes.
+
+The fit set is every clip of the `fit` split (`clips_fit.json`, X:/audio/work/wav) and of the `fit2`
+split (`clips2.json`, X:/audio/work/wav2) except the clips in `EXCLUDE` in `tools/dac_codes.py`
+(the six DTRASH clips that X:/audio/distill/data/pd.jsonl flags `drop:dtrash-distorted`, and two
+clips of digital silence). The test set is the 23 clips of the `test` split (`clips_test.json`).
+No fit clip shares a source file or URL with a test clip; some share an album (other Goldberg
+variations, Chopin pieces and Brahms symphonies).
 
 ```sh
 # 1. Dump codes: per clip one [frames, 9] .npy per coded channel and a .json sidecar.
-#    Encodes with the HQ encoder at 9 codebooks; skips clips already dumped.
+#    Encodes with the HQ encoder at 9 codebooks; skips clips already dumped (about 4 s per clip).
 #    Point PICOTONE_EXE at a copy of the binary if you rebuild picotone meanwhile.
+python ../tools/dac_codes.py --list X:/audio/work/clips_fit.json --split fit --wav X:/audio/work/wav \
+    --out ../work/dac_codes/fit --threads 4 --jobs 4
 python ../tools/dac_codes.py --list X:/audio/work/clips2.json --split fit2 --wav X:/audio/work/wav2 \
-    --out ../work/dac_codes/fit2 --threads 3 --limit 300
-#    (the same for the test split, into ../work/dac_codes/test)
+    --out ../work/dac_codes/fit2 --threads 4 --jobs 4
+python ../tools/dac_codes.py --list X:/audio/work/clips_test.json --split test --wav X:/audio/work/wav \
+    --out ../work/dac_codes/test --threads 4 --jobs 4
 
 # 2. Train: tiers q1-q9 mixed per channel, 80-frame pages, 8 frames of history.
-#    Prints bits per code per tier and per role on the test codes.
+#    Prints bits per code per tier and per role on the test codes. About 0.15 s per step on
+#    6 threads of a Ryzen 7 8840U, so 80,000 steps take about 3.5 hours.
 uv run --extra cpu python hq_net.py train --fit ../work/dac_codes/fit ../work/dac_codes/fit2 \
-    --test ../work/dac_codes/test --weights ../weights --out out/hq_net.pt --steps 40000 --threads 6
+    --test ../work/dac_codes/test --weights ../weights --out out/hq_net.pt --steps 80000 --threads 6
 
 # 3. Export: the table, the integer-vs-float check per tier (coded bits, through the coder's
 #    frequency table), and the Rust parity fixture.
@@ -285,6 +296,20 @@ channel's role (left/right, mid or mono, side). Choices measured on the 23 test 
   beat 6k by 0.10 bits.
 - **Fit data, stage 1.** Going from 190 fit clips to 490 (fit plus fit2, 40k steps) saved 0.47
   bits per code at q9, from 8.75 to 8.28.
+- **Fit data and steps, stage 2** (STFT encoder codes, float net, bits per code at q9 / q3 on the
+  test codes; "other" is the 13 test clips with no album in the fit set):
+
+  | fit set | steps | all 23 clips | other 13 |
+  |---|---|---|---|
+  | stage 1: 407 clips, 16.8 channel-hours | 40k | 7.984 / 7.100 | 8.283 / 7.405 |
+  | stage 1 | 80k | 7.893 / 7.060 | 8.204 / 7.372 |
+  | all fit and fit2: 1,110 clips, 45.3 channel-hours | 40k | 8.018 / 7.111 | 8.283 / 7.388 |
+  | all fit and fit2 | 80k (shipped) | 7.909 / 7.054 | 8.188 / 7.338 |
+
+  Steps matter more than data here. The stage-1 set's 80k fit wins at q9 on all 23 clips only
+  through the four Goldberg test clips (0.13-0.23 bits each): 27 of its 407 clips are other
+  variations from the same recording. On the other 13 clips the larger set wins at both q9 and
+  q3, so the shipped table is the 80k fit on 1,110 clips.
 - **Head rank.** Rank 64 costs 0.085 bits at q9 and 0.048 at q3 against rank 128, and decodes only
   about 1.2x faster. The shipped table keeps rank 128.
 
