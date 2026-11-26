@@ -16,12 +16,12 @@
  "input_per_codebook": 9,
  "receptive_frames": 29,
  "params": 14062594,
- "step": 25000,
+ "step": 5000,
  "licences": "sharealike",
  "teacher": "descript-audio-codec 1.0.0, 44khz 8kbps weights (MIT, Copyright (c) 2023-present, Descript)",
  "source_sha256": {
-  "vocos": "5ad5ea8480c81b8994b0cacde6e328f17cbd1f397a97db98e158aac96b396496",
+  "vocos": "de08d3a474735c8da25e6615f1899af83f7e4fb3861fc916f1f74b671f726e87",
   "dac": "a88eed82a7024ccc1facdb1e605c4c2f99281c8118c22c9895ffa846d8fb61aa"
  },
- "fold_max_rel_dev": 6.368717322402517e-07
+ "fold_max_rel_dev": 9.018755235956633e-07
 }
