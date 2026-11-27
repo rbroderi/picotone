@@ -5,6 +5,7 @@
 *.ecxm binary
 *.pico binary
 *.picol binary
+*.opus binary
 *.wasm binary
 *.ps1 text eol=crlf
 
