@@ -57,7 +57,7 @@ DAC's licence in `weights/DAC-MIT.txt` and the decoder's training-data notice an
 `tools/export_stftenc.py` and `tools/export_vocos.py` convert the trained exports, and
 `tools/export_quantizer.py` takes the quantiser from DAC's own weights (`weights_44khz_8kbps_0.0.1.pth`).
 
-Encode with the HQ codec (the default: 44.1 kHz, about 8 kbps per channel at its full 9 codebooks), or with
+Encode with the HQ codec (the default: 44.1 kHz, about 6 kbps per channel at its default 9 codebooks, up to about 10.6 kbps at `--codebooks 16`), or with
 EnCodec (`--fast`, or a preset):
 
 ```powershell

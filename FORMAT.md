@@ -161,7 +161,7 @@ length in its header needs an intact last page; a player that streams can instea
 
 The HQ codec (`--model hq`, the encoder's default) codes 44.1 kHz audio as DAC 44 kHz codes: picotone's
 STFT encoder (`dac44_stftenc`) makes DAC's latent and DAC's own residual quantiser codes it, one frame per 512
-samples, up to 9 codebooks of 1024 entries per frame, a lower codebook
+samples, up to 16 codebooks of 1024 entries per frame, a lower codebook
 count being a prefix of the full one. picotone decodes it with a Vocos (iSTFT) decoder trained on those codes
 (`dac44-vocos`). Ogg
 framing, the comment header, extensions (TLVs), pre-skip, granules, damage handling and loops work as for
@@ -177,7 +177,7 @@ EnCodec; only the fixed part and the audio packets differ. The implementation is
 | 8 | table hash | FNV-1a 64 of the HQ cx2 table file (`.ecxm`, magic `ECXH`) the pages are coded with |
 | 1 | layout | 0 = mono, 1 = left/right, 2 = mid/side (M = (L+R)/2, S = (L-R)/2; L = M+S, R = M-S), 3 = parametric stereo (the mid M alone, plus stereo parameters per page) |
 | 1 | parametric settings | **only for layout 3**: bits 0-1 the band layout (0 = 20 bands, 1 = 10), bits 2-4 log2 of the frames per parameter set (1 to 16); other bits 0 |
-| 1 per coded channel | codebooks | codes per frame for each coded channel (1 to 9); for mid/side, the mid's then the side's; for parametric stereo, the mid's |
+| 1 per coded channel | codebooks | codes per frame for each coded channel (1 to 16); for mid/side, the mid's then the side's; for parametric stereo, the mid's |
 | 1 | flags | bit 0: loop; bit 1: a comment header follows; bit 2: the length is stored. Other bits must be 0 |
 | varint | pre-skip | decoded samples a player drops at the start |
 | varint | page length | frames per page (the encoder writes 80, about 0.93 s); 0 = the stream is one page |

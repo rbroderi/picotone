@@ -35,7 +35,7 @@ use crate::cx2::rangecoder::{Decoder, Encoder};
 /// Codebook size.
 pub const CARD: usize = 1024;
 /// Most codebooks per frame.
-pub const CODEBOOKS: usize = 9;
+pub const CODEBOOKS: usize = 16;
 const MAGIC: &[u8; 4] = b"ECXH";
 const VERSION: u32 = 1;
 /// Largest activation and embedding magnitude.
@@ -323,7 +323,7 @@ impl HqModel {
     /// Starts predicting a channel of `codebooks` codes per frame.
     ///
     /// # Errors
-    /// Fails when `codebooks` is not 1 to 9.
+    /// Fails when `codebooks` is not 1 to 16.
     pub fn predictor(&self, role: Role, codebooks: usize) -> Result<HqPredictor<'_>> {
         ensure!(
             (1..=CODEBOOKS).contains(&codebooks),
@@ -522,7 +522,7 @@ impl HqPredictor<'_> {
 /// with a fresh predictor.
 ///
 /// # Errors
-/// Fails when a code is out of range or `codebooks` is not 1 to 9.
+/// Fails when a code is out of range or `codebooks` is not 1 to 16.
 pub fn encode_page(
     model: &HqModel,
     role: Role,

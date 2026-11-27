@@ -119,7 +119,7 @@ pub struct DacInfo {
     pub table_hash: u64,
     /// How the coded channels make up the output.
     pub layout: ChannelLayout,
-    /// Codebooks per frame of each coded channel, 1 to 9.
+    /// Codebooks per frame of each coded channel, 1 to 16.
     pub codebooks: Vec<usize>,
     /// Whether the trimmed audio loops seamlessly.
     pub looped: bool,
@@ -733,14 +733,19 @@ mod tests {
             .iter()
             .filter_map(|v| v.as_u64().and_then(|c| u16::try_from(c).ok()))
             .collect();
-        let frames = mid.len() / 9;
-        let i = info(ChannelLayout::MidSide, vec![9, 3], 512 * frames);
+        let n = usize::try_from(
+            json["cases"][0]["codebooks"]
+                .as_u64()
+                .context("fixture codebooks")?,
+        )?;
+        let frames = mid.len() / n;
+        let i = info(ChannelLayout::MidSide, vec![n, 3], 512 * frames);
         let side = codes(frames, 3, 5);
         let bytes = write_dac(&i, table()?, &[mid.clone(), side.clone()])?;
         let stream = DacStream::parse(&bytes)?;
         assert_eq!(stream.decode_all(table()?)?, vec![mid, side]);
         let coded = stream.coded_bytes();
-        assert!(coded[0] * 8 < frames * 9 * 10, "{coded:?}");
+        assert!(coded[0] * 8 < frames * n * 10, "{coded:?}");
         // Another table is refused.
         let mut other = i;
         other.table_hash ^= 1;
@@ -767,8 +772,8 @@ mod tests {
     fn bad_headers_are_refused() -> Result<()> {
         let mut i = info(ChannelLayout::LeftRight, vec![9], 1000);
         assert!(write_dac(&i, table()?, &[codes(2, 9, 1)]).is_err());
-        i.codebooks = vec![9, 10];
-        assert!(write_dac(&i, table()?, &[codes(2, 9, 1), codes(2, 10, 1)]).is_err());
+        i.codebooks = vec![9, 17];
+        assert!(write_dac(&i, table()?, &[codes(2, 9, 1), codes(2, 17, 1)]).is_err());
         i.codebooks = vec![9, 0];
         assert!(write_dac(&i, table()?, &[codes(2, 9, 1), Vec::new()]).is_err());
         Ok(())

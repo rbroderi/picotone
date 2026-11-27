@@ -274,7 +274,12 @@ impl DacQuantizer {
         let mut residual = latent.clone();
         for (i, q) in self.stages.iter().enumerate() {
             if i == DAC_CODEBOOKS {
-                for ((r, z), s) in residual.data_mut().iter_mut().zip(latent.data()).zip(sum.data()) {
+                for ((r, z), s) in residual
+                    .data_mut()
+                    .iter_mut()
+                    .zip(latent.data())
+                    .zip(sum.data())
+                {
                     *r = z - s;
                 }
             }

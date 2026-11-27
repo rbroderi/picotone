@@ -493,7 +493,9 @@ fn encode_hq(
     channels: usize,
     auto_mono: bool,
 ) -> Result<Encoded> {
-    let codebooks = options.codebooks.unwrap_or(picotone::dac::DEFAULT_CODEBOOKS);
+    let codebooks = options
+        .codebooks
+        .unwrap_or(picotone::dac::DEFAULT_CODEBOOKS);
     let table_path = options
         .table
         .clone()

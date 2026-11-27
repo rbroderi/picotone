@@ -255,8 +255,9 @@ No fit clip shares a source file or URL with a test clip; some share an album (o
 variations, Chopin pieces and Brahms symphonies).
 
 ```sh
-# 1. Dump codes: per clip one [frames, 9] .npy per coded channel and a .json sidecar.
-#    Encodes with the HQ encoder at 9 codebooks; skips clips already dumped (about 4 s per clip).
+# 1. Dump codes: per clip one [frames, 16] .npy per coded channel and a .json sidecar.
+#    Runs `picotone encode --dump-codes` at 16 codebooks (no cx2 coding, so any table loads);
+#    skips clips already dumped (about 7 s per clip on the PC, 2.8 s on the laptop).
 #    Point PICOTONE_EXE at a copy of the binary if you rebuild picotone meanwhile.
 python ../tools/dac_codes.py --list X:/audio/work/clips_fit.json --split fit --wav X:/audio/work/wav \
     --out ../work/dac_codes/fit --threads 4 --jobs 4
@@ -265,11 +266,12 @@ python ../tools/dac_codes.py --list X:/audio/work/clips2.json --split fit2 --wav
 python ../tools/dac_codes.py --list X:/audio/work/clips_test.json --split test --wav X:/audio/work/wav \
     --out ../work/dac_codes/test --threads 4 --jobs 4
 
-# 2. Train: tiers q1-q9 mixed per channel, 80-frame pages, 8 frames of history.
-#    Prints bits per code per tier and per role on the test codes. About 0.15 s per step on
-#    6 threads of a Ryzen 7 8840U, so 80,000 steps take about 3.5 hours.
+# 2. Train: tiers mixed per channel (q1-q3 6% each, q4-q6 10%, q9 22%, q11-q16 5%; never q7,
+#    q8 or q10), 80-frame pages, 8 frames of history. Prints bits per code per tier and per role
+#    on the test codes. On the laptop GPU (--device cuda) 80,000 steps take about 9 minutes; on
+#    the CPU about 1.2 s per step at 16 codebooks, so use the GPU.
 uv run --extra cpu python hq_net.py train --fit ../work/dac_codes/fit ../work/dac_codes/fit2 \
-    --test ../work/dac_codes/test --weights ../weights --out out/hq_net.pt --steps 80000 --threads 6
+    --test ../work/dac_codes/test --weights ../weights --out out/hq_net.pt --steps 80000 --device cuda
 
 # 3. Export: the table, the integer-vs-float check per tier (coded bits, through the coder's
 #    frequency table), and the Rust parity fixture.
@@ -304,12 +306,19 @@ channel's role (left/right, mid or mono, side). Choices measured on the 23 test 
   | stage 1: 407 clips, 16.8 channel-hours | 40k | 7.984 / 7.100 | 8.283 / 7.405 |
   | stage 1 | 80k | 7.893 / 7.060 | 8.204 / 7.372 |
   | all fit and fit2: 1,110 clips, 45.3 channel-hours | 40k | 8.018 / 7.111 | 8.283 / 7.388 |
-  | all fit and fit2 | 80k (shipped) | 7.909 / 7.054 | 8.188 / 7.338 |
+  | all fit and fit2 | 80k | 7.909 / 7.054 | 8.188 / 7.338 |
+  | all fit and fit2, 16 codebooks (shipped) | 80k | 7.854 / 7.125 | |
 
   Steps matter more than data here. The stage-1 set's 80k fit wins at q9 on all 23 clips only
   through the four Goldberg test clips (0.13-0.23 bits each): 27 of its 407 clips are other
   variations from the same recording. On the other 13 clips the larger set wins at both q9 and
-  q3, so the shipped table is the 80k fit on 1,110 clips.
+  q3, so the 9-codebook table was the 80k fit on 1,110 clips.
+- **16 codebooks** (stage 3, `hq_net16.pt` sha256 99d1d05a..., trained on the laptop GPU at 145
+  steps/s). The same 1,110 clips dumped at 16 codebooks. Against the 9-codebook table it saves
+  0.055 bits at q9 and costs 0.071 at q3, since q1-q3 get less of the tier mix. Real coded size
+  on the 23 test clips (`dev dac-pack`), kbps per channel: q1 0.60, q3 1.84, q6 3.94, q9 6.09,
+  q10 6.56, q11 7.32, q12 8.06, q13 8.38, q14 9.13, q15 9.87, q16 10.57. Codebooks 10 and 13 are
+  cheap (5.6 and 3.8 bits per code at q16: they use few of their entries).
 - **Head rank.** Rank 64 costs 0.085 bits at q9 and 0.048 at q3 against rank 128, and decodes only
   about 1.2x faster. The shipped table keeps rank 128.
 
