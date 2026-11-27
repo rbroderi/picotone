@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "C interface to the picotone player, for the foobar2000 input component"
-license = "GPL-3.0-or-later"
+license = "LGPL-3.0-or-later"
 publish = false
 
 # Its own workspace, so it never joins (or builds into) the parent crate's.

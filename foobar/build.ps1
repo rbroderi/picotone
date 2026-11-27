@@ -44,6 +44,7 @@ $weights = "dac44_vocos.json", "dac44_vocos.safetensors", "dac44_vocos.NOTICE.tx
 foreach ($name in $weights) { Copy-Item (Join-Path $root "weights\$name") "$stage\weights" }
 Copy-Item (Join-Path $root "models\*.ecxm") "$stage\models"
 Copy-Item (Join-Path $root "LICENSE") "$stage\LICENSE.txt"
+Copy-Item (Join-Path $here "COPYING.LESSER") "$stage\COPYING.LESSER.txt"
 
 $zip = Join-Path $build "foo_input_pico.zip"
 $component = Join-Path $build "foo_input_pico.fb2k-component"
@@ -70,7 +71,7 @@ if ($Install) {
             if (Test-Path "$dest\$data") { Remove-Item -Recurse -Force "$dest\$data" }
             Copy-Item -Recurse "$stage\$data" $dest
         }
-        Copy-Item "$stage\LICENSE.txt" $dest
+        Copy-Item "$stage\LICENSE.txt", "$stage\COPYING.LESSER.txt" $dest
     }
     Write-Host "Installed into $profile; restart foobar2000."
 }

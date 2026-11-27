@@ -233,7 +233,9 @@ greedy codes (`--beam 1`) and the decoder against the Hugging Face reference imp
 
 ## Licence
 
-The code is licensed under the [GNU General Public License v3.0](LICENSE) or later.
+The code is licensed under the [GNU General Public License v3.0](LICENSE) or later. The foobar2000 component
+(`foobar/`, and the DLL it builds with picotone's library inside) is licensed under the
+[GNU Lesser General Public License v3.0](foobar/COPYING.LESSER) or later.
 
 picotone runs Meta's EnCodec model weights and weights derived from Descript's DAC, both MIT-licensed. Any copy
 of the weights, including the browser model files, must carry their notices (Meta's in [`LICENSES/EnCodec-MIT.txt`](LICENSES/EnCodec-MIT.txt), which the browser

@@ -61,6 +61,8 @@ or if a seek's samples differ from the whole decode's.
 
 ## Licence
 
-The component is GPL-3.0-or-later, like picotone. It links the foobar2000 SDK (its own licence is in
-`sdk/sdk-license.txt`) and runs inside foobar2000, which is closed source. The weights carry their own notices,
+The component (everything in `foobar/`, and the `foo_input_pico.dll` it builds, which includes picotone's library)
+is licensed under the [GNU Lesser General Public License v3.0](COPYING.LESSER) or later, so it can link the
+foobar2000 SDK (its own licence is in `sdk/sdk-license.txt`) and run inside foobar2000, which is closed source. The
+LGPL adds permissions to the GPL, whose text is in [`LICENSE`](../LICENSE). The weights carry their own notices,
 which the package includes.

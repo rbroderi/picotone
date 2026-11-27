@@ -7,7 +7,7 @@
 // `weights` and `models` next to this DLL, then one folder up (the x64 DLL of
 // a component package sits in an `x64` subfolder).
 //
-// GPL-3.0-or-later, as picotone.
+// LGPL-3.0-or-later (foobar/COPYING.LESSER, with the GPL in LICENSE).
 
 #include <SDK/foobar2000.h>
 
@@ -22,7 +22,7 @@ DECLARE_COMPONENT_VERSION(
     "picotone decoder", "0.1.0",
     "Plays picotone .pico files (HQ and EnCodec), with an HQ file's .picol "
     "enhancement layer when it lies next to the file.\n\n"
-    "GPL-3.0-or-later. Weights: Meta's EnCodec (MIT) and picotone's HQ "
+    "LGPL-3.0-or-later. Weights: Meta's EnCodec (MIT) and picotone's HQ "
     "decoder, derived from Descript's DAC (MIT); see the notices next to the "
     "weights.");
 VALIDATE_COMPONENT_FILENAME("foo_input_pico.dll");

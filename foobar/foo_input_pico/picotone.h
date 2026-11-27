@@ -1,6 +1,8 @@
 /* The C interface of picotone-ffi (foobar/picotone-ffi/src/lib.rs). All
  * strings are UTF-8. A failing call returns -1 (or null); pt_last_error()
- * then gives the message for this thread. */
+ * then gives the message for this thread.
+ *
+ * LGPL-3.0-or-later (foobar/COPYING.LESSER). */
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
