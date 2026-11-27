@@ -11,6 +11,8 @@ use picotone::cx2::hq::HqModel;
 use picotone::dac::HOP;
 use picotone::hqstream::{HqDecoder, HqStream};
 use picotone::layout::Trimmer;
+use picotone::limiter;
+use picotone::player::{Net, Player, Tables, no_clock};
 use picotone::nn::Seq;
 use picotone::pico::{self, ChannelLayout, DacInfo, DacStream};
 use picotone::pstereo;
@@ -243,5 +245,47 @@ fn streaming_decodes_equal_the_whole_file_bit_for_bit() -> Result<()> {
         }
         assert!(HqStream::new(DacStream::parse(&case.bytes)?, table()?, d, total).is_err());
     }
+    Ok(())
+}
+
+/// The player: the streaming decode, then the limiter, from every kind of
+/// start. (The small fixture decoder stays under the ceiling, so this checks
+/// the plumbing and the seek pre-roll; the limiter's own tests cover overs.)
+#[test]
+fn player_equals_the_limited_whole_file_bit_for_bit() -> Result<()> {
+    let mut tables = Tables::new();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("models/cx2_dac44.ecxm");
+    let _: u64 = tables.add(&std::fs::read(path)?)?;
+    let d: &'static dyn HqDecoder = decoder()?;
+    let mut limited = 0;
+    for case in cases()? {
+        let raw = reference(&case.bytes)?;
+        let want = limiter::limit(&raw)?;
+        let total = want.len();
+        let channels = want.channels();
+        if raw.data().iter().any(|v| v.abs() > limiter::CEILING) {
+            limited += 1;
+        }
+        assert!(want.data().iter().all(|v| v.abs() <= limiter::CEILING));
+        for start in [0, 1, limiter::LOOKBACK + 3, total / 2, total - 1] {
+            for units in [1, usize::MAX] {
+                let mut p = Player::open(Net::Hq(d), &case.bytes, None, &tables, start, no_clock)?;
+                let mut got = Vec::new();
+                let mut next = start;
+                while let Some(chunk) = p.decode_units(units)? {
+                    assert_eq!(chunk.offset, next, "{}", case.name);
+                    assert!(!chunk.audio.is_empty());
+                    next += chunk.audio.len();
+                    got.extend_from_slice(chunk.audio.data());
+                }
+                assert!(
+                    same_bits(&got, &want.data()[start * channels..]),
+                    "{}: start {start}, {units} units",
+                    case.name
+                );
+            }
+        }
+    }
+    eprintln!("{limited} of the cases go over the ceiling before the limiter");
     Ok(())
 }

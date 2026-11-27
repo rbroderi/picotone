@@ -23,6 +23,7 @@ mod fft;
 pub mod hqstream;
 mod kernels;
 pub mod layout;
+pub mod limiter;
 pub mod model;
 pub mod nn;
 pub mod pico;

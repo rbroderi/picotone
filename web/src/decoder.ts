@@ -33,6 +33,7 @@ import {
   segmentStride,
 } from './config.js';
 import { type PicoCodes, Cx2Reader, PicoError, parseHeader } from './pico.js';
+import { Limiter } from './limit.js';
 import { Trimmer } from './trim.js';
 import { type Kernel, makeKernel, requestDevice } from './gpu.js';
 import {
@@ -861,7 +862,17 @@ export class PicotoneWebGpu {
     const result: DecodedAudio = { sampleRate: this.sampleRate, length, channels: outChannels, loop: header.loop };
     if (length === 0) return result;
     const trimmer = new Trimmer(header.preSkip, length, header.loop, this.sampleRate, C);
+    const limiter = new Limiter(C);
     let emitted = 0;
+    const emit = (planar: Float32Array[]): void => {
+      const offset = emitted;
+      const count = planar[0]?.length ?? 0;
+      emitted += count;
+      if (count > 0) {
+        if (collect) planar.forEach((ch, c) => (outChannels[c] as Float32Array).set(ch, offset));
+        opts.onChunk?.({ offset, sampleRate: this.sampleRate, channels: planar });
+      }
+    };
 
     this.device.pushErrorScope('validation');
     this.device.pushErrorScope('out-of-memory');
@@ -875,14 +886,7 @@ export class PicotoneWebGpu {
       for (let i = 0; i < item.count; i++) {
         for (let c = 0; c < C; c++) (raw[c] as Float32Array)[i] = data[i * C + c] ?? 0;
       }
-      const planar = trimmer.identity ? raw : trimmer.push(raw);
-      const offset = emitted;
-      const count = planar[0]?.length ?? 0;
-      emitted += count;
-      if (count > 0) {
-        if (collect) planar.forEach((ch, c) => (outChannels[c] as Float32Array).set(ch, offset));
-        opts.onChunk?.({ offset, sampleRate: this.sampleRate, channels: planar });
-      }
+      emit(limiter.push(trimmer.identity ? raw : trimmer.push(raw)));
       opts.onProgress?.(Math.min(1, (item.offset + item.count) / total));
     };
     const submit = async (rec: Recorder, src: GPUBuffer, offset: number, count: number): Promise<void> => {
@@ -929,6 +933,7 @@ export class PicotoneWebGpu {
         if (first) await deliver(first);
       }
       if (!trimmer.identity) trimmer.finish();
+      emit(limiter.finish());
       if (emitted < length) throw new PicoError(`decoded ${emitted} samples, expected ${length}`);
     } finally {
       codes.free();

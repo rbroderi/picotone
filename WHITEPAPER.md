@@ -60,6 +60,7 @@ picotone uses its own container, `.pico` (§7), not Meta's `.ecdc`.
   trained on DAC's residual, 16 in all (`dac44_quantizer`). A lower codebook count is a prefix of the full code,
   so one encode serves every rate.
 - **Decoder:** a Vocos (iSTFT) decoder trained on those codes (`dac44_vocos`) decodes every codebook count.
+- **Limiter:** every decode, HQ and EnCodec, in every player, ends in a look-ahead peak limiter (§3.4).
 
 A file names its code space by a hash of the codebooks, not a decoder, so any decoder of these codes can play
 it. Each coded channel is coded separately.
@@ -158,6 +159,25 @@ On one thread at 48 kHz, decode time splits into convolution GEMMs 7.37 s, LSTM 
   later segment can change.
 
 Both are bit-identical to a whole-file decode, and their memory depends on the chunk size, not the file length.
+
+### 3.4 The limiter
+
+A decoder network can go over full scale where the original did not. HQ at q3 does so in the Boléro's climax,
+up to +3.4 dBFS (177 samples, all after 821 s), where the original peaks at −0.6 dBFS. Instead of clipping those
+samples, `limiter::Limiter` lowers the gain around them, shared across channels, to a ceiling of 0.99:
+
+- **Shape:** the gain falls over 5 ms before an over, is held for 50 ms after it, and returns over 5 ms. It is
+  the mean over ±2.5 ms of the lowest gain any sample needs within the hold, so no sample ends up over the
+  ceiling.
+- **Exactness:** the gain at a sample depends only on the input from 2,425 samples before it to 220 after it,
+  summed in a fixed order. The output is the same however the input is chunked, a seek decodes 2,425 samples
+  early to match a whole decode bit for bit, and where nothing in that span is over the ceiling the audio passes
+  through unchanged.
+- **Effect:** on the Boléro at q3 the 177 overs become 51 gain dips of at most −3.5 dB, 3.5 s in all; the other
+  957 s are unchanged. q9 and q16 stay under the ceiling and are not touched.
+
+`player::Player`, the command line and both browser decoders apply it (the WebGPU decoder through a TypeScript
+port with the same f32 arithmetic). `picotone decode --no-limit --float` writes the decoder's raw output.
 
 ## 4. The segment overlap (EnCodec 48 kHz)
 

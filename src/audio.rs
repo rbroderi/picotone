@@ -207,12 +207,19 @@ pub enum WavFormat {
     Float32,
 }
 
-/// Writes a WAV file. Samples are clipped to ±0.99 (EnCodec's default), or
-/// scaled down to fit when `rescale` is set.
+/// Writes a WAV file, scaled down to fit when `rescale` is set. Samples are
+/// clipped to ±0.99 (decodes are limited to that already, so this is only a
+/// guard), except float samples when `clip` is off.
 ///
 /// # Errors
 /// Fails when the file cannot be written.
-pub fn write_wav(path: &Path, audio: &Audio, format: WavFormat, rescale: bool) -> Result<()> {
+pub fn write_wav(
+    path: &Path,
+    audio: &Audio,
+    format: WavFormat,
+    rescale: bool,
+    clip: bool,
+) -> Result<()> {
     let spec = hound::WavSpec {
         channels: u16::try_from(audio.channels.len())?,
         sample_rate: audio.sample_rate,
@@ -240,9 +247,10 @@ pub fn write_wav(path: &Path, audio: &Audio, format: WavFormat, rescale: bool) -
         .with_context(|| format!("creating {}", path.display()))?;
     for t in 0..audio.len() {
         for channel in &audio.channels {
-            let v = (channel[t] * gain).clamp(-limit, limit);
+            let v = channel[t] * gain;
             match format {
-                WavFormat::Pcm16 => writer.write_sample(to_i16(v))?,
+                WavFormat::Pcm16 => writer.write_sample(to_i16(v.clamp(-limit, limit)))?,
+                WavFormat::Float32 if clip => writer.write_sample(v.clamp(-limit, limit))?,
                 WavFormat::Float32 => writer.write_sample(v)?,
             }
         }

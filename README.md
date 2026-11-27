@@ -129,8 +129,9 @@ slightly better quality at no decode cost.
 | `--table` | the model's default | The cx2 table to code with |
 | `--threads` | all cores | Worker threads |
 
-`decode` takes `--float` (32-bit float WAV) and `--rescale` (scale down to avoid clipping, instead of
-limiting). HQ files decode with the Vocos (iSTFT) decoder, `weights/dac44_vocos.safetensors`. `roundtrip` encodes and decodes in one step. `info` prints the headers, the tags and the bitrate.
+Every decode ends in a look-ahead peak limiter, which lowers the gain smoothly around any sample the decoder
+puts over full scale (WHITEPAPER §3.4). `decode` takes `--float` (32-bit float WAV), `--rescale` (scale the
+whole file down to fit, instead of limiting) and `--no-limit` (the decoder's raw output, for measurements). HQ files decode with the Vocos (iSTFT) decoder, `weights/dac44_vocos.safetensors`. `roundtrip` encodes and decodes in one step. `info` prints the headers, the tags and the bitrate.
 
 ## The `.pico` format
 
@@ -208,7 +209,7 @@ picotone = { path = "../encodecx", features = ["audio-io"] }            # plus f
 The main entry points:
 
 - `player::Player`: a streaming player for any `.pico` file (with its `.picol`), from any sample, a block at a
-  time; the browser decoder and the foobar2000 component use it.
+  time, limited (`limiter::Limiter`); the browser decoder and the foobar2000 component use it.
 - `pico::DacStream::parse` (with `attach_layer` for a `.picol`) and `hqstream::HqStream`: HQ streams, decoded page by
   page.
 - `Encodec::from_bytes` and `ModelKind::load_with(dir, LoadOptions)`: load only the EnCodec encoder, decoder or

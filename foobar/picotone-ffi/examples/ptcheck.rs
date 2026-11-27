@@ -72,11 +72,8 @@ fn main() -> Result<()> {
 
     let t = Instant::now();
     // SAFETY: NUL-terminated strings.
-    ensure!(
-        unsafe { pt_init(weights.as_ptr(), models.as_ptr()) } == 0,
-        "pt_init: {}",
-        error()
-    );
+    let status = unsafe { pt_init(weights.as_ptr(), models.as_ptr()) };
+    ensure!(status == 0, "pt_init: {}", error());
     let mut header = PtHeader::default();
     // SAFETY: valid buffers and a writable header.
     let ok = unsafe {
@@ -117,7 +114,8 @@ fn main() -> Result<()> {
         audio / seconds
     );
 
-    for start in [length / 3, length / 2 + 12_345] {
+    // The last one lands in the Boléro's climax, where the limiter works.
+    for start in [length / 3, length / 2 + 12_345, length / 8 * 7 + 777] {
         let part = decode(&pico, &layer, u64::try_from(start)?, channels)?;
         let expect = &whole[start * channels..];
         ensure!(

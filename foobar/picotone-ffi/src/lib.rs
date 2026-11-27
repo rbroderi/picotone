@@ -327,8 +327,8 @@ pub unsafe extern "C" fn pt_tags(
         if packed.len() <= cap && !buf.is_null() {
             // SAFETY: `buf` has `cap` writable bytes, and `packed` fits.
             unsafe {
-                std::ptr::copy_nonoverlapping(packed.as_ptr(), buf.cast::<u8>(), packed.len())
-            };
+                std::ptr::copy_nonoverlapping(packed.as_ptr(), buf.cast::<u8>(), packed.len());
+            }
         }
         Ok(isize::try_from(packed.len())?)
     })

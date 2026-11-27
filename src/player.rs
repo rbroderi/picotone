@@ -11,8 +11,10 @@
 //! Segmented models (`encodec_48khz`) decode each segment with
 //! [`Encodec::decode_segment`] and stitch them with [`OverlapAdd`]; causal
 //! models (`encodec_24khz`) run a [`StreamDecoder`] over the codes; HQ files
-//! run through [`HqStream`]. Every way, the output equals a whole-file decode
-//! bit for bit, and memory depends on the chunk size, not the file length.
+//! run through [`HqStream`]. The decoded audio then goes through the
+//! [`Limiter`]. Every way, the output equals a whole-file decode bit for bit
+//! (a seek starts decoding [`limiter::LOOKBACK`] samples early for the
+//! limiter), and memory depends on the chunk size, not the file length.
 
 use std::collections::VecDeque;
 
@@ -23,6 +25,7 @@ use crate::cx2::{self, hq::HqModel};
 use crate::dac;
 use crate::hqstream::{HqDecoder, HqStream};
 use crate::layout::Trimmer;
+use crate::limiter::{self, Limiter};
 use crate::model::{Encodec, EncodedFrame, OverlapAdd, StreamDecoder};
 use crate::nn::Seq;
 use crate::pico::{self, Codec, DacInfo, DacStream, Info};
@@ -232,6 +235,12 @@ pub struct Player {
     looped: bool,
     num_codebooks: usize,
     layered: bool,
+    /// Limits the decoded audio; `None` once it has finished.
+    limiter: Option<Limiter>,
+    /// Limited samples still to drop: the pre-roll of a seek.
+    skip: usize,
+    /// Playable sample the next returned chunk starts at.
+    emitted: usize,
     clock: Clock,
     cx2_ms: f64,
     network_ms: f64,
@@ -247,9 +256,10 @@ enum Inner {
 impl Player {
     /// Parses `bytes` (and, for an HQ file, its enhancement layer `layer`)
     /// for network `net`; the first returned sample is playable sample
-    /// `start_sample`. The 48 kHz model starts at the segment that sample
-    /// needs and HQ files a few frames before it; the causal 24 kHz model and
-    /// loops decode from the start and drop what comes before.
+    /// `start_sample`. Decoding starts [`limiter::LOOKBACK`] samples before
+    /// it, for the limiter: the 48 kHz model at the segment that sample needs
+    /// and HQ files a few frames before it; the causal 24 kHz model and loops
+    /// decode from the start and drop what comes before.
     ///
     /// # Errors
     /// Fails when the file is malformed or truncated, needs another model, is
@@ -271,10 +281,16 @@ impl Player {
             "this file needs model {model}, but {} is loaded",
             net.model()
         );
+        let pre_roll = start_sample.min(limiter::LOOKBACK);
+        let first = start_sample - pre_roll;
         let (inner, sample_rate, channels, num_codebooks, audio_length, looped) = match net {
             Net::Encodec(encodec) => {
                 ensure!(layer.is_none(), "only HQ files have enhancement layers");
-                let stream = EncodecStream::new(encodec, bytes, tables, start_sample, clock)?;
+                let stream = EncodecStream::new(encodec, bytes, tables, first, clock)?;
+                ensure!(
+                    start_sample < stream.info.playable_samples(),
+                    "start sample {start_sample} is past the end"
+                );
                 let (rate, channels) = match stream.info.model {
                     ModelKind::Mono24k => (24_000, 1),
                     ModelKind::Stereo48k => (48_000, 2),
@@ -309,7 +325,12 @@ impl Player {
                     info.playable_samples(),
                     info.looped,
                 );
-                let stream = HqStream::new(stream, table, decoder, start_sample)?;
+                ensure!(
+                    start_sample < facts.2,
+                    "start sample {start_sample} is past the end ({} samples)",
+                    facts.2
+                );
+                let stream = HqStream::new(stream, table, decoder, first)?;
                 (
                     Inner::Hq(Box::new(stream)),
                     usize::try_from(dac::SAMPLE_RATE)?,
@@ -329,6 +350,9 @@ impl Player {
             looped,
             num_codebooks,
             layered: layer.is_some(),
+            limiter: Some(Limiter::new(channels)),
+            skip: pre_roll,
+            emitted: start_sample,
             clock,
             cx2_ms: 0.0,
             network_ms: 0.0,
@@ -342,6 +366,42 @@ impl Player {
     /// # Errors
     /// Fails when a page is damaged or the codes do not fit the network.
     pub fn decode_units(&mut self, max_units: usize) -> Result<Option<Chunk>> {
+        loop {
+            if self.limiter.is_none() {
+                return Ok(None);
+            }
+            let raw = self.decode_raw(max_units)?;
+            let start = (self.clock)();
+            let mut audio = match &raw {
+                Some(chunk) => self
+                    .limiter
+                    .as_mut()
+                    .context("player already finished")?
+                    .push(&chunk.audio)?,
+                None => self
+                    .limiter
+                    .take()
+                    .context("player already finished")?
+                    .finish()?,
+            };
+            drop(raw);
+            if self.skip > 0 {
+                let cut = self.skip.min(audio.len());
+                self.skip -= cut;
+                audio = audio.slice_rows(cut, audio.len());
+            }
+            self.network_ms += (self.clock)() - start;
+            if !audio.is_empty() {
+                let offset = self.emitted;
+                self.emitted += audio.len();
+                return Ok(Some(Chunk { offset, audio }));
+            }
+        }
+    }
+
+    /// The decoder's samples before the limiter: up to `max_units` more
+    /// units, or `None` at the end.
+    fn decode_raw(&mut self, max_units: usize) -> Result<Option<Chunk>> {
         let start = (self.clock)();
         match &mut self.inner {
             Inner::Encodec(s) => {

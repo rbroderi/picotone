@@ -14,6 +14,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use picotone::audio::{self, Audio, WavFormat};
 use picotone::config::Config;
 use picotone::layout::{self, Crossfade, Segmenting, Trimmer};
+use picotone::limiter;
 use picotone::model::{EncodeParams, Encodec, EncodedFrame, LoadOptions};
 use picotone::nn::Seq;
 use picotone::pico::{self, Codec, Info, Stream};
@@ -323,13 +324,18 @@ struct EncodeOptions {
 }
 
 #[derive(Debug, Args)]
+#[expect(clippy::struct_excessive_bools, reason = "independent command-line flags")]
 struct WavOptions {
     /// Write 32-bit float samples instead of 16-bit PCM.
     #[arg(long)]
     float: bool,
-    /// Scale the output down to avoid clipping instead of hard-limiting it.
-    #[arg(long)]
+    /// Scale the whole output down to fit instead of running the limiter.
+    #[arg(long, conflicts_with = "no_limit")]
     rescale: bool,
+    /// Write the decoder's output without the limiter (for measurements; with
+    /// --float, samples over full scale are kept).
+    #[arg(long)]
+    no_limit: bool,
     /// cx2 table to decode with, instead of the one the tables directory holds for the file.
     #[arg(long)]
     table: Option<PathBuf>,
@@ -762,7 +768,12 @@ fn write_wav(output: &Path, out: &Audio, options: &WavOptions) -> Result<()> {
     } else {
         WavFormat::Pcm16
     };
-    audio::write_wav(output, out, format, options.rescale)?;
+    if options.rescale || options.no_limit {
+        audio::write_wav(output, out, format, options.rescale, !options.no_limit)?;
+    } else {
+        let limited = Audio::from_seq(&limiter::limit(&out.to_seq()?)?, out.sample_rate);
+        audio::write_wav(output, &limited, format, false, true)?;
+    }
     eprintln!("wrote {}", output.display());
     Ok(())
 }
