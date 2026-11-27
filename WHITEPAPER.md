@@ -425,8 +425,10 @@ is [FORMAT.md](FORMAT.md). In short:
   length, edge cross-fade), and varints for the pre-skip, the stride, the page length and, optionally, the
   playable length and end trim.
 - **Extension room:** TLV fields after the fixed part, with odd types critical. Types are reserved for a
-  per-segment codebook schedule, a longer predictor-reset interval, a stride schedule and enhancement layers
-  (`.picol` sidecars that add codebooks to a base file; not implemented).
+  per-segment codebook schedule, a longer predictor-reset interval and a stride schedule. Type 7 marks an
+  enhancement layer (`.picol`, HQ files only): a sidecar holding the upper codebooks of the same encode, so a
+  small base file plays alone and base plus layer decodes exactly as the one-file encode. On the HQ test clips
+  the two parts cost 1-3% more than one file (FORMAT.md).
 - **Self-contained pages:** each audio page is one chunk: the page's 12-bit scales, then its codes, coded with the
   predictor reset and the range coder restarted. A page therefore decodes alone; it is both the seek unit and
   the most a damaged page can cost. The page layout is derived from the header, not stored.
@@ -580,9 +582,8 @@ search (beam) and entropy coding (cx2).
   LM is a transformer over seconds. A recurrent trunk is being tested (`train/train_gru.py`). A design review
   proposed further ideas, from a slimmer container (the merge
   took 0.3–0.8% of it) to encoder-side rate-distortion optimisation against cx2 (an estimated 5–12%).
-- **Enhancement layers:** a `.picol` sidecar holding the upper codebooks of the same encode, so a small base file
-  plays alone and base plus sidecar plays at a higher preset. The format reserves room for it (FORMAT.md); the
-  base would stay coded exactly as today.
+- **Enhancement layers:** implemented for HQ files (`.picol`, §7), not for EnCodec ones. A player upgrades a
+  playing file by restarting at its position with the layer; there is no upgrade inside one decode.
 - **WebGPU seeking:** only the WebAssembly decoder seeks so far.
 - **Decode speed:** GEMM is now 70% of decode time, near the kernel's in-cache speed. AVX-512 was not tried;
   it needs pulp's `x86-v4` feature and a newer minimum Rust. The pruned LSTM is not worth building (about 1.07×).
