@@ -78,6 +78,10 @@ export interface DecodeStats {
   readonly firstChunkMemoryBytes: number;
   /** WebAssembly memory size after the decode (its peak: it never shrinks). */
   readonly memoryBytes: number;
+  /** Whether the decode used the enhancement layer it was given. */
+  readonly layered: boolean;
+  /** Why a layer that was given was not used (the base played alone), or null. */
+  readonly layerError: string | null;
 }
 
 export interface InitRequest {
@@ -109,6 +113,8 @@ export interface DecodeRequest {
   readonly type: "decode";
   readonly id: number;
   readonly bytes: ArrayBuffer;
+  /** The file's enhancement layer (`.picol`), or null. */
+  readonly layer: ArrayBuffer | null;
   /** First playable sample to decode (a seek; 0 for the whole file). */
   readonly startSample: number;
   /** Segments in the first chunk (smaller starts playback sooner). */

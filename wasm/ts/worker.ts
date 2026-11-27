@@ -47,6 +47,7 @@ interface WasmDecoder {
   readonly sampleRate: number;
   readonly channels: number;
   openAt(pico: Uint8Array, tables: WasmTables, startSample: number): WasmStream;
+  openLayered(pico: Uint8Array, layer: Uint8Array, tables: WasmTables, startSample: number): WasmStream;
   free(): void;
 }
 
@@ -405,7 +406,18 @@ async function decode(request: DecodeRequest): Promise<void> {
     );
   }
   const t0 = performance.now();
-  const stream = decoder.openAt(bytes, tables, request.startSample);
+  // A layer that does not fit is reported in the stats; the base plays alone.
+  let layerError: string | null = null;
+  let stream: WasmStream | null = null;
+  if (request.layer !== null) {
+    try {
+      stream = decoder.openLayered(bytes, new Uint8Array(request.layer), tables, request.startSample);
+    } catch (error) {
+      layerError = errorText(error);
+    }
+  }
+  const layered = stream !== null;
+  stream ??= decoder.openAt(bytes, tables, request.startSample);
   let firstChunkMs = -1;
   let firstChunkMemoryBytes = 0;
   let maxSegments = Math.max(1, request.firstChunkSegments);
@@ -461,6 +473,8 @@ async function decode(request: DecodeRequest): Promise<void> {
         networkMs: stream.networkMs,
         firstChunkMemoryBytes,
         memoryBytes: memory.buffer.byteLength,
+        layered,
+        layerError,
       },
     });
   } finally {

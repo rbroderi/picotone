@@ -311,14 +311,49 @@ Do not pad loops by hand any more. Short effects need nothing.
 | `--fast --channel-format mono -b 6` | | effects, speech (24 kHz mono) |
 
 `picotone encode` with no preset or `--fast` writes the HQ codec (44.1 kHz, `model: "dac44"`
-in `readPicoHeader`), at 1 to 9 codebooks per channel (`--codebooks`, about 0.86 kbps each
-before entropy coding) in mono, left/right, mid/side or parametric stereo. This decoder plays
+in `readPicoHeader`), at 1 to 16 codebooks per channel (`--codebooks`, default 9; after
+entropy coding about 0.6 kbps per channel at 1, 1.8 at 3, 3.9 at 6, 6.1 at 9, 8.1 at 12 and
+10.6 at 16) in mono, left/right, mid/side or parametric stereo. This decoder plays
 it: `await decoder.loadModel("dac44")` (the worker fetches `dac44_vocos.*` and the HQ
 table), then `play` / `decode` / `decodeToAudioBuffer` as for any file. HQ output is 44.1 kHz,
 so a 48 kHz `AudioContext` resamples it. It decodes at about 4.4–4.7× realtime for
 single-threaded stereo (§5), so it suits plain-HTTP table pages too.
 `readPicoHeader` also gives HQ files' `layout` and per-channel `codebooks`. The WebGPU
 decoder in `web/` refuses HQ files for now.
+
+### HQ enhancement layers (`.picol`): play small, upgrade later
+
+An HQ file can come in two parts: a small `.pico` that plays on its own, and a `.picol` layer
+with the rest of the same encode's codebooks. With both, the decode equals a one-file encode
+of all the codebooks, sample for sample. The base's codebook count is free:
+
+```sh
+picotone encode song.flac song.pico --codebooks 5 --layer-codebooks 16
+# song.pico: q5 alone (about 3.3 kbps per channel); song.picol: codebooks 6-16
+```
+
+The two parts cost 1-3% more than one q16 file (about 6% over a parametric-stereo base).
+`--layer-side-codebooks` sets the side's count for mid/side; `--layer-codebooks 10` is
+refused (use 9 or 11-16). `picotone decode` and `info` pick up `song.picol` next to `song.pico`;
+`--no-layer` leaves it out.
+
+In the browser, pass the layer's bytes as `layer` to `decode` / `play` / `decodeToAudioBuffer`:
+
+```ts
+const base = await (await fetch("song.pico")).arrayBuffer();
+const startedAt = ctx.currentTime;                     // roughly; onStart gives the exact start
+let playback = decoder.play(ctx, base);                 // starts at once
+const layer = await (await fetch("song.picol")).arrayBuffer();
+// Upgrade: restart from the current position with the layer.
+const at = Math.floor((ctx.currentTime - startedAt) * 44100);
+playback.stop();
+playback = decoder.play(ctx, base, { layer, startSample: at });
+```
+
+A layer that is not the file's, or is damaged, is left out and the file plays alone; the
+result's `stats.layered` is then false and `stats.layerError` says why. There is no in-place
+upgrade inside one decode: restart from the position as above (an HQ seek decodes from a few
+frames before it, so the join is the decoder's own).
 
 An HQ file names its code space, not a decoder; the Vocos network (`dac44_vocos`) decodes
 every `dac44` file at every codebook count. The same holds on the encoding side: `picotone encode`

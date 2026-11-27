@@ -165,12 +165,12 @@ fn quantizer_matches_the_decoder_and_codes_in_pieces() -> Result<()> {
         })
         .collect();
     let latent = picotone::nn::Seq::from_vec(frames, picotone::dac::LATENT_DIM, values)?;
-    let whole = quantizer.quantize(latent.clone())?;
+    let whole = quantizer.quantize(&latent)?;
     assert_eq!(whole.len(), latent.len() * picotone::dac::CODEBOOKS);
     let mut parts = Vec::new();
     for start in (0..latent.len()).step_by(100) {
         let end = (start + 100).min(latent.len());
-        parts.extend(quantizer.quantize(latent.slice_rows(start, end))?);
+        parts.extend(quantizer.quantize(&latent.slice_rows(start, end))?);
     }
     assert_eq!(whole, parts);
     Ok(())
@@ -244,7 +244,7 @@ fn speed() -> Result<()> {
             let latent = enc.latent(&audio)?;
             let ours = t.elapsed().as_secs_f64() / f64::from(seconds);
             let t = Instant::now();
-            drop(quantizer.quantize(latent)?);
+            drop(quantizer.quantize(&latent)?);
             let quantize = t.elapsed().as_secs_f64() / f64::from(seconds);
             eprintln!(
                 "{threads} thread(s): STFT encoder {:.2} ms, quantiser {:.2} ms per channel-second",

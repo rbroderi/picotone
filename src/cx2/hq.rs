@@ -572,6 +572,96 @@ pub fn decode_page(
     Ok(codes)
 }
 
+/// Range-codes the layer part of one page of one channel.
+///
+/// Of each frame of `codes` (frame-major, `codebooks` per frame) it codes
+/// codebooks `base..codebooks`. Codebooks `0..base` are fed to the predictor
+/// but not coded, so it sees what coding the whole channel would show it.
+/// Empty when `base == codebooks`.
+///
+/// # Errors
+/// Fails when a code is out of range, `codebooks` is not 1 to 16, `base` is
+/// more than `codebooks`, or `codes` is not whole frames.
+pub fn encode_layer_page(
+    model: &HqModel,
+    role: Role,
+    codebooks: usize,
+    base: usize,
+    codes: &[u16],
+) -> Result<Vec<u8>> {
+    ensure!(base <= codebooks, "a layer below its base");
+    ensure!(
+        codes.len().is_multiple_of(codebooks.max(1)),
+        "layer codes are not whole frames"
+    );
+    if base == codebooks {
+        return Ok(Vec::new());
+    }
+    let mut predictor = model.predictor(role, codebooks)?;
+    let mut encoder = Encoder::new();
+    for (i, &code) in codes.iter().enumerate() {
+        if i % codebooks >= base {
+            let index = usize::from(code);
+            let (freqs, total) = predictor.frequencies();
+            ensure!(index < freqs.len(), "code {code} is out of range");
+            let freq = u64::from(freqs[index]);
+            encoder.encode(predictor.cumulative(index), freq, total)?;
+        }
+        predictor.update(code)?;
+    }
+    Ok(encoder.finish())
+}
+
+/// Decodes the layer part of `frames` frames of one channel over its base
+/// codes (`base` per frame); returns the whole codes, `codebooks` per frame.
+///
+/// # Errors
+/// Fails when the bytes are damaged or truncated, or do not fit the counts.
+pub fn decode_layer_page(
+    model: &HqModel,
+    role: Role,
+    codebooks: usize,
+    base: usize,
+    base_codes: &[u16],
+    frames: usize,
+    bytes: &[u8],
+) -> Result<Vec<u16>> {
+    ensure!(base <= codebooks, "a layer below its base");
+    ensure!(
+        base_codes.len() == frames * base,
+        "the base page has {} codes, expected {frames} frames x {base}",
+        base_codes.len()
+    );
+    if base == codebooks {
+        ensure!(bytes.is_empty(), "a layer chunk with nothing to code");
+        return Ok(base_codes.to_vec());
+    }
+    let mut predictor = model.predictor(role, codebooks)?;
+    let mut decoder = Decoder::new(bytes);
+    let mut codes = Vec::with_capacity(
+        (frames * codebooks).min(base_codes.len() + bytes.len().saturating_mul(8) + 64),
+    );
+    for frame in 0..frames {
+        for k in 0..codebooks {
+            let code = if k < base {
+                base_codes[frame * base + k]
+            } else {
+                let (_, total) = predictor.frequencies();
+                let target = decoder.target(total)?;
+                let (index, cum, freq) = predictor
+                    .locate(target)
+                    .context("corrupt entropy-coded layer page")?;
+                decoder.consume(cum, u64::from(freq));
+                ensure!(!decoder.overrun(), "entropy-coded layer page is truncated");
+                u16::try_from(index)?
+            };
+            predictor.update(code)?;
+            codes.push(code);
+        }
+    }
+    Ok(codes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

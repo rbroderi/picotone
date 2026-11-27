@@ -553,7 +553,7 @@ impl Decoder {
     /// Fails when the file is malformed, truncated, made for another model, or
     /// coded with a table `tables` lacks.
     pub fn open(&self, pico_bytes: &[u8], tables: &Tables) -> Result<Stream, JsError> {
-        Stream::new(self.net, pico_bytes, tables, 0).map_err(|e| to_js(&e))
+        Stream::new(self.net, pico_bytes, None, tables, 0).map_err(|e| to_js(&e))
     }
 
     /// Like [`open`](Self::open), but the first returned sample is playable
@@ -572,7 +572,27 @@ impl Decoder {
         tables: &Tables,
         start_sample: usize,
     ) -> Result<Stream, JsError> {
-        Stream::new(self.net, pico_bytes, tables, start_sample).map_err(|e| to_js(&e))
+        Stream::new(self.net, pico_bytes, None, tables, start_sample).map_err(|e| to_js(&e))
+    }
+
+    /// Like [`open_at`](Self::open_at), for an HQ file with its enhancement
+    /// layer (`.picol`): decodes as the combined stream. The output equals the
+    /// one-file encode of the combined codebooks.
+    ///
+    /// # Errors
+    /// As [`open_at`](Self::open_at); also when the layer is not this file's,
+    /// or any of its pages is damaged or missing. The caller then opens the
+    /// file alone.
+    #[wasm_bindgen(js_name = openLayered)]
+    pub fn open_layered(
+        &self,
+        pico_bytes: &[u8],
+        layer_bytes: &[u8],
+        tables: &Tables,
+        start_sample: usize,
+    ) -> Result<Stream, JsError> {
+        Stream::new(self.net, pico_bytes, Some(layer_bytes), tables, start_sample)
+            .map_err(|e| to_js(&e))
     }
 }
 
@@ -684,7 +704,13 @@ enum Inner {
 }
 
 impl Stream {
-    fn new(net: Net, bytes: &[u8], tables: &Tables, start_sample: usize) -> Result<Self> {
+    fn new(
+        net: Net,
+        bytes: &[u8],
+        layer: Option<&[u8]>,
+        tables: &Tables,
+        start_sample: usize,
+    ) -> Result<Self> {
         let codec = pico::codec_of(bytes)?;
         let file_model = match codec {
             Codec::Encodec(kind) => kind.name(),
@@ -706,10 +732,14 @@ impl Stream {
                 .and_then(|v| usize::try_from(v).ok())
                 .unwrap_or(0)
         };
-        let (sample_rate, channels, num_codebooks) = (
+        let (sample_rate, channels, mut num_codebooks) = (
             field("sampleRate"),
             field("channels"),
             field("numCodebooks"),
+        );
+        ensure!(
+            layer.is_none() || codec == Codec::Dac44,
+            "only HQ files have enhancement layers"
         );
         let inner = match net {
             Net::Encodec(model) => Inner::Encodec(Box::new(EncodecStream::new(
@@ -719,7 +749,11 @@ impl Stream {
                 start_sample,
             )?)),
             Net::Hq(decoder) => {
-                let stream = DacStream::parse(bytes)?;
+                let mut stream = DacStream::parse(bytes)?;
+                if let Some(layer) = layer {
+                    stream.attach_layer(layer)?;
+                    num_codebooks = stream.info.codebooks.iter().copied().max().unwrap_or(0);
+                }
                 let table = tables.for_hq_stream(&stream.info)?;
                 Inner::Hq(Box::new(HqStream::new(
                     stream,
@@ -1342,7 +1376,7 @@ mod tests {
             .iter()
             .flat_map(|&s| [1, 2, 3, 100].map(move |u| (s, u)))
         {
-            let mut stream = Stream::new(Net::Encodec(model), &bytes, &tables, start)?;
+            let mut stream = Stream::new(Net::Encodec(model), &bytes, None, &tables, start)?;
             let mut covered = start;
             let mut chunks = 0;
             let mut mismatches = 0;
@@ -1529,7 +1563,7 @@ mod tests {
         let total = info.playable_samples();
         assert_eq!(whole.len(), total);
         for start in [0, total / 3] {
-            let mut stream = Stream::new(decoder.net, &bytes, &tables, start)?;
+            let mut stream = Stream::new(decoder.net, &bytes, None, &tables, start)?;
             assert_eq!((stream.channels, stream.sample_rate), (2, 44_100));
             let mut covered = start;
             while let Some(chunk) = stream.decode_units(1)? {
@@ -1549,7 +1583,7 @@ mod tests {
         // An EnCodec decoder refuses the file.
         let model: &'static Encodec =
             Box::leak(Box::new(ModelKind::Stereo48k.load(&root.join("weights"))?));
-        assert!(Stream::new(Net::Encodec(model), &bytes, &tables, 0).is_err());
+        assert!(Stream::new(Net::Encodec(model), &bytes, None, &tables, 0).is_err());
         Ok(())
     }
 

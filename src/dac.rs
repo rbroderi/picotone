@@ -247,7 +247,7 @@ impl DacQuantizer {
     ///
     /// # Errors
     /// Fails when the latent is not 1024 wide.
-    pub fn quantize(&self, latent: Seq) -> Result<Vec<u16>> {
+    pub fn quantize(&self, latent: &Seq) -> Result<Vec<u16>> {
         ensure!(
             latent.channels() == LATENT_DIM,
             "latent is {} wide, expected {LATENT_DIM}",
@@ -262,13 +262,13 @@ impl DacQuantizer {
             .map(|i| {
                 let start = i * QUANTIZE_PIECE;
                 let end = (start + QUANTIZE_PIECE).min(latent.len());
-                self.quantize_piece(latent.slice_rows(start, end))
+                self.quantize_piece(&latent.slice_rows(start, end))
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(pieces.concat())
     }
 
-    fn quantize_piece(&self, latent: Seq) -> Result<Vec<u16>> {
+    fn quantize_piece(&self, latent: &Seq) -> Result<Vec<u16>> {
         let mut codes = vec![0; latent.len() * CODEBOOKS];
         let mut sum = Seq::zeros(latent.len(), LATENT_DIM);
         let mut residual = latent.clone();

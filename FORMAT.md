@@ -68,9 +68,10 @@ are critical**: a decoder that does not know one must refuse the stream. Even ty
 | 2 | output gain | defined, optional | `i16`, dB in Q7.8, applied on playback (0 = none; parsed, not yet applied by picotone's decoders) |
 | 3 | reset interval | reserved, critical | predictor resets (keyframes) less often than once per page |
 | 5 | stride schedule | reserved, critical | a stride per segment |
-| 7 | layer | specified (HQ), not implemented, critical | marks an enhancement layer (`.picol`): base serial, base id, pages per group; see [below](#enhancement-layers-picol-hq-only) |
+| 7 | layer | defined (HQ), critical | marks an enhancement layer (`.picol`): base serial, base id, pages per group; see [below](#enhancement-layers-picol-hq-only) |
 
-picotone's decoders refuse every reserved type today. They are listed so that later versions of the encoder can
+A stream that carries the layer type is a layer, never a stream of its own: a decoder reads it only as the layer
+of its base. picotone's decoders refuse every reserved type today. They are listed so that later versions of the encoder can
 use them without a new version number.
 
 ## Comment header (`PicoTags`)
@@ -265,10 +266,20 @@ The implementation is `src/pstereo.rs`; the measurements behind it are in `tools
 
 ## Enhancement layers (`.picol`, HQ only)
 
-Specified, not implemented yet. A **base** `.pico` plays on its own. A `.picol` **layer** adds the upper
-codebooks of the **same encode**, so base plus layer decodes as the full encode would: the same codes, so the
-same audio. A player can start on the small base and pick the layer up later (gaim's case: play at once, then
-upgrade when the layer has loaded). Copying only the `.pico` gives the small file. There is one layer per base.
+A **base** `.pico` plays on its own. A `.picol` **layer** adds the upper codebooks of the **same encode**, so
+base plus layer decodes as the full encode would: the same codes, so the same audio (picotone's output is
+sample-for-sample the same as the one-file encode's). A player can start on the small base and pick the layer up
+later (gaim's case: play at once, then upgrade when the layer has loaded). Copying only the `.pico` gives the
+small file. There is one layer per base, and the base's codebook count is free (1 to 15).
+
+picotone writes a layer with `encode --codebooks B --layer-codebooks N` (and `--layer-side-codebooks` for the
+side): `song.pico` holds codebooks `0..B`, `song.picol` the rest up to `N`. The encoder refuses `N = 10`
+(codebook 10 adds little on its own); the format allows it. `decode` and `info` pick up the `.picol` next to the
+`.pico` (same name, extension `.picol`), unless `--no-layer`. The stereo layout is chosen at the base's codebooks.
+On the 23 test clips (`picotone dev layer-cost --top 16`), a base plus its layer costs 1 to 3% more than one
+file of the combined codebooks (q3 base +2.8%, q5 +2.7%, q9 +1.5%, q12 +1.1%): the layer's framing (about
+0.6%), and the base's own predictor, which sees only the base's codebooks of the past frames. Over a parametric
+base it costs about 6% more, as the base's stereo parameters (about 1 kbps) are not used with the layer.
 
 ### Base and combined layouts
 
@@ -288,7 +299,7 @@ base cannot have a left/right layer.
 
 ### The `.picol` stream
 
-- Ogg, with its own serial number. Its identification header is an HQ header (model 2) whose layout and
+- Ogg, with its own serial number (picotone writes the base's plus 1). Its identification header is an HQ header (model 2) whose layout and
   codebooks are the **combined** stream's. Its codebook hash and table hash equal the base's. Its flags,
   pre-skip, page length, playable length and end trim equal the base's, with no comment header (bit 1 clear).
 - It carries the critical **layer** TLV (type 7): `u32` serial number of the base stream, `u64` base stream
@@ -299,8 +310,9 @@ base cannot have a left/right layer.
 - **Pages in groups:** layer page `j` covers base pages `j x group` to `j x group + group - 1` (the last layer
   page may cover fewer), and its granule position is that of the last base page it covers. A decoder pairs
   them by granule position. Grouping saves Ogg page overhead: on the test clips the layer's framing is about
-  2.3% of a single file's size at group 1 and 0.8% at 4 (`picotone dev layer-cost`); the cost is that a damaged layer page drops `group` base pages (about 3.7 s at 4) to base
-  quality.
+  2.3% of a single file's size at group 1 and 0.8% at 4 (`picotone dev layer-cost`); the cost is that a damaged
+  layer page drops `group` base pages (about 3.7 s at 4) to base quality.
+- There is one layer packet per layer page, and a layer has exactly `ceil(base pages / group)` of them.
 
 ### Layer audio packets
 
@@ -320,12 +332,20 @@ any `.pico`, with a predictor that sees only its own codebooks, so it always dec
 
 ### Decoding
 
-Base plus layer: per base page, decode the base's codes, then the layer's, and decode the combined codes. When a
-layer page is missing or damaged, the base pages it covers play from the base alone at the base's codebooks. With a parametric
-base, it also plays with the base's stereo parameters. Near such a page's edges, the output depends on the
-decoder's context (as for seeking) and is not specified exactly.
+Base plus layer: per base page, decode the base's codes, then the layer's, and decode the combined codes. A
+decoder may play the base pages that a missing or damaged layer page covers from the base alone, at the base's
+codebooks (with a parametric base, with the base's stereo parameters); near such a page's edges the output
+depends on the decoder's context (as for seeking) and is not specified exactly. **picotone** does not mix the
+two: it refuses a layer with any missing or damaged page as a whole, and plays the base alone. A damaged base page
+is lost with or without the layer.
 
 A decoder must refuse:
 - a layer given without its base;
-- a layer whose base id, table hash or codebook hash differs from the base's;
-- a combined layout that the table above does not allow for the base's layout.
+- a layer whose base serial or base id, table hash or codebook hash differs from the base's (the base id needs
+  the base's first audio packet intact);
+- a layer whose flags (other than bit 1, which a layer leaves clear), pre-skip, page length or (when stored)
+  length differ from the base's;
+- a combined layout that the table above does not allow for the base's layout, a combined channel with fewer
+  codebooks than the base's, or a layer that adds no codebooks;
+- a layer with the wrong number of pages, a page whose granule position is not that of the last base page it
+  covers, or a packet with missing or trailing bytes.

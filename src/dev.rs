@@ -750,7 +750,7 @@ fn dac_encode(
         std::fs::write(path, raw).with_context(|| format!("writing {}", path.display()))?;
     }
     let t = Instant::now();
-    let codes = encoder.quantizer.quantize(latent)?;
+    let codes = encoder.quantizer.quantize(&latent)?;
     let seconds = to_f64(audio.len()) / f64::from(SAMPLE_RATE);
     eprintln!(
         "encoded {seconds:.1} s: encoder {took:.2} s ({:.2}x real time), quantiser {:.3} s",

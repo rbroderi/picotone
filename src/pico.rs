@@ -27,7 +27,8 @@
 mod dac;
 
 pub use dac::{
-    ChannelLayout, DEFAULT_PAGE_FRAMES, DacInfo, DacStream, write_dac, write_dac_parametric,
+    ChannelLayout, DEFAULT_LAYER_GROUP, DEFAULT_PAGE_FRAMES, DacInfo, DacStream, layer_bases,
+    write_dac, write_dac_layer, write_dac_parametric,
 };
 
 use std::ops::Range;
@@ -83,14 +84,13 @@ pub const TLV_OUTPUT_GAIN: u64 = 2;
 pub const TLV_RESET_INTERVAL: u64 = 3;
 /// TLV type of a segment stride schedule. Reserved; critical.
 pub const TLV_STRIDE_SCHEDULE: u64 = 5;
-/// TLV type of an enhancement layer (reserved, not implemented).
+/// TLV type of an enhancement layer (HQ only).
 ///
-/// A `.picol` sidecar holds codebooks `first..=last` of its base stream's
-/// encode. Body: varint layer index, `u32` base
-/// serial number, `u64` base stream id (FNV-1a 64 of the base's identification
-/// packet then its first audio packet; both little-endian), varint first
-/// codebook, varint last codebook. Reserved; critical, so a layer is never
-/// played as a stream of its own. See `FORMAT.md`.
+/// A `.picol` stream holds the codebooks of its base stream's encode above
+/// the base's own. Body: `u32` base serial number, `u64` base stream id
+/// (FNV-1a 64 of the base's identification packet then its first audio
+/// packet; both little-endian), varint base pages per layer page. Critical,
+/// so a layer is never played as a stream of its own. See `FORMAT.md`.
 pub const TLV_LAYER: u64 = 7;
 
 /// Byte of a model in the identification header.
@@ -631,6 +631,11 @@ fn head_packet(info: &Info) -> Result<Vec<u8>> {
 /// The identification packet around a fixed part: magic, version, the fixed
 /// part's length, the fixed part, then the extensions.
 fn head_from_fixed(fixed: &[u8], output_gain: i16) -> Result<Vec<u8>> {
+    head_with_layer(fixed, output_gain, None)
+}
+
+/// [`head_from_fixed`], with a layer field's body last when given.
+fn head_with_layer(fixed: &[u8], output_gain: i16, layer: Option<&[u8]>) -> Result<Vec<u8>> {
     let mut out = HEAD_MAGIC.to_vec();
     out.push(VERSION);
     put_size(&mut out, fixed.len())?;
@@ -639,6 +644,11 @@ fn head_from_fixed(fixed: &[u8], output_gain: i16) -> Result<Vec<u8>> {
         put_varint(&mut out, TLV_OUTPUT_GAIN);
         put_varint(&mut out, 2);
         out.extend_from_slice(&output_gain.to_le_bytes());
+    }
+    if let Some(body) = layer {
+        put_varint(&mut out, TLV_LAYER);
+        put_size(&mut out, body.len())?;
+        out.extend_from_slice(body);
     }
     Ok(out)
 }
@@ -659,8 +669,21 @@ fn split_head(packet: &[u8]) -> Result<(&[u8], Fields<'_>)> {
 }
 
 /// Reads the extensions to the end of the packet; returns the output gain.
+/// Refuses a layer.
 fn read_extensions(f: &mut Fields<'_>) -> Result<i16> {
+    let (output_gain, layer) = read_extensions_layer(f)?;
+    ensure!(
+        layer.is_none(),
+        "stream is an enhancement layer (.picol); decode its base .pico instead"
+    );
+    Ok(output_gain)
+}
+
+/// Reads the extensions to the end of the packet; returns the output gain
+/// and the layer field's body, if any.
+fn read_extensions_layer<'a>(f: &mut Fields<'a>) -> Result<(i16, Option<&'a [u8]>)> {
     let mut output_gain = 0;
+    let mut layer = None;
     while f.remaining() > 0 {
         let kind = f.varint()?;
         let len = f.size()?;
@@ -680,14 +703,15 @@ fn read_extensions(f: &mut Fields<'_>) -> Result<i16> {
                 bail!("stream uses a stride schedule, which this decoder does not read")
             }
             TLV_LAYER => {
-                bail!("stream is an enhancement layer (.picol); decode its base .pico instead")
+                ensure!(layer.is_none(), "two layer fields");
+                layer = Some(body);
             }
             // Odd types are critical: a decoder that does not know one cannot play the stream.
             other if other & 1 == 1 => bail!("stream uses unknown critical field {other}"),
             _ => {}
         }
     }
-    Ok(output_gain)
+    Ok((output_gain, layer))
 }
 
 /// The two families of `.pico` stream.

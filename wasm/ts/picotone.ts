@@ -108,6 +108,15 @@ export interface DecodeOptions {
    * on. The output equals the same samples of a whole-file decode.
    */
   readonly startSample?: number;
+  /**
+   * The file's enhancement layer (`.picol`; HQ only): the decode is then the
+   * combined stream's, as if the file held all the codebooks. A layer that
+   * is not this file's, or is damaged, is left out and the file plays alone
+   * (`stats.layered` false, `stats.layerError` says why). To upgrade a
+   * playing file once its layer arrives, stop it and play again with the
+   * layer from the current position (`startSample`).
+   */
+  readonly layer?: ArrayBuffer | ArrayBufferView;
 }
 
 /** A whole decoded file (from `startSample` on, after a seek). */
@@ -280,6 +289,7 @@ export class PicotoneDecoder {
       return Promise.reject(new Error(`startSample ${String(startSample)} is outside the file`));
     }
     const buffer = toTransferable(bytes, options.transfer === true);
+    const layer = options.layer === undefined ? null : toTransferable(options.layer, options.transfer === true);
     const id = this.#nextId++;
     const channels = Array.from(
       { length: info.channels },
@@ -303,6 +313,7 @@ export class PicotoneDecoder {
           type: "decode",
           id,
           bytes: buffer,
+          layer,
           startSample,
           firstChunkSegments: options.firstChunkSegments ?? 1,
           chunkSegments: options.chunkSegments ?? (this.build.kind === "threaded" ? 16 : 8),
@@ -332,7 +343,7 @@ export class PicotoneDecoder {
             reject(new Error(message.message));
           }
         },
-        [buffer],
+        layer === null ? [buffer] : [buffer, layer],
       );
     });
   }
@@ -450,7 +461,10 @@ export class PicotoneDecoder {
         }
         // After a seek the decode lacks the file's start; the loop needs all of it.
         if (audio.startSample > 0) {
-          audio = await this.decode(bytes, { signal: controller.signal });
+          audio = await this.decode(bytes, {
+            signal: controller.signal,
+            ...(options.layer === undefined ? {} : { layer: options.layer }),
+          });
         }
         // Hand over to one looping source exactly where the streamed copy stops
         // (loopEnd), continuing from loopStart.

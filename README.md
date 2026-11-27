@@ -67,7 +67,17 @@ target\release\picotone decode song.pico song.wav
 target\release\picotone info song.pico
 ```
 
-The browser decoders (`web/`, `wasm/`) play EnCodec files only for now; HQ support there is in progress.
+The WebAssembly decoder (`wasm/`) plays HQ and EnCodec files; the WebGPU one (`web/`) plays EnCodec files only.
+
+An HQ file can be split into a small base that plays on its own and an enhancement layer (`.picol`) with the
+rest of the same encode's codebooks; with both it decodes exactly as a one-file encode of all of them:
+
+```powershell
+target\release\picotone encode song.flac song.pico --codebooks 5 --layer-codebooks 16
+target\release\picotone decode song.pico song.wav      # uses song.picol when it is there; --no-layer skips it
+```
+
+The two parts cost 1-3% more than one file of all the codebooks. See [FORMAT.md](FORMAT.md#enhancement-layers-picol-hq-only).
 
 Encode a seamless loop, so the end joins the start with no click:
 
@@ -86,7 +96,7 @@ to the model automatically.
 | `music12` | 8 | 12.9 kbps | about 8 kbps | Music where size matters more |
 | `music6` | 4 | 6.4 kbps | about 3.2–4 kbps | Ambience, long beds; clearly lower quality |
 | `--fast --channel-format mono -b 6` | 8 | 6 kbps | | Speech and sound effects (24 kHz mono model) |
-| (none: HQ) | 9 per channel | 7.75 kbps per channel | about 8 / 16 kbps mono / stereo | HQ 44.1 kHz; no cx2 yet |
+| (none: HQ) | 9 per channel (1-16) | 7.75 kbps per channel | about 6 / 12 kbps mono / stereo (q16: about 10.6 / 21-24) | HQ 44.1 kHz, the default |
 
 "Typical file" is the whole `.pico` file (headers and Ogg framing included) for two 120 s music clips.
 
@@ -101,9 +111,11 @@ search in the quantiser, which gives slightly better quality at no decode cost.
 | `--fast` | off | EnCodec instead of HQ: `encodec-24k` for mono, `encodec-48k` for stereo |
 | `--model` | HQ | The exact model: `hq`, `encodec-48k` or `encodec-24k`; overrides `--fast` and presets |
 | `--channel-format` | `auto` | `auto` (follow the input), `mono` or `stereo`. With HQ, `auto` codes a stereo input whose side is over 40 dB under its mid as mono. A model that can't give the format is an error |
-| `--stereo` | `pick` | HQ only: `lr`, `ms` (mid/side), or `pick` the better on sampled excerpts |
-| `--codebooks` | HQ: 9; EnCodec: from `-b` | Codebooks per frame (HQ: per channel, 1–9, 0.86 kbps each) |
+| `--stereo` | `pick` | HQ only: `lr`, `ms` (mid/side), `parametric`, or `pick` the better on sampled excerpts |
+| `--codebooks` | HQ: 9; EnCodec: from `-b` | Codebooks per frame (HQ: per channel, 1–16, 0.86 kbps each before cx2) |
 | `--side-codebooks` | `--codebooks` | HQ mid/side: codebooks for the side |
+| `--layer-codebooks` | none | HQ: also write OUTPUT.picol, a layer up to this many codebooks (2–16, not 10) |
+| `--layer-side-codebooks` | `--layer-codebooks` | HQ mid/side or parametric base: the side's codebooks with the layer |
 | `-b, --bandwidth` | `6` | EnCodec only: target kbps; sets the number of codebooks |
 | `--preset` | none | EnCodec only: `music24`, `music12` or `music6` (implies `encodec-48k`); the flags below override it |
 | `--stride` | 47520 | EnCodec 48 kHz only (as are `--crossfade`, `--beam` and `--table`): samples between segment starts, 24000–48000 |

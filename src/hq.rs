@@ -128,6 +128,60 @@ pub(crate) struct Settings<'a> {
     /// Write the codes here as a code bundle (`dev codes`'s format) instead
     /// of coding them; the encode then returns no bytes.
     pub dump: Option<&'a Path>,
+    /// Also write an enhancement layer up to this many codebooks per channel
+    /// (the mid for mid/side).
+    pub layer_codebooks: Option<usize>,
+    /// The layer's side codebooks (mid/side, or a parametric base's layer).
+    pub layer_side_codebooks: Option<usize>,
+}
+
+/// An encoded HQ file: the stream, and its enhancement layer when asked for.
+#[derive(Debug)]
+pub(crate) struct Encoded {
+    pub info: DacInfo,
+    pub bytes: Vec<u8>,
+    pub layer: Option<Vec<u8>>,
+}
+
+/// The combined layout and codebooks of the layer `s` asks for over a base
+/// of `layout` with `codebooks`.
+fn layer_plan(
+    layout: ChannelLayout,
+    codebooks: &[usize],
+    s: &Settings<'_>,
+) -> Result<Option<(ChannelLayout, Vec<usize>)>> {
+    let Some(n) = s.layer_codebooks else {
+        ensure!(
+            s.layer_side_codebooks.is_none(),
+            "--layer-side-codebooks needs --layer-codebooks"
+        );
+        return Ok(None);
+    };
+    for m in [Some(n), s.layer_side_codebooks].into_iter().flatten() {
+        ensure!(
+            (1..=dac::CODEBOOKS).contains(&m),
+            "{m} layer codebooks requested; the HQ codec has 1 to {}",
+            dac::CODEBOOKS
+        );
+    }
+    ensure!(
+        n != dac::DAC_CODEBOOKS + 1,
+        "--layer-codebooks {n}: codebook {n} adds little on its own; use {} or {} to {}",
+        dac::DAC_CODEBOOKS,
+        dac::DAC_CODEBOOKS + 2,
+        dac::CODEBOOKS
+    );
+    let side = s.layer_side_codebooks.unwrap_or(n);
+    let plan = match layout {
+        ChannelLayout::Mono => (ChannelLayout::Mono, vec![n]),
+        ChannelLayout::LeftRight => (ChannelLayout::LeftRight, vec![n; 2]),
+        ChannelLayout::MidSide | ChannelLayout::Parametric(_) => {
+            (ChannelLayout::MidSide, vec![n, side])
+        }
+    };
+    let _bases = pico::layer_bases(layout, codebooks, plan.0, &plan.1)
+        .context("the layer must hold more codebooks than the base")?;
+    Ok(Some(plan))
 }
 
 fn file(weights: &Path, name: &str) -> Result<PathBuf> {
@@ -157,7 +211,7 @@ impl Encoder {
     /// Codes of mono 44.1 kHz `audio`, `[frames][9]` (row-major),
     /// `ceil(len / 512)` frames (the audio read as zero padded at the end).
     pub(crate) fn encode(&self, audio: &[f32]) -> Result<Vec<u16>> {
-        self.quantizer.quantize(self.net.latent(audio)?)
+        self.quantizer.quantize(&self.net.latent(audio)?)
     }
 }
 
@@ -284,12 +338,8 @@ fn encode_signals(
         .collect()
 }
 
-/// Encodes `source` as an HQ stream; returns its header and bytes.
-pub(crate) fn encode(
-    weights: &Path,
-    source: &Audio,
-    s: &Settings<'_>,
-) -> Result<(DacInfo, Vec<u8>)> {
+/// Encodes `source` as an HQ stream, and its layer when `s` asks for one.
+pub(crate) fn encode(weights: &Path, source: &Audio, s: &Settings<'_>) -> Result<Encoded> {
     for n in [s.codebooks, s.side_codebooks] {
         ensure!(
             (1..=dac::CODEBOOKS).contains(&n),
@@ -304,17 +354,13 @@ pub(crate) fn encode(
         channels = coded_signals(&channels, ChannelLayout::MidSide);
         channels.truncate(1);
     }
-    let (layout, picked) = if channels.len() == 1 {
-        (ChannelLayout::Mono, false)
-    } else {
-        match s.stereo {
-            StereoMode::LeftRight => (ChannelLayout::LeftRight, false),
-            StereoMode::MidSide => (ChannelLayout::MidSide, false),
-            StereoMode::Parametric => (ChannelLayout::Parametric(s.parametric), false),
-            StereoMode::Pick => (pick(weights, &encoder, &channels, s)?, true),
-        }
-    };
+    let (layout, picked) = choose_layout(weights, &encoder, &channels, s)?;
     let codebooks = layout_codebooks(layout, s, picked);
+    let layer = layer_plan(layout, &codebooks, s)?;
+    ensure!(
+        layer.is_none() || s.dump.is_none(),
+        "--dump-codes writes no layer"
+    );
     let mut info = DacInfo {
         codebook_hash: encoder.codebook_hash(),
         table_hash: s.table.hash(),
@@ -343,15 +389,108 @@ pub(crate) fn encode(
     }
     info.audio_length = channels.first().map_or(0, Vec::len);
     let start = Instant::now();
-    let codes = encode_signals(&encoder, &coded_signals(&channels, layout), &codebooks)?;
+    let (codes, combined) = all_codes(&encoder, &channels, layout, &codebooks, layer.as_ref())?;
     let parameters = stereo_parameters(&channels, layout, &info.pages());
     if let Some(path) = s.dump {
         crate::dev::write_dac_bundle(&info, &codes, path)?;
-        return Ok((info, Vec::new()));
+        return Ok(Encoded {
+            info,
+            bytes: Vec::new(),
+            layer: None,
+        });
     }
+    report_parameters(layout, &parameters, info.audio_length);
+    let coding = Instant::now();
+    let bytes = pico::write_dac_parametric(&info, s.table, &codes, &parameters)?;
+    let layer_bytes = match (&layer, combined) {
+        (Some((combined_layout, books)), Some(all)) => Some(pico::write_dac_layer(
+            &DacStream::parse(&bytes)?,
+            *combined_layout,
+            books.clone(),
+            s.table,
+            &all,
+            pico::DEFAULT_LAYER_GROUP,
+        )?),
+        _ => None,
+    };
+    let cx2_seconds = coding.elapsed().as_secs_f64();
+    eprintln!(
+        "encoded HQ ({}, {} codebooks{}{}) in {:.2} s (cx2 {:.2} s)",
+        layout.name(),
+        join_books(&codebooks),
+        layer
+            .as_ref()
+            .map_or_else(String::new, |(l, books)| format!(
+                "; layer to {}, {}",
+                l.name(),
+                join_books(books)
+            )),
+        if s.looped { ", loop" } else { "" },
+        start.elapsed().as_secs_f64(),
+        cx2_seconds
+    );
+    Ok(Encoded {
+        info,
+        bytes,
+        layer: layer_bytes,
+    })
+}
+
+/// The base's codes of each coded channel, and with a layer the combined
+/// stream's. With a layer the combined stream's signals are coded and the
+/// base's codes cut from them (each base channel is the same combined
+/// channel's first codebooks), so base plus layer are one encode.
+fn all_codes(
+    encoder: &Encoder,
+    channels: &[Vec<f32>],
+    layout: ChannelLayout,
+    codebooks: &[usize],
+    layer: Option<&(ChannelLayout, Vec<usize>)>,
+) -> Result<(Codes, Option<Codes>)> {
+    let Some((combined, books)) = layer else {
+        let codes = encode_signals(encoder, &coded_signals(channels, layout), codebooks)?;
+        return Ok((codes, None));
+    };
+    let all = encode_signals(encoder, &coded_signals(channels, *combined), books)?;
+    let base = all
+        .iter()
+        .zip(books)
+        .zip(codebooks)
+        .map(|((c, &n), &b)| {
+            c.chunks(n)
+                .flat_map(|frame| frame[..b].iter().copied())
+                .collect()
+        })
+        .collect();
+    Ok((base, Some(all)))
+}
+
+/// Codes of each coded channel, `[frame][codebook]`.
+type Codes = Vec<Vec<u16>>;
+
+/// The layout to code `channels` with, and whether the pick chose it.
+fn choose_layout(
+    weights: &Path,
+    encoder: &Encoder,
+    channels: &[Vec<f32>],
+    s: &Settings<'_>,
+) -> Result<(ChannelLayout, bool)> {
+    if channels.len() == 1 {
+        return Ok((ChannelLayout::Mono, false));
+    }
+    Ok(match s.stereo {
+        StereoMode::LeftRight => (ChannelLayout::LeftRight, false),
+        StereoMode::MidSide => (ChannelLayout::MidSide, false),
+        StereoMode::Parametric => (ChannelLayout::Parametric(s.parametric), false),
+        StereoMode::Pick => (pick(weights, encoder, channels, s)?, true),
+    })
+}
+
+/// Reports the rate of a parametric stream's parameters.
+fn report_parameters(layout: ChannelLayout, parameters: &[Vec<u8>], audio_length: usize) {
     if let ChannelLayout::Parametric(config) = layout {
         let bits = 8 * parameters.iter().map(Vec::len).sum::<usize>();
-        let seconds = picotone::config::to_f64(info.audio_length) / f64::from(dac::SAMPLE_RATE);
+        let seconds = picotone::config::to_f64(audio_length) / f64::from(dac::SAMPLE_RATE);
         eprintln!(
             "parametric stereo: {}, {:.2} kbps of parameters",
             config.describe(),
@@ -362,22 +501,44 @@ pub(crate) fn encode(
             }
         );
     }
-    let coding = Instant::now();
-    let bytes = pico::write_dac_parametric(&info, s.table, &codes, &parameters)?;
-    let cx2_seconds = coding.elapsed().as_secs_f64();
-    eprintln!(
-        "encoded HQ ({}, {} codebooks{}) in {:.2} s (cx2 {:.2} s)",
-        layout.name(),
-        codebooks
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("+"),
-        if s.looped { ", loop" } else { "" },
-        start.elapsed().as_secs_f64(),
-        cx2_seconds
-    );
-    Ok((info, bytes))
+}
+
+/// Codebook counts as `9+4`.
+fn join_books(books: &[usize]) -> String {
+    books
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// The layer file of an HQ file: the same path with the extension `.picol`.
+pub(crate) fn layer_path(path: &Path) -> PathBuf {
+    path.with_extension("picol")
+}
+
+/// Attaches the layer next to `input` to `stream` when there is one and
+/// `use_layer`; a layer that does not fit is reported and left out.
+pub(crate) fn attach_layer(stream: &mut DacStream, input: &Path, use_layer: bool) {
+    let path = layer_path(input);
+    if !use_layer || path == input || !path.is_file() {
+        return;
+    }
+    match std::fs::read(&path)
+        .with_context(|| format!("reading {}", path.display()))
+        .and_then(|bytes| stream.attach_layer(&bytes))
+    {
+        Ok(()) => eprintln!(
+            "layer {}: {} codebooks over the base's {}",
+            path.display(),
+            join_books(&stream.info.codebooks),
+            join_books(stream.base_codebooks())
+        ),
+        Err(error) => eprintln!(
+            "ignoring the layer {} ({error:#}); playing the base alone",
+            path.display()
+        ),
+    }
 }
 
 /// Picks left/right or mid/side from sampled excerpts.
@@ -468,8 +629,9 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<DacStream> {
     DacStream::parse(bytes).context("reading the HQ stream")
 }
 
-/// Prints what an HQ stream holds.
-pub(crate) fn print_info(stream: &DacStream, size: usize) {
+/// Prints what an HQ stream holds; `size` is the base's bytes, `layer_size`
+/// the layer's when one is attached.
+pub(crate) fn print_info(stream: &DacStream, size: usize, layer_size: usize) {
     let info = &stream.info;
     let playable = info.playable_samples();
     let seconds = picotone::config::to_f64(playable) / f64::from(dac::SAMPLE_RATE);
@@ -478,20 +640,21 @@ pub(crate) fn print_info(stream: &DacStream, size: usize) {
         "samples:    {playable} ({seconds:.2} s at {} Hz)",
         dac::SAMPLE_RATE
     );
-    match info.layout {
+    match stream.base_layout() {
         ChannelLayout::Parametric(config) => {
             eprintln!("channels:   parametric stereo ({})", config.describe());
         }
         layout => eprintln!("channels:   {}", layout.name()),
     }
-    eprintln!(
-        "codebooks:  {}",
-        info.codebooks
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("+")
-    );
+    eprintln!("codebooks:  {}", join_books(stream.base_codebooks()));
+    if stream.has_layer() {
+        eprintln!(
+            "layer:      {}, {} codebooks ({} bytes of codes)",
+            info.layout.name(),
+            join_books(&info.codebooks),
+            stream.layer_coded_bytes().iter().sum::<usize>()
+        );
+    }
     eprintln!("code hash:  {:016x}", info.codebook_hash);
     eprintln!("cx2 table:  {:016x}", info.table_hash);
     let frames = stream
@@ -501,7 +664,12 @@ pub(crate) fn print_info(stream: &DacStream, size: usize) {
         .filter(|(_, p)| p.is_some())
         .map(|(s, _)| s.len())
         .sum::<usize>();
-    for (c, (bytes, &n)) in stream.coded_bytes().iter().zip(&info.codebooks).enumerate() {
+    for (c, (bytes, &n)) in stream
+        .coded_bytes()
+        .iter()
+        .zip(stream.base_codebooks())
+        .enumerate()
+    {
         let codes = frames * n;
         if codes > 0 {
             let bits = picotone::config::to_f64(bytes * 8) / picotone::config::to_f64(codes);
@@ -535,4 +703,19 @@ pub(crate) fn print_info(stream: &DacStream, size: usize) {
         0.0
     };
     eprintln!("size:       {size} bytes ({kbps:.2} kbps)");
+    if stream.has_layer() {
+        let total = size + layer_size;
+        let kbps = |bytes: usize| {
+            if seconds > 0.0 {
+                picotone::config::to_f64(bytes) * 8.0 / seconds / 1000.0
+            } else {
+                0.0
+            }
+        };
+        eprintln!(
+            "layer size: {layer_size} bytes ({:.2} kbps); with the base {total} bytes ({:.2} kbps)",
+            kbps(layer_size),
+            kbps(total)
+        );
+    }
 }

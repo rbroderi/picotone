@@ -193,8 +193,11 @@ fn plan(options: &EncodeOptions, input_channels: usize) -> Result<Plan> {
                 options.side_codebooks.is_none()
                     && options.stereo.is_none()
                     && options.ps_bands.is_none()
-                    && options.ps_frames.is_none(),
-                "--stereo, --side-codebooks, --ps-bands and --ps-frames are for the HQ model"
+                    && options.ps_frames.is_none()
+                    && options.layer_codebooks.is_none()
+                    && options.layer_side_codebooks.is_none(),
+                "--stereo, --side-codebooks, --ps-bands, --ps-frames and the --layer options are \
+                 for the HQ model"
             );
         }
     }
@@ -270,6 +273,16 @@ struct EncodeOptions {
     /// HQ mid/side: codebooks per frame of the side (default: the same as `--codebooks`).
     #[arg(long)]
     side_codebooks: Option<usize>,
+    /// HQ: also write an enhancement layer, OUTPUT with the extension `.picol`, holding the
+    /// codebooks from `--codebooks` up to this many (per channel; the mid for mid/side), 2 to
+    /// 16 but not 10. The .pico plays alone; with the layer it decodes as this many codebooks.
+    /// Over parametric stereo the layer codes mid/side.
+    #[arg(long)]
+    layer_codebooks: Option<usize>,
+    /// HQ layer of a mid/side or parametric stereo file: the side's codebooks with the layer
+    /// (default: the same as `--layer-codebooks`).
+    #[arg(long)]
+    layer_side_codebooks: Option<usize>,
     /// HQ parametric stereo: parameter bands, 20 (default) or 10 (about half the rate).
     #[arg(long)]
     ps_bands: Option<usize>,
@@ -320,6 +333,9 @@ struct WavOptions {
     /// cx2 table to decode with, instead of the one the tables directory holds for the file.
     #[arg(long)]
     table: Option<PathBuf>,
+    /// HQ: decode the .pico alone, without the `.picol` layer next to it.
+    #[arg(long)]
+    no_layer: bool,
 }
 
 fn main() -> Result<()> {
@@ -343,15 +359,7 @@ fn main() -> Result<()> {
                 eprintln!("wrote the codes to {}", path.display());
                 return Ok(());
             }
-            let bytes = encoded.bytes();
-            std::fs::write(output, bytes)
-                .with_context(|| format!("writing {}", output.display()))?;
-            eprintln!(
-                "wrote {} ({} bytes, {:.2} kbps)",
-                output.display(),
-                bytes.len(),
-                kbps(bytes.len(), encoded.seconds())
-            );
+            write_encoded(output, &encoded)?;
         }
         Command::Decode {
             input,
@@ -362,7 +370,8 @@ fn main() -> Result<()> {
                 std::fs::read(input).with_context(|| format!("reading {}", input.display()))?;
             match pico::codec_of(&bytes)? {
                 Codec::Dac44 => {
-                    let stream = hq::parse(&bytes)?;
+                    let mut stream = hq::parse(&bytes)?;
+                    hq::attach_layer(&mut stream, input, !options.no_layer);
                     let table = hq::find_table(
                         &tables(),
                         options.table.as_deref(),
@@ -387,8 +396,11 @@ fn main() -> Result<()> {
             encode,
             wav,
         } => match encode_file(&weights(), &tables(), input, encode, true)? {
-            Encoded::Hq { bytes, .. } => {
-                let stream = hq::parse(&bytes)?;
+            Encoded::Hq { bytes, layer, .. } => {
+                let mut stream = hq::parse(&bytes)?;
+                if let Some(layer) = layer.filter(|_| !wav.no_layer) {
+                    stream.attach_layer(&layer)?;
+                }
                 let table =
                     hq::find_table(&tables(), wav.table.as_deref(), stream.info.table_hash)?;
                 let audio = hq::decode(&weights(), &table, stream)?;
@@ -404,11 +416,53 @@ fn main() -> Result<()> {
             let bytes =
                 std::fs::read(input).with_context(|| format!("reading {}", input.display()))?;
             match pico::codec_of(&bytes)? {
-                Codec::Dac44 => hq::print_info(&hq::parse(&bytes)?, bytes.len()),
+                Codec::Dac44 => {
+                    let mut stream = hq::parse(&bytes)?;
+                    hq::attach_layer(&mut stream, input, true);
+                    let layer_size = if stream.has_layer() {
+                        usize::try_from(std::fs::metadata(hq::layer_path(input))?.len())?
+                    } else {
+                        0
+                    };
+                    hq::print_info(&stream, bytes.len(), layer_size);
+                }
                 Codec::Encodec(_) => print_info(&Stream::parse(&bytes)?, bytes.len())?,
             }
         }
         Command::Dev(command) => dev::run(command, &tables())?,
+    }
+    Ok(())
+}
+
+/// Writes an encoded file, and an HQ file's layer next to it.
+fn write_encoded(output: &Path, encoded: &Encoded) -> Result<()> {
+    let bytes = encoded.bytes();
+    std::fs::write(output, bytes).with_context(|| format!("writing {}", output.display()))?;
+    eprintln!(
+        "wrote {} ({} bytes, {:.2} kbps)",
+        output.display(),
+        bytes.len(),
+        kbps(bytes.len(), encoded.seconds())
+    );
+    let layer_file = hq::layer_path(output);
+    if let Encoded::Hq {
+        layer: Some(layer), ..
+    } = encoded
+    {
+        std::fs::write(&layer_file, layer)
+            .with_context(|| format!("writing {}", layer_file.display()))?;
+        eprintln!(
+            "wrote {} ({} bytes, {:.2} kbps; {:.2} kbps with the base)",
+            layer_file.display(),
+            layer.len(),
+            kbps(layer.len(), encoded.seconds()),
+            kbps(bytes.len() + layer.len(), encoded.seconds())
+        );
+    } else if matches!(encoded, Encoded::Hq { .. }) && layer_file.is_file() {
+        eprintln!(
+            "note: {} is from another encode and no longer fits; delete it",
+            layer_file.display()
+        );
     }
     Ok(())
 }
@@ -456,8 +510,12 @@ fn print_info(stream: &Stream, size: usize) -> Result<()> {
 
 /// An encoded file.
 enum Encoded {
-    /// An HQ stream.
-    Hq { info: pico::DacInfo, bytes: Vec<u8> },
+    /// An HQ stream, and its layer.
+    Hq {
+        info: pico::DacInfo,
+        bytes: Vec<u8>,
+        layer: Option<Vec<u8>>,
+    },
     /// An EnCodec stream, with the model that coded it.
     Encodec {
         model: Box<Encodec>,
@@ -524,9 +582,11 @@ fn encode_hq(
         no_length: options.no_length,
         table: &table,
         dump: options.dump_codes.as_deref(),
+        layer_codebooks: options.layer_codebooks,
+        layer_side_codebooks: options.layer_side_codebooks,
     };
-    let (info, bytes) = hq::encode(weights, source, &settings)?;
-    Ok(Encoded::Hq { info, bytes })
+    let hq::Encoded { info, bytes, layer } = hq::encode(weights, source, &settings)?;
+    Ok(Encoded::Hq { info, bytes, layer })
 }
 
 fn encode_file(
