@@ -2,7 +2,7 @@
 
 Small, seekable, gapless music and sound files for the web, in pure safe Rust. picotone's default **HQ** codec
 codes 44.1 kHz audio as DAC 44 kHz codes (its own STFT encoder and Vocos decoder, 1 to 16 codebooks per
-channel); Meta's **EnCodec** (48 kHz stereo, 24 kHz mono) is the other codec. Both code their output with **cx2**
+channel); Meta's **EnCodec** (48 kHz stereo, 24 kHz mono) is the fast path (`--fast`): it encodes much faster than HQ. Both code their output with **cx2**
 (a small integer predictive model and a range coder, lossless on the codes) and store it in **`.pico`** files:
 Ogg pages that each decode on their own. Decoders run natively and in the browser (WebAssembly; WebGPU for
 EnCodec).

@@ -12,8 +12,8 @@ picotone is a neural audio codec in safe Rust, written for one consumer: a local
   by picotone's Vocos decoder, at 1 to 16 codebooks per channel (about 0.6 to 10.6 kbps per channel after
   entropy coding), in mono, left/right, mid/side or parametric stereo. A file can be split into a base that
   plays alone and an enhancement layer (`.picol`) that brings it up to more codebooks.
-- **EnCodec**, Meta's codec at 48 kHz stereo and 24 kHz mono, bit-exact with the reference implementation,
-  with presets from about 3 to 18 kbps.
+- **EnCodec**, the fast path (`--fast`): Meta's codec at 48 kHz stereo and 24 kHz mono, which encodes much
+  faster than HQ, bit-exact with the reference implementation, with presets from about 3 to 18 kbps.
 
 Both store their codes in **`.pico`** files: Ogg pages that each decode on their own, coded losslessly with
 **cx2**, an integer-only predictive model and range coder that gives the same bits on every CPU, in
