@@ -86,3 +86,11 @@ with its URL and licence in [`DATA_SOURCES.json`](DATA_SOURCES.json). No attribu
   Shakespeare and others.
 
 None of this audio is included in the repository.
+
+## The sample song
+
+`samples/` holds **Ravel – Boléro** by **Jason Weinberger**
+(<https://soundcloud.com/jasonweinberger/ravel-bolero>), licensed
+[CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/), with picotone encodings of it. The encodings
+are adaptations of the recording and are licensed CC BY-SA 3.0 as well. See
+[`samples/README.md`](samples/README.md).

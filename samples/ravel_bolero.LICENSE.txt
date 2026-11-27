@@ -1,0 +1,8 @@
+Ravel - Bolero, by Jason Weinberger
+https://soundcloud.com/jasonweinberger/ravel-bolero
+
+Licensed under the Creative Commons Attribution-ShareAlike 3.0 Unported licence
+(CC BY-SA 3.0): https://creativecommons.org/licenses/by-sa/3.0/
+
+The .pico files in this folder are lossy encodings of this recording, made with
+picotone. They are adaptations of it, and are licensed under CC BY-SA 3.0 too.
