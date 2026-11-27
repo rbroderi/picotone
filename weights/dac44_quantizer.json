@@ -3,12 +3,13 @@
  "sample_rate": 44100,
  "hop": 512,
  "latent_dim": 1024,
- "codebooks": 9,
+ "codebooks": 16,
  "codebook_size": 1024,
  "codebook_dim": 8,
- "params": 304200,
- "licence": "MIT (descript-audio-codec, Copyright (c) 2023-present, Descript)",
+ "params": 540800,
+ "licence": "stages 0-8: MIT (descript-audio-codec, Copyright (c) 2023-present, Descript); stages 9-15: GPL-3.0-or-later (picotone)",
  "source_sha256": {
-  "dac": "a88eed82a7024ccc1facdb1e605c4c2f99281c8118c22c9895ffa846d8fb61aa"
+  "dac": "a88eed82a7024ccc1facdb1e605c4c2f99281c8118c22c9895ffa846d8fb61aa",
+  "ext": "85c3871eac1490be9d16187c15e62a598cedd9619f5b86524b8d66a3cdad0b7f"
  }
 }

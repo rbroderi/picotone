@@ -173,7 +173,7 @@ EnCodec; only the fixed part and the audio packets differ. The implementation is
 |---|---|---|
 | 1 | model | 2 |
 | 1 | scheme | 2 = `cx2` (the only HQ scheme; below) |
-| 8 | codebook hash | FNV-1a 64 over DAC's 9 x 1024 x 8 quantiser codebooks (`f32`, little-endian, stage by stage) |
+| 8 | codebook hash | FNV-1a 64 over the quantiser's 16 x 1024 x 8 codebooks (DAC's 9, then picotone's 7; `f32`, little-endian, stage by stage) |
 | 8 | table hash | FNV-1a 64 of the HQ cx2 table file (`.ecxm`, magic `ECXH`) the pages are coded with |
 | 1 | layout | 0 = mono, 1 = left/right, 2 = mid/side (M = (L+R)/2, S = (L-R)/2; L = M+S, R = M-S), 3 = parametric stereo (the mid M alone, plus stereo parameters per page) |
 | 1 | parametric settings | **only for layout 3**: bits 0-1 the band layout (0 = 20 bands, 1 = 10), bits 2-4 log2 of the frames per parameter set (1 to 16); other bits 0 |

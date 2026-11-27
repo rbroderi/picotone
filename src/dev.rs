@@ -115,7 +115,7 @@ pub(crate) enum DevCommand {
         #[arg(long, default_value_t = 2)]
         channels: usize,
     },
-    /// Decode a `.npy` of DAC codes (`[frames, 9]`) with the HQ decoder to raw
+    /// Decode a `.npy` of DAC codes (`[frames, codebooks]`) with the HQ decoder to raw
     /// little-endian f32 samples, for parity checks against PyTorch.
     DacDecode {
         /// The decoder weights (`dac44_vocos.safetensors`).
@@ -133,14 +133,14 @@ pub(crate) enum DevCommand {
     },
     /// Encode raw little-endian f32 mono 44.1 kHz samples with the HQ encoder
     /// (the STFT encoder, then DAC's quantiser) to a `.npy` of codes
-    /// `[frames, 9]`, for parity checks.
+    /// `[frames, 16]`, for parity checks.
     DacEncode {
         /// The weights directory, holding `dac44_stftenc.safetensors` and
         /// `dac44_quantizer.safetensors`.
         weights: PathBuf,
         /// Input: raw f32 samples.
         input: PathBuf,
-        /// Output: codes, `[frames, 9]` u16.
+        /// Output: codes, `[frames, 16]` u16.
         output: PathBuf,
         /// Latent frames per chunk (default: the encoder's own).
         #[arg(long)]
@@ -936,7 +936,17 @@ fn write_dac_codes(tables: &Path, bytes: &[u8], output: &Path) -> Result<()> {
     let stream = pico::DacStream::parse(bytes)?;
     let table = crate::hq::find_table(tables, None, stream.info.table_hash)?;
     let channels = stream.decode_all(&table)?;
-    let info = &stream.info;
+    write_dac_bundle(&stream.info, &channels, output)
+}
+
+/// Writes HQ codes (per coded channel, `[frames][codebooks]`) as a code
+/// bundle: one `.npy` per channel and a `.json` sidecar with the layout and
+/// lengths.
+pub(crate) fn write_dac_bundle(
+    info: &pico::DacInfo,
+    channels: &[Vec<u16>],
+    output: &Path,
+) -> Result<()> {
     for (c, (codes, &n)) in channels.iter().zip(&info.codebooks).enumerate() {
         let path = if channels.len() == 1 {
             output.to_path_buf()

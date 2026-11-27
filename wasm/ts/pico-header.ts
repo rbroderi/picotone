@@ -230,7 +230,7 @@ export function readPicoHeader(bytes: ArrayBuffer | ArrayBufferView): PicoInfo {
     }
     const coded = layout === "lr" || layout === "ms" ? 2 : 1;
     codebooks = Array.from({ length: coded }, () => h.u8());
-    if (codebooks.some((n) => n < 1 || n > 9)) {
+    if (codebooks.some((n) => n < 1 || n > 16)) {
       throw new Error("implausible HQ codebook count");
     }
   } else {

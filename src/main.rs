@@ -92,7 +92,7 @@ enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ModelName {
     /// HQ (the default): picotone's STFT encoder with DAC 44 kHz's quantiser, and
-    /// picotone's Vocos decoder (`dac44-vocos`); 44.1 kHz, mono or stereo, 1 to 9 codebooks per channel (0.86 kbps each).
+    /// picotone's Vocos decoder (`dac44-vocos`); 44.1 kHz, mono or stereo, 1 to 16 codebooks per channel (0.86 kbps each; default 9).
     Hq,
     /// `encodec_48khz`: 48 kHz stereo, bandwidths 3, 6, 12, 24 kbps.
     #[value(name = "encodec-48k")]
@@ -263,7 +263,7 @@ struct EncodeOptions {
     /// override them.
     #[arg(long, value_enum)]
     preset: Option<Preset>,
-    /// Codebooks per frame. HQ: per channel (the mid for mid/side), 1 to 9, default 9. EnCodec:
+    /// Codebooks per frame. HQ: per channel (the mid for mid/side), 1 to 16, default 9. EnCodec:
     /// instead of the count `--bandwidth` implies.
     #[arg(long)]
     codebooks: Option<usize>,
@@ -303,6 +303,10 @@ struct EncodeOptions {
     /// Leave the length out of the header, as a streaming encoder would.
     #[arg(long, hide = true)]
     no_length: bool,
+    /// HQ: write the codes as a code bundle (`dev codes`'s format) at this `.npy` path instead
+    /// of coding a file; OUTPUT is not written. For fitting cx2 tables.
+    #[arg(long, hide = true)]
+    dump_codes: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -335,6 +339,10 @@ fn main() -> Result<()> {
             options,
         } => {
             let encoded = encode_file(&weights(), &tables(), input, options, false)?;
+            if let Some(path) = &options.dump_codes {
+                eprintln!("wrote the codes to {}", path.display());
+                return Ok(());
+            }
             let bytes = encoded.bytes();
             std::fs::write(output, bytes)
                 .with_context(|| format!("writing {}", output.display()))?;
@@ -485,7 +493,7 @@ fn encode_hq(
     channels: usize,
     auto_mono: bool,
 ) -> Result<Encoded> {
-    let codebooks = options.codebooks.unwrap_or(picotone::dac::CODEBOOKS);
+    let codebooks = options.codebooks.unwrap_or(picotone::dac::DEFAULT_CODEBOOKS);
     let table_path = options
         .table
         .clone()
@@ -513,6 +521,7 @@ fn encode_hq(
         page_length: options.page_length,
         no_length: options.no_length,
         table: &table,
+        dump: options.dump_codes.as_deref(),
     };
     let (info, bytes) = hq::encode(weights, source, &settings)?;
     Ok(Encoded::Hq { info, bytes })

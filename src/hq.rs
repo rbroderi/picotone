@@ -125,6 +125,9 @@ pub(crate) struct Settings<'a> {
     pub no_length: bool,
     /// The cx2 table to code with.
     pub table: &'a HqModel,
+    /// Write the codes here as a code bundle (`dev codes`'s format) instead
+    /// of coding them; the encode then returns no bytes.
+    pub dump: Option<&'a Path>,
 }
 
 fn file(weights: &Path, name: &str) -> Result<PathBuf> {
@@ -342,6 +345,10 @@ pub(crate) fn encode(
     let start = Instant::now();
     let codes = encode_signals(&encoder, &coded_signals(&channels, layout), &codebooks)?;
     let parameters = stereo_parameters(&channels, layout, &info.pages());
+    if let Some(path) = s.dump {
+        crate::dev::write_dac_bundle(&info, &codes, path)?;
+        return Ok((info, Vec::new()));
+    }
     if let ChannelLayout::Parametric(config) = layout {
         let bits = 8 * parameters.iter().map(Vec::len).sum::<usize>();
         let seconds = picotone::config::to_f64(info.audio_length) / f64::from(dac::SAMPLE_RATE);

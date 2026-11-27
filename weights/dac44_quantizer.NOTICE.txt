@@ -1,0 +1,10 @@
+This quantiser's first 9 codebooks (stages 0-8) are DAC's own (descript-audio-codec, 44 kHz weights), MIT
+licence, Copyright (c) 2023-present, Descript; the MIT notice applies (DAC-MIT.txt).
+
+Its codebooks 10-16 (stages 9-15) were trained by picotone with the HQ decoder, on third-party audio (tracks by
+licence: by 9423, by-sa 32630, cc0 901, fal 663, pd 425). Every training track is credited, with its licence URL,
+in dac44_quantizer.credits.jsonl.
+
+Some training audio is licensed CC BY-SA (or the Free Art Licence). Whether trained weights are an adaptation of
+their training data is legally unsettled; these weights may be a ShareAlike derivative of that audio. Ship this
+notice and the credits file with the weights.

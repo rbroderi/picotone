@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, ensure};
 use picotone::cx2::hq::HqModel;
-use picotone::dac::HOP;
+use picotone::dac::{CODEBOOKS, HOP};
 use picotone::hqstream::{HqDecoder, HqStream};
 use picotone::pico::{self, ChannelLayout, DacInfo, DacStream};
 use picotone::vocos::VocosDecoder;
@@ -15,7 +15,7 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// A `[frames, 9]` little-endian u16 `.npy` file (format 1.0).
+/// A `[frames, 16]` little-endian u16 `.npy` file (format 1.0).
 fn read_codes(path: &Path) -> Result<(Vec<u16>, usize)> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     ensure!(
@@ -34,8 +34,11 @@ fn read_codes(path: &Path) -> Result<(Vec<u16>, usize)> {
         .iter()
         .map(|&b| u16::from_le_bytes(b))
         .collect();
-    ensure!(codes.len().is_multiple_of(9), "codes are not [frames, 9]");
-    let frames = codes.len() / 9;
+    ensure!(
+        codes.len().is_multiple_of(CODEBOOKS),
+        "codes are not [frames, {CODEBOOKS}]"
+    );
+    let frames = codes.len() / CODEBOOKS;
     Ok((codes, frames))
 }
 
@@ -49,10 +52,10 @@ fn read_f32(path: &Path) -> Result<Vec<f32>> {
         .collect())
 }
 
-/// The first `n` codebooks of `[frames, 9]` codes.
+/// The first `n` codebooks of `[frames, 16]` codes.
 fn tier(codes: &[u16], n: usize) -> Vec<u16> {
     codes
-        .as_chunks::<9>()
+        .as_chunks::<CODEBOOKS>()
         .0
         .iter()
         .flat_map(|f| f[..n].iter().copied())
@@ -100,7 +103,7 @@ fn parity(stem: &Path, tiers: &[usize]) -> Result<()> {
 
 #[test]
 fn matches_pytorch_on_the_tiny_fixture() -> Result<()> {
-    parity(&root().join("tests/data/vocos_tiny"), &[9, 4, 1])
+    parity(&root().join("tests/data/vocos_tiny"), &[16, 9, 4, 1])
 }
 
 /// The full-size (512 wide, 8 blocks) random-init model, when it has been
@@ -112,7 +115,7 @@ fn matches_pytorch_at_full_size() -> Result<()> {
         eprintln!("skipped: work/vocos/full.safetensors is not there");
         return Ok(());
     }
-    parity(&stem, &[9, 5, 1])?;
+    parity(&stem, &[16, 9, 5, 1])?;
     let d = VocosDecoder::load(&stem.with_extension("safetensors"))?;
     let c = codes(200, 9, 5);
     let whole = d.decode_chunked(&c, 9, usize::MAX)?;

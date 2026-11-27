@@ -10,18 +10,19 @@
  },
  "sample_rate": 44100,
  "frame": 512,
- "codebooks": 9,
+ "codebooks": 16,
  "codebook_size": 1024,
  "codebook_dim": 8,
  "input_per_codebook": 9,
  "receptive_frames": 29,
- "params": 212674,
+ "params": 284130,
  "step": 0,
  "licences": "none (random-init test fixture)",
  "teacher": "descript-audio-codec 1.0.0, 44khz 8kbps weights (MIT, Copyright (c) 2023-present, Descript)",
  "source_sha256": {
   "vocos": "fc875ef03f2d9d6dc94a0ebbc85d46537121d4a87484226fef84c6db12e079f9",
-  "dac": "a88eed82a7024ccc1facdb1e605c4c2f99281c8118c22c9895ffa846d8fb61aa"
+  "dac": "a88eed82a7024ccc1facdb1e605c4c2f99281c8118c22c9895ffa846d8fb61aa",
+  "ext": "85c3871eac1490be9d16187c15e62a598cedd9619f5b86524b8d66a3cdad0b7f"
  },
  "fold_max_rel_dev": 2.4531407234462677e-06
 }

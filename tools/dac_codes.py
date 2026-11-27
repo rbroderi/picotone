@@ -1,10 +1,12 @@
-"""Dumps HQ (DAC 44 kHz) codes of a set of clips, for fitting the HQ cx2 tables.
+"""Dumps HQ codes of a set of clips, for fitting the HQ cx2 tables.
 
     python tools/dac_codes.py --list X:/audio/work/clips2.json --split fit2 --wav X:/audio/work/wav2 \
         --out work/dac_codes/fit2 [--threads 3] [--jobs 4]
 
-Each clip is encoded with `picotone encode --codebooks 9` (the shipping encoder, with its stereo choice) and its
-codes written with `picotone dev codes`: `<name>.npy` (or `<name>.0.npy` and `<name>.1.npy`) plus `<name>.json`.
+Each clip is encoded with `picotone encode --codebooks 16 --dump-codes` (the shipping encoder, with its stereo
+choice at 16 codebooks), which writes the codes instead of coding them: `<name>.npy` (or `<name>.0.npy` and
+`<name>.1.npy`) plus `<name>.json`, the format of `picotone dev codes`. A tier's codes are the first codebooks of
+each frame.
 Clips already done are skipped, so the script can be stopped and restarted. Codes depend only on the encoder, so
 a new encoder means a fresh dump with this script, then a refit (see train/README.md).
 
@@ -38,12 +40,10 @@ EXCLUDE = {
 def dump(name, args):
     """Encodes and dumps one clip; returns False if it failed."""
     npy = os.path.join(args.out, name + ".npy")
-    pico = os.path.join(args.out, name + ".pico")
     wav = os.path.join(args.wav, name + ".wav")
     try:
-        subprocess.run([lib.PICOTONE, "encode", "--codebooks", "9", "--threads", str(args.threads), wav, pico],
-                       check=True, capture_output=True, timeout=args.timeout)
-        subprocess.run([lib.PICOTONE, "dev", "codes", "--threads", str(args.threads), pico, npy],
+        subprocess.run([lib.PICOTONE, "--threads", str(args.threads), "encode", "--codebooks", str(args.codebooks),
+                        "--dump-codes", npy, wav, os.path.join(args.out, name + ".pico")],
                        check=True, capture_output=True, timeout=args.timeout)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         err = getattr(e, "stderr", b"") or b""
@@ -58,6 +58,7 @@ def main():
     ap.add_argument("--split", required=True)
     ap.add_argument("--wav", required=True, help="directory holding <name>.wav")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--codebooks", type=int, default=16)
     ap.add_argument("--threads", type=int, default=3, help="threads per picotone run")
     ap.add_argument("--jobs", type=int, default=1, help="clips encoded at once")
     ap.add_argument("--timeout", type=int, default=1800, help="seconds per clip before it counts as hung")

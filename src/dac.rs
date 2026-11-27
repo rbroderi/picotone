@@ -1,14 +1,15 @@
-//! The HQ codec's codes: DAC 44 kHz's quantiser ([`DacQuantizer`]), and the
-//! code-space helpers its decoder ([`crate::vocos::VocosDecoder`]) shares.
+//! The HQ codec's codes: its residual vector quantiser ([`DacQuantizer`]), and
+//! the code-space helpers its decoder ([`crate::vocos::VocosDecoder`]) shares.
 //!
-//! DAC (descript-audio-codec, MIT, Copyright (c) 2023-present, Descript) codes
-//! mono 44.1 kHz audio as 9 codebooks of 1024 entries per latent frame, one
-//! frame per 512 samples. picotone's encoder ([`crate::stftenc`]) makes the
-//! 1024-wide latent and DAC's own quantiser turns it into DAC's codes. A
-//! decoder reads the codes as a folded input: the codebook projections are
-//! folded into its first conv, so each frame is 81 values: for each
-//! codebook, its 8 embedding values and a 1 meaning "present". Codebooks
-//! above the tier give 9 zeros.
+//! The quantiser codes mono 44.1 kHz audio as up to 16 codebooks of 1024
+//! entries per latent frame, one frame per 512 samples. picotone's encoder
+//! ([`crate::stftenc`]) makes the 1024-wide latent. Codebooks 1-9 are DAC 44
+//! kHz's own (descript-audio-codec, MIT, Copyright (c) 2023-present,
+//! Descript); codebooks 10-16 were trained with the decoder on what DAC's
+//! leave. A decoder reads the codes as a folded input: the codebook
+//! projections are folded into its first conv, so each frame is 144 values:
+//! for each codebook, its 8 embedding values and a 1 meaning "present".
+//! Codebooks above the tier give 9 zeros.
 
 use anyhow::{Context as _, Result, ensure};
 use rayon::prelude::*;
@@ -21,7 +22,11 @@ pub const SAMPLE_RATE: u32 = 44_100;
 /// Samples per latent frame.
 pub const HOP: usize = 512;
 /// Codebooks per frame at the highest tier.
-pub const CODEBOOKS: usize = 9;
+pub const CODEBOOKS: usize = 16;
+/// DAC's own codebooks, the first of each frame.
+pub const DAC_CODEBOOKS: usize = 9;
+/// Codebooks an encode uses unless told otherwise.
+pub const DEFAULT_CODEBOOKS: usize = DAC_CODEBOOKS;
 /// Entries per codebook.
 pub const CODEBOOK_SIZE: usize = 1024;
 /// Values per codebook entry.
@@ -37,9 +42,9 @@ pub(crate) const FOLDED_INPUT: usize = CODEBOOKS * IN_PER_CODEBOOK;
 
 /// FNV-1a 64 of codebook values as little-endian f32, `[codebook][entry][value]`.
 ///
-/// A stream stores this hash of the codebooks its codes index. It names DAC's
-/// quantiser, not an encoder or a decoder, so any decoder of DAC codes plays
-/// the stream; the quantiser and decoder files each carry a copy of the
+/// A stream stores this hash of all 16 codebooks its codes index. It names
+/// the quantiser, not an encoder or a decoder, so any decoder of these codes
+/// plays the stream; the quantiser and decoder files each carry a copy of the
 /// codebooks.
 pub(crate) fn codebook_hash<'a>(books: impl IntoIterator<Item = &'a f32>) -> u64 {
     books
@@ -51,7 +56,7 @@ pub(crate) fn codebook_hash<'a>(books: impl IntoIterator<Item = &'a f32>) -> u64
 }
 
 /// Writes the folded input of `codes` (`[frames][num_codebooks]`) into the
-/// zeroed `out`, `[frames][81]`: for each codebook present, its entry's 8
+/// zeroed `out`, `[frames][144]`: for each codebook present, its entry's 8
 /// values and a 1. `codebooks` is `[codebook][entry][value]`.
 pub(crate) fn write_folded_input(
     codebooks: &[f32],
@@ -141,8 +146,14 @@ impl Stage {
 
     /// The nearest entry to each frame of `residual` (by cosine, as DAC
     /// does), written to `codes[t * stride]`; then subtracts the chosen
-    /// entries' projections from `residual`.
-    fn step(&self, residual: &mut Seq, codes: &mut [u16], stride: usize) -> Result<()> {
+    /// entries' projections from `residual` and adds them to `sum`.
+    fn step(
+        &self,
+        residual: &mut Seq,
+        sum: &mut Seq,
+        codes: &mut [u16],
+        stride: usize,
+    ) -> Result<()> {
         let projected = self.in_proj.apply(residual)?;
         let mut chosen = Seq::zeros(residual.len(), CODEBOOK_DIM);
         for ((e, dst), code) in projected
@@ -175,18 +186,28 @@ impl Stage {
             dst.copy_from_slice(&self.codebook[entry..entry + CODEBOOK_DIM]);
         }
         let sub = self.out_proj.apply(&chosen)?;
-        for (r, s) in residual.data_mut().iter_mut().zip(sub.data()) {
+        for ((r, z), s) in residual
+            .data_mut()
+            .iter_mut()
+            .zip(sum.data_mut())
+            .zip(sub.data())
+        {
             *r -= s;
+            *z += s;
         }
         Ok(())
     }
 }
 
-/// DAC 44 kHz's residual vector quantiser (MIT, Descript).
+/// The HQ codec's residual vector quantiser: DAC 44 kHz's 9 stages (MIT,
+/// Descript), then 7 of picotone's.
 ///
-/// Exported by `tools/export_quantizer.py`: 9 stages, each projecting the
+/// Exported by `tools/export_quantizer.py`: 16 stages, each projecting the
 /// residual to 8 values and picking the entry with the largest cosine. The
-/// HQ codec's codes are DAC's own.
+/// first 9 codes of a frame are DAC's own. Stage 10 reads the residual
+/// recomputed as the latent minus the sum of stages 1-9's projections, as the
+/// training code does (the running residual differs by rounding, which can
+/// flip near ties).
 #[derive(Debug, Clone)]
 pub struct DacQuantizer {
     stages: Vec<Stage>,
@@ -221,7 +242,7 @@ impl DacQuantizer {
         codebook_hash(self.stages.iter().flat_map(|q| &q.codebook))
     }
 
-    /// Codes of a latent: `[frames][9]`, row-major. A tier's codes are the
+    /// Codes of a latent: `[frames][16]`, row-major. A tier's codes are the
     /// first codebooks of each frame.
     ///
     /// # Errors
@@ -249,9 +270,15 @@ impl DacQuantizer {
 
     fn quantize_piece(&self, latent: Seq) -> Result<Vec<u16>> {
         let mut codes = vec![0; latent.len() * CODEBOOKS];
-        let mut residual = latent;
+        let mut sum = Seq::zeros(latent.len(), LATENT_DIM);
+        let mut residual = latent.clone();
         for (i, q) in self.stages.iter().enumerate() {
-            q.step(&mut residual, &mut codes[i..], CODEBOOKS)?;
+            if i == DAC_CODEBOOKS {
+                for ((r, z), s) in residual.data_mut().iter_mut().zip(latent.data()).zip(sum.data()) {
+                    *r = z - s;
+                }
+            }
+            q.step(&mut residual, &mut sum, &mut codes[i..], CODEBOOKS)?;
         }
         Ok(codes)
     }

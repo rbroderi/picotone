@@ -4,7 +4,7 @@ Run it in distill/'s environment (CPU):
 
     cd distill
     uv run --extra cpu python ../tools/vocos_fixture.py --dac export/weights_44khz_8kbps_0.0.1.pth \
-        --codes <codes.npy> --out ../tests/data/vocos_tiny --dim 32 --blocks 8 --mlp 96 --frames 80
+        --ext X:/audio/distill/weights/q16_codebooks.pt --codes <codes.npy> --out ../tests/data/vocos_tiny --dim 32 --blocks 8 --mlp 96 --frames 80
 
 1. Builds VocosDecoder(dim, blocks, mlp, hop 512) and re-initialises it at realistic scales (`realistic_init`):
    the stock init (std 0.02, zero biases) gives log-magnitudes near 0 and phases near 0, which would test
@@ -12,7 +12,7 @@ Run it in distill/'s environment (CPU):
    phases over several radians.
 2. Saves it as a train.py checkpoint and runs distill/export.py on it, the path a trained run takes.
 3. Converts that export with tools/export_vocos.py: <out>.safetensors and <out>.json.
-4. Decodes the first --frames frames of --codes (`[frames, 9]` u16, e.g. from `picotone dev codes`) at each
+4. Decodes the first --frames frames of --codes (`[frames, 16]` u16, e.g. from `picotone dev codes`) at each
    --tiers count through the original path (DAC quantiser z, then the unfolded decoder, fp32), and writes
    <out>.codes.npy and <out>.q<n>.f32 (raw little-endian f32 samples, 512 per frame).
 """
@@ -59,13 +59,14 @@ def realistic_init(G, seed):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dac", required=True, help="DAC 44 kHz weights (weights_44khz_8kbps_0.0.1.pth)")
-    ap.add_argument("--codes", required=True, help="codes [frames, 9] (.npy, u16)")
+    ap.add_argument("--ext", required=True, help="codebooks 10-16 (q16_codebooks.pt)")
+    ap.add_argument("--codes", required=True, help="codes [frames, 16] (.npy, u16)")
     ap.add_argument("--out", required=True, help="output path without extension")
     ap.add_argument("--dim", type=int, default=512)
     ap.add_argument("--blocks", type=int, default=8)
     ap.add_argument("--mlp", type=int, default=1536)
     ap.add_argument("--frames", type=int, default=0, help="frames of --codes to use (0: all)")
-    ap.add_argument("--tiers", default="9,5,1")
+    ap.add_argument("--tiers", default="16,9,5,1")
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--threads", type=int, default=4)
     a = ap.parse_args()
@@ -80,9 +81,9 @@ def main():
         # The export a trained run gets, through distill/export.py itself.
         subprocess.run([sys.executable, os.path.join(DISTILL, "export.py"), "--ckpt", ckpt,
                         "--out", os.path.join(tmp, "vocos")], check=True, cwd=DISTILL)
-        G, (books, proj, bias) = convert(os.path.join(tmp, "vocos.pt"), a.dac, a.out)
+        G, (books, proj, bias) = convert(os.path.join(tmp, "vocos.pt"), a.dac, a.ext, a.out)
     codes = np.load(a.codes).astype(np.int64)
-    assert codes.ndim == 2 and codes.shape[1] == 9, codes.shape
+    assert codes.ndim == 2 and codes.shape[1] == 16, codes.shape
     if a.frames:
         codes = codes[: a.frames]
     np.save(a.out + ".codes.npy", codes.astype("<u2"))

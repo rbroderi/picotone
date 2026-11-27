@@ -1,15 +1,15 @@
-"""The HQ cx2 net: trains it on dumps of HQ (DAC 44 kHz) codes, then exports its integer table.
+"""The HQ cx2 net: trains it on dumps of HQ codes (16 codebooks), then exports its integer table.
 
     cd train
-    uv run --extra cpu python hq_net.py train --fit ../work/dac_codes/fit ../work/dac_codes/fit2 \
-        --test ../work/dac_codes/test --weights ../weights --out out/hq_net.pt
-    uv run --extra cpu python hq_net.py export --ckpt out/hq_net.pt --test ../work/dac_codes/test \
+    uv run --extra cpu python hq_net.py train --fit ../work/dac_codes16/fit ../work/dac_codes16/fit2 \
+        --test ../work/dac_codes16/test --weights ../weights --out out/hq_net.pt
+    uv run --extra cpu python hq_net.py export --ckpt out/hq_net.pt --test ../work/dac_codes16/test \
         --weights ../weights --table ../models/cx2_dac44.ecxm --fixture ../tests/data/cx2_dac44_fixture.json
 
-The code dumps come from `tools/dac_codes.py` (or `picotone dev codes`): per clip one `[frames, 9]` u16 `.npy`
-per coded channel and a `.json` sidecar with the layout. Nothing here depends on how the encoder made the codes,
-only on the codebook vectors (`quantK.codebook_unit` in `dac44_quantizer.safetensors`), so a new encoder over the
-same codebooks means: dump its codes, rerun `train` and `export`, and commit the new table.
+The code dumps come from `tools/dac_codes.py`: per clip one `[frames, 16]` u16 `.npy` per coded channel and a
+`.json` sidecar with the layout. Nothing here depends on how the encoder made the codes, only on the codebook
+vectors (`quantK.codebook_unit` in `dac44_quantizer.safetensors`), so a new encoder over the same codebooks means:
+dump its codes, rerun `train` and `export`, and commit the new table.
 
 The net (see `src/cx2/hq.rs` for the integer definition) predicts each code of a channel from that channel's 8
 previous frames in the same page and the codebooks already coded in this frame. Every page (80 frames) is coded
@@ -32,7 +32,7 @@ import torch
 from torch import nn
 
 V = 1024
-NQ = 9
+NQ = 16
 PAD = V
 LN2 = math.log(2)
 DIM = 16  # embedding values per code: 8 learnt, then the 8 of DAC's unit codebook vector
@@ -60,7 +60,7 @@ def roles_of(layout, channels):
 
 
 def load_units(weights: Path) -> torch.Tensor:
-    """DAC's unit-norm codebook vectors, `[9, 1024, 8]`."""
+    """The quantiser's unit-norm codebook vectors, `[16, 1024, 8]`."""
     raw = (weights / "dac44_quantizer.safetensors").read_bytes()
     n = int.from_bytes(raw[:8], "little")
     header = json.loads(raw[8: 8 + n])
@@ -109,15 +109,20 @@ class Codes:
     def __len__(self):
         return len(self.row)
 
+    def to(self, device):
+        self.codes, self.row, self.t, self.role, self.books = (
+            a.to(device) for a in (self.codes, self.row, self.t, self.role, self.books))
+        return self
+
 
 def batch(data, idx, history, tiers):
-    """hist [B,H,9] (most recent first), cur [B,9], role [B], ncb [B]: inputs for a channel of `tiers` codebooks."""
+    """hist [B,H,16] (most recent first), cur [B,16], role [B], ncb [B]: inputs for a channel of `tiers` codebooks."""
     row, t = data.row[idx], data.t[idx]
     ncb = torch.minimum(tiers, data.books[idx])
     start = t - t % PAGE
-    d = torch.arange(1, history + 1)
+    d = torch.arange(1, history + 1, device=row.device)
     hist = data.codes[row[:, None] - d[None, :]]
-    q = torch.arange(NQ)
+    q = torch.arange(NQ, device=row.device)
     ok = ((t[:, None] - d[None, :]) >= start[:, None])[..., None] & (q[None, None, :] < ncb[:, None, None])
     hist = torch.where(ok, hist, PAD)
     return hist, data.codes[row], data.role[idx], ncb
@@ -147,7 +152,7 @@ class Net(nn.Module):
         self.register_buffer("mask", torch.tril(torch.ones(NQ, NQ), diagonal=-1))
 
     def table(self):
-        """The embedding table, [9*(V+1), DIM], with the PAD rows zero."""
+        """The embedding table, [16*(V+1), DIM], with the PAD rows zero."""
         e = torch.cat([self.learnt.weight, self.fixed], dim=-1).clone()
         e[self.offset + V] = 0
         return e
@@ -175,23 +180,24 @@ class Net(nn.Module):
 def loss_terms(logits, cur, ncb):
     # Codebooks past a channel's count hold PAD; they are masked out, the clamp only keeps the gather legal.
     lp = torch.log_softmax(logits, -1).gather(-1, cur.clamp(max=V - 1)[..., None])[..., 0]
-    m = (torch.arange(NQ)[None, :] < ncb[:, None]).float()
+    m = (torch.arange(NQ, device=ncb.device)[None, :] < ncb[:, None]).float()
     return lp, m
 
 
 def evaluate(net, data, history, tier, role=None):
     """Bits per code over the coded codebooks of every test channel cut to `tier` codebooks."""
     net.eval()
+    dev = data.row.device
     nll = torch.zeros(NQ, dtype=torch.float64)
     cnt = torch.zeros(NQ, dtype=torch.float64)
-    sel = torch.arange(len(data)) if role is None else torch.nonzero(data.role == role)[:, 0]
+    sel = torch.arange(len(data), device=dev) if role is None else torch.nonzero(data.role == role)[:, 0]
     with torch.no_grad():
         for s in range(0, len(sel), 4096):
             idx = sel[s: s + 4096]
-            hist, cur, rl, ncb = batch(data, idx, history, torch.full((len(idx),), tier))
+            hist, cur, rl, ncb = batch(data, idx, history, torch.full((len(idx),), tier, device=dev))
             lp, m = loss_terms(net(hist, cur, rl), cur, ncb)
-            nll -= (lp * m).sum(0).double()
-            cnt += m.sum(0).double()
+            nll -= (lp * m).sum(0).double().cpu()
+            cnt += m.sum(0).double().cpu()
     net.train()
     return float(nll.sum() / cnt.sum().clamp(min=1) / LN2), [round(float(v), 3) for v in (nll / cnt.clamp(min=1) / LN2)[:tier]]
 
@@ -199,23 +205,24 @@ def evaluate(net, data, history, tier, role=None):
 def cmd_train(args):
     torch.set_num_threads(args.threads)
     torch.manual_seed(0)
+    dev = torch.device(args.device)
     unit = load_units(args.weights)
-    fit = Codes(load_dirs(args.fit), args.history)
-    test = Codes(load_dirs(args.test), args.history) if args.test else None
+    fit = Codes(load_dirs(args.fit), args.history).to(dev)
+    test = Codes(load_dirs(args.test), args.history).to(dev) if args.test else None
     print(f"fit {len(fit)} channel-frames ({len(fit) / 86.13 / 3600:.2f} channel-hours)"
-          + (f", test {len(test)}" if test else ""), flush=True)
-    net = Net(unit, args.history, args.h1, args.h2, args.rank)
-    tiers = torch.arange(1, NQ + 1)
-    probs = torch.tensor([float(v) for v in args.tier_probs.split(",")])
+          + (f", test {len(test)}" if test else "") + f", on {dev}", flush=True)
+    net = Net(unit, args.history, args.h1, args.h2, args.rank).to(dev)
+    tiers = torch.arange(1, NQ + 1, device=dev)
+    probs = torch.tensor([float(v) for v in args.tier_probs.split(",")], device=dev)
     assert len(probs) == NQ
-    gen = torch.Generator().manual_seed(1)
+    gen = torch.Generator(device=dev).manual_seed(1)
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=0.01)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.steps,
                                                 pct_start=max(0.05, 3 / args.steps))
     start, run = time.time(), None
     log = open(str(args.out) + ".log", "a", encoding="utf-8")
     for step in range(1, args.steps + 1):
-        idx = torch.randint(len(fit), (args.batch,), generator=gen)
+        idx = torch.randint(len(fit), (args.batch,), generator=gen, device=dev)
         ts = tiers[torch.multinomial(probs, args.batch, replacement=True, generator=gen)]
         hist, cur, role, ncb = batch(fit, idx, args.history, ts)
         lp, m = loss_terms(net(hist, cur, role), cur, ncb)
@@ -233,7 +240,7 @@ def cmd_train(args):
         if time.time() - start > args.max_minutes * 60:
             print("  time limit reached; stopping early", flush=True)
             break
-    sd = net.state_dict()
+    sd = {k: v.cpu() for k, v in net.state_dict().items()}
     sd["config"] = torch.tensor([args.history, args.h1, args.h2, args.rank])
     torch.save(sd, args.out)
     if test:
@@ -243,7 +250,7 @@ def cmd_train(args):
             report[f"q{tier}"] = {"bits": mean, "per_codebook": per}
             print(f"  q{tier}: {mean:.4f} bits/code, per codebook {' '.join(f'{v:.2f}' for v in per)}", flush=True)
         for name, r in ROLES.items():
-            for tier in (9, 3):
+            for tier in (16, 9, 3):
                 mean, _ = evaluate(net, test, args.history, tier, r)
                 report[f"{name}_q{tier}"] = mean
                 print(f"  role {name} q{tier}: {mean:.4f} bits/code", flush=True)
@@ -344,7 +351,7 @@ def int_logits(q, net, hist, cur, role):
     acc = x @ q["w1"].T + q["b1"] + q["role"][role]
     h1 = torch.clamp(torch.floor(acc / 2 ** q["s1"]), 0, LIMIT)
     h2 = torch.clamp(torch.floor((h1 @ q["w2"].T + q["b2"]) / 2 ** q["s2"]), 0, LIMIT)
-    e_cur = emb[cur + net.offset]  # [b, 9, DIM]
+    e_cur = emb[cur + net.offset]  # [b, 16, DIM]
     out = torch.zeros(b, NQ, V, dtype=torch.float64)
     for k, h in enumerate(q["heads"]):
         u = torch.cat([h2, e_cur[:, :k].reshape(b, -1)], dim=-1)
@@ -431,7 +438,7 @@ def write_fixture(args, q, net, blob):
     codes, role, _, name = channels[0]
     frames = 100  # two pages: 80 frames and 20
     cases = []
-    for tier, r in ((9, role), (3, ROLES["side"])):
+    for tier, r in ((16, role), (9, role), (3, ROLES["side"])):
         data = Codes([(codes[:frames], r, tier, name)], net.history)
         hist, cur, rl, ncb = batch(data, torch.arange(frames), net.history, torch.full((frames,), tier))
         li = int_logits(q, net, hist, cur, rl).long()
@@ -460,13 +467,16 @@ def main():
     t.add_argument("--h1", type=int, default=512)
     t.add_argument("--h2", type=int, default=256)
     t.add_argument("--rank", type=int, default=128)
-    t.add_argument("--tier-probs", default="0.08,0.08,0.08,0.15,0.15,0.15,0,0,0.31",
-                   help="probability of each codebook count 1..9 per training channel")
+    # The base tiers (1-9, files mostly at 9) and the layer's (11-16; a layer never stops at 10, which pays off
+    # only through the codebooks after it).
+    t.add_argument("--tier-probs", default="0.06,0.06,0.06,0.10,0.10,0.10,0,0,0.22,0,0.05,0.05,0.05,0.05,0.05,0.05",
+                   help="probability of each codebook count 1..16 per training channel")
     t.add_argument("--steps", type=int, default=80000)
     t.add_argument("--batch", type=int, default=1024)
     t.add_argument("--lr", type=float, default=2e-3)
     t.add_argument("--threads", type=int, default=6)
-    t.add_argument("--max-minutes", type=float, default=240)
+    t.add_argument("--device", default="cpu", help="cpu or cuda; export always runs on the CPU")
+    t.add_argument("--max-minutes", type=float, default=600)
     e = sub.add_parser("export")
     e.add_argument("--ckpt", type=Path, required=True)
     e.add_argument("--test", type=Path, nargs="+", required=True)
