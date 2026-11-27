@@ -26,6 +26,7 @@ pub mod layout;
 pub mod model;
 pub mod nn;
 pub mod pico;
+pub mod player;
 mod pool;
 pub mod prof;
 pub mod pstereo;

@@ -13,31 +13,19 @@
 //! [`readCodes`](read_codes) decodes only the codes of an EnCodec file (for
 //! the WebGPU decoder, which runs the network on the GPU).
 //!
-//! Segmented models (`encodec_48khz`) decode each segment with
-//! [`Encodec::decode_segment`] and stitch them with [`OverlapAdd`]; causal
-//! models (`encodec_24khz`) run a [`StreamDecoder`] over the codes. Either
-//! way the output equals [`Encodec::decode`] on the whole file, and memory
-//! depends on the chunk size, not on the file length. HQ files run through
-//! [`HqStream`], the native decoder's own streaming path, whose output equals
-//! a whole-file decode bit for bit.
+//! The decode is the library's [`Player`], shared with the native player
+//! plugin: its output equals a whole-file decode bit for bit, and memory
+//! depends on the chunk size, not on the file length.
 
-use std::collections::VecDeque;
-
-use anyhow::{Context as _, Result, bail, ensure};
-use picotone::cx2;
-use picotone::cx2::hq::HqModel;
+use anyhow::{Context as _, Result, bail};
 use picotone::dac;
-use picotone::hqstream::{HqDecoder, HqStream};
-use picotone::layout::Trimmer;
-use picotone::model::{Encodec, EncodedFrame, OverlapAdd, StreamDecoder};
+use picotone::model::Encodec;
 use picotone::nn::Seq;
 use picotone::pico::{self, ChannelLayout, Codec, DacInfo, DacStream, Info};
+use picotone::player::{self, HQ_MODEL, Net, Pages, Player};
 use picotone::vocos::{self, VocosDecoder};
 use picotone::weights::Weights;
 use wasm_bindgen::prelude::*;
-
-/// Name of the HQ code space in headers (`model`), whatever decodes it.
-const HQ_MODEL: &str = "dac44";
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -229,8 +217,7 @@ fn ensure_encodec(bytes: &[u8]) -> Result<()> {
 #[wasm_bindgen]
 #[derive(Debug, Default)]
 pub struct Tables {
-    list: Vec<&'static cx2::Model>,
-    hq: Vec<&'static HqModel>,
+    inner: player::Tables,
 }
 
 #[wasm_bindgen]
@@ -254,55 +241,13 @@ impl Tables {
     /// Whether the table with this hash (16 hex digits) is loaded.
     #[must_use]
     pub fn has(&self, hash: &str) -> bool {
-        u64::from_str_radix(hash, 16)
-            .is_ok_and(|h| self.find(h).is_some() || self.find_hq(h).is_some())
+        u64::from_str_radix(hash, 16).is_ok_and(|h| self.inner.has(h))
     }
 }
 
 impl Tables {
     fn add_table(&mut self, table: &[u8]) -> Result<String> {
-        let hash = if let Some(hash) = cx2::hq::table_hash(table) {
-            if self.find_hq(hash).is_none() {
-                let model = HqModel::from_table(table)?;
-                self.hq.push(Box::leak(Box::new(model)));
-            }
-            hash
-        } else {
-            let hash = cx2::model::self_contained_hash(table)
-                .context("not a self-contained (version 5) cx2 table or an HQ table")?;
-            if self.find(hash).is_none() {
-                let model = cx2::Model::from_table(table)?;
-                self.list.push(Box::leak(Box::new(model)));
-            }
-            hash
-        };
-        Ok(format!("{hash:016x}"))
-    }
-
-    fn find(&self, hash: u64) -> Option<&'static cx2::Model> {
-        self.list.iter().copied().find(|t| t.hash() == hash)
-    }
-
-    fn find_hq(&self, hash: u64) -> Option<&'static HqModel> {
-        self.hq.iter().copied().find(|t| t.hash() == hash)
-    }
-
-    fn for_stream(&self, info: &Info) -> Result<&'static cx2::Model> {
-        self.find(info.table_hash).with_context(|| {
-            format!(
-                "the cx2 table {:016x} this file was coded with is not loaded",
-                info.table_hash
-            )
-        })
-    }
-
-    fn for_hq_stream(&self, info: &DacInfo) -> Result<&'static HqModel> {
-        self.find_hq(info.table_hash).with_context(|| {
-            format!(
-                "the HQ cx2 table {:016x} this file was coded with is not loaded",
-                info.table_hash
-            )
-        })
+        Ok(format!("{:016x}", self.inner.add(table)?))
     }
 }
 
@@ -370,22 +315,17 @@ impl CodePages {
     fn open(bytes: &[u8], tables: &Tables) -> Result<Self> {
         ensure_encodec(bytes)?;
         let stream = pico::Stream::parse(bytes)?;
-        let table = tables.for_stream(&stream.info)?;
+        let table = tables.inner.for_stream(&stream.info)?;
         let mut info = info_json(&stream.info);
         info["segmentFrames"] = serde_json::json!(stream.segment_frames);
         Ok(Self {
             info: info.to_string(),
-            pages: Pages {
-                stream,
-                table,
-                next: 0,
-                cx2_ms: 0.0,
-            },
+            pages: Pages::new(stream, table, now_ms),
         })
     }
 
     fn next_page(&mut self) -> Result<Option<Codes>> {
-        Ok(self.pages.next()?.map(|frames| Codes {
+        Ok(self.pages.next_page()?.map(|frames| Codes {
             info: String::new(),
             scales: frames.iter().filter_map(|f| f.scale).collect(),
             values: frames.into_iter().flat_map(|f| f.codes).collect(),
@@ -407,7 +347,7 @@ impl CodePages {
         reason = "wasm_bindgen cannot export const fns"
     )]
     pub fn page_count(&self) -> usize {
-        self.pages.stream.pages.len()
+        self.pages.stream().pages.len()
     }
 
     /// The next page's codes (its segments, or for the causal model its
@@ -424,7 +364,7 @@ impl CodePages {
 fn codes_of(bytes: &[u8], tables: &Tables) -> Result<Codes> {
     ensure_encodec(bytes)?;
     let stream = pico::Stream::parse(bytes)?;
-    let table = tables.for_stream(&stream.info)?;
+    let table = tables.inner.for_stream(&stream.info)?;
     let frames = stream.decode_all(table)?;
     let mut info = info_json(&stream.info);
     info["segmentFrames"] = serde_json::json!(stream.segment_frames);
@@ -433,15 +373,6 @@ fn codes_of(bytes: &[u8], tables: &Tables) -> Result<Codes> {
         scales: frames.iter().filter_map(|f| f.scale).collect(),
         values: frames.into_iter().flat_map(|f| f.codes).collect(),
     })
-}
-
-/// The network a [`Decoder`] holds.
-#[derive(Debug, Clone, Copy)]
-enum Net {
-    /// A decoder-only EnCodec model.
-    Encodec(&'static Encodec),
-    /// A decoder of DAC 44 kHz codes, for HQ files.
-    Hq(&'static dyn HqDecoder),
 }
 
 /// A decoder network: a decoder-only EnCodec model (`encodec_24khz`,
@@ -591,8 +522,14 @@ impl Decoder {
         tables: &Tables,
         start_sample: usize,
     ) -> Result<Stream, JsError> {
-        Stream::new(self.net, pico_bytes, Some(layer_bytes), tables, start_sample)
-            .map_err(|e| to_js(&e))
+        Stream::new(
+            self.net,
+            pico_bytes,
+            Some(layer_bytes),
+            tables,
+            start_sample,
+        )
+        .map_err(|e| to_js(&e))
     }
 }
 
@@ -621,60 +558,6 @@ impl Decoder {
     }
 }
 
-/// Decodes a stream's pages on demand.
-#[derive(Debug)]
-struct Pages {
-    stream: pico::Stream,
-    table: &'static cx2::Model,
-    next: usize,
-    /// Milliseconds spent in the cx2 decode.
-    cx2_ms: f64,
-}
-
-impl Pages {
-    /// The next page's segments (causal model: one frame), or `None` at the end.
-    fn next(&mut self) -> Result<Option<Vec<EncodedFrame>>> {
-        if self.next == self.stream.pages.len() {
-            return Ok(None);
-        }
-        let start = now_ms();
-        let frames = self.stream.decode_page(self.table, self.next)?;
-        self.cx2_ms += now_ms() - start;
-        self.next += 1;
-        Ok(Some(frames))
-    }
-}
-
-/// How a stream turns codes into audio.
-#[derive(Debug)]
-enum Source {
-    /// Normalised segments, decoded one by one and overlap-added.
-    Segmented {
-        /// Decoded segments not yet run through the network.
-        queue: VecDeque<EncodedFrame>,
-        /// Segments to drop from the first page (a seek into the page).
-        skip: usize,
-        /// Segments run through the network so far, counted from `first`.
-        done: usize,
-        /// Segments from the first decoded one to the end.
-        count: usize,
-        overlap: Option<OverlapAdd>,
-    },
-    /// One causal stream of latent frames.
-    Causal {
-        /// Codes decoded but not yet pushed, frame-major.
-        codes: Vec<u16>,
-        num_codebooks: usize,
-        /// Latent frames per unit (one second).
-        unit_frames: usize,
-        /// Latent frames in the file.
-        total: usize,
-        /// Latent frames pushed so far.
-        next: usize,
-        decoder: Option<StreamDecoder<'static>>,
-    },
-}
-
 /// A `.pico` file being decoded a few units at a time.
 ///
 /// A unit is one coded segment (about 1 s) for segmented models, one second
@@ -683,24 +566,7 @@ enum Source {
 #[wasm_bindgen]
 #[derive(Debug)]
 pub struct Stream {
-    inner: Inner,
-    /// The file's `model`, as [`readHeader`](read_header) names it.
-    model: String,
-    sample_rate: usize,
-    channels: usize,
-    audio_length: usize,
-    looped: bool,
-    num_codebooks: usize,
-    /// Milliseconds spent in the cx2 decode, and in everything else.
-    cx2_ms: f64,
-    network_ms: f64,
-}
-
-/// The decode behind a [`Stream`].
-#[derive(Debug)]
-enum Inner {
-    Encodec(Box<EncodecStream>),
-    Hq(Box<HqStream<'static>>),
+    player: Player,
 }
 
 impl Stream {
@@ -711,129 +577,17 @@ impl Stream {
         tables: &Tables,
         start_sample: usize,
     ) -> Result<Self> {
-        let codec = pico::codec_of(bytes)?;
-        let file_model = match codec {
-            Codec::Encodec(kind) => kind.name(),
-            Codec::Dac44 => HQ_MODEL,
-        };
-        let loaded = match net {
-            Net::Encodec(model) => model.name(),
-            Net::Hq(_) => HQ_MODEL,
-        };
-        ensure!(
-            file_model == loaded,
-            "this file needs model {file_model}, but {loaded} is loaded"
-        );
-        let header = header_json(bytes)?;
-        let field = |name: &str| {
-            header
-                .get(name)
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|v| usize::try_from(v).ok())
-                .unwrap_or(0)
-        };
-        let (sample_rate, channels, mut num_codebooks) = (
-            field("sampleRate"),
-            field("channels"),
-            field("numCodebooks"),
-        );
-        ensure!(
-            layer.is_none() || codec == Codec::Dac44,
-            "only HQ files have enhancement layers"
-        );
-        let inner = match net {
-            Net::Encodec(model) => Inner::Encodec(Box::new(EncodecStream::new(
-                model,
-                bytes,
-                tables,
-                start_sample,
-            )?)),
-            Net::Hq(decoder) => {
-                let mut stream = DacStream::parse(bytes)?;
-                if let Some(layer) = layer {
-                    stream.attach_layer(layer)?;
-                    num_codebooks = stream.info.codebooks.iter().copied().max().unwrap_or(0);
-                }
-                let table = tables.for_hq_stream(&stream.info)?;
-                Inner::Hq(Box::new(HqStream::new(
-                    stream,
-                    table,
-                    decoder,
-                    start_sample,
-                )?))
-            }
-        };
-        let (audio_length, looped) = match &inner {
-            Inner::Encodec(s) => (s.info.playable_samples(), s.info.looped),
-            Inner::Hq(s) => (s.info().playable_samples(), s.info().looped),
-        };
-        Ok(Self {
-            inner,
-            model: file_model.to_owned(),
-            sample_rate,
-            channels,
-            audio_length,
-            looped,
-            num_codebooks,
-            cx2_ms: 0.0,
-            network_ms: 0.0,
-        })
+        let player = Player::open(net, bytes, layer, &tables.inner, start_sample, now_ms)?;
+        Ok(Self { player })
     }
 
-    /// Decodes up to `max_units` more units, timing the cx2 decode apart
-    /// from the rest.
+    /// Decodes up to `max_units` more units, as a planar chunk.
     fn decode_units(&mut self, max_units: usize) -> Result<Option<Chunk>> {
-        let start = now_ms();
-        match &mut self.inner {
-            Inner::Encodec(s) => {
-                let before = s.pages.cx2_ms;
-                let chunk = s.decode_units(max_units)?;
-                let cx2 = s.pages.cx2_ms - before;
-                self.cx2_ms += cx2;
-                self.network_ms += now_ms() - start - cx2;
-                Ok(chunk)
-            }
-            Inner::Hq(s) => {
-                s.fetch(max_units)?;
-                let fetched = now_ms();
-                let part = s.decode_next(max_units)?;
-                self.cx2_ms += fetched - start;
-                self.network_ms += now_ms() - fetched;
-                Ok(part.map(|(offset, audio)| planar_chunk(offset, &audio)))
-            }
-        }
+        Ok(self
+            .player
+            .decode_units(max_units)?
+            .map(|chunk| planar_chunk(chunk.offset, &chunk.audio)))
     }
-
-    fn unit_count(&self) -> usize {
-        match &self.inner {
-            Inner::Encodec(s) => s.unit_count(),
-            Inner::Hq(s) => s.unit_count(),
-        }
-    }
-
-    fn units_done(&self) -> usize {
-        match &self.inner {
-            Inner::Encodec(s) => s.units_done(),
-            Inner::Hq(s) => s.units_done(),
-        }
-    }
-}
-
-/// An EnCodec `.pico` file being decoded a few units at a time.
-#[derive(Debug)]
-struct EncodecStream {
-    model: &'static Encodec,
-    info: Info,
-    pages: Pages,
-    source: Source,
-    /// Removes the pre-skip and end trim and joins loops.
-    trimmer: Option<Trimmer>,
-    /// Coded samples the raw output stops at, counted from its first sample.
-    raw_length: usize,
-    /// Trimmed samples still to drop before the first returned one.
-    drop: usize,
-    /// Playable sample the next returned chunk starts at.
-    emitted: usize,
 }
 
 /// Final samples `[sample][channel]` from playable sample `offset`, as a
@@ -855,258 +609,6 @@ fn planar_chunk(offset: usize, audio: &Seq) -> Chunk {
     }
 }
 
-impl EncodecStream {
-    fn new(
-        model: &'static Encodec,
-        bytes: &[u8],
-        tables: &Tables,
-        start_sample: usize,
-    ) -> Result<Self> {
-        let stream = pico::Stream::parse(bytes)?;
-        let info = stream.info.clone();
-        ensure!(
-            info.model.name() == model.name(),
-            "this file needs model {}, but {} is loaded",
-            info.model.name(),
-            model.name()
-        );
-        let playable = info.playable_samples();
-        ensure!(playable > 0, "the file holds no audio");
-        ensure!(
-            start_sample < playable,
-            "start sample {start_sample} is past the end ({playable} samples)"
-        );
-        let table = tables.for_stream(&info)?;
-        let cfg = model.config();
-        let rate = cfg.sampling_rate;
-        let channels = cfg.audio_channels;
-        // A seek starts at a later segment only where nothing before it matters:
-        // segmented, and not a loop (a loop's end blends into its start).
-        let first_segment = match (info.stride, info.looped) {
-            (Some(stride), false) if start_sample > 0 => {
-                first_needed_segment(&info, stride, start_sample + info.pre_skip)?
-            }
-            _ => 0,
-        };
-        let raw_start = first_segment * info.stride.unwrap_or(0);
-        let (trimmer, drop) = if first_segment == 0 {
-            let trimmer = Trimmer::new(info.pre_skip, playable, info.looped, rate, channels)?;
-            (trimmer, start_sample)
-        } else {
-            let pre_skip = start_sample + info.pre_skip - raw_start;
-            let trimmer = Trimmer::new(pre_skip, playable - start_sample, false, rate, channels)?;
-            (trimmer, 0)
-        };
-        let first_page = stream
-            .spans
-            .iter()
-            .position(|span| span.segments.contains(&first_segment))
-            .context("no page holds the start segment")?;
-        let skip = first_segment - stream.spans[first_page].segments.start;
-        let segment_count = stream.segment_frames.len();
-        let total_frames: usize = stream.segment_frames.iter().sum();
-        let source = if info.stride.is_some() {
-            Source::Segmented {
-                queue: VecDeque::new(),
-                skip,
-                done: 0,
-                count: segment_count - first_segment,
-                overlap: Some(model.overlap_add_with(info.segmenting())?),
-            }
-        } else {
-            Source::Causal {
-                codes: Vec::new(),
-                num_codebooks: info.num_codebooks,
-                unit_frames: cfg.frame_rate().max(1),
-                total: total_frames,
-                next: 0,
-                decoder: Some(model.stream_decoder(info.num_codebooks)?),
-            }
-        };
-        Ok(Self {
-            model,
-            raw_length: info.audio_length - raw_start,
-            info,
-            pages: Pages {
-                stream,
-                table,
-                next: first_page,
-                cx2_ms: 0.0,
-            },
-            source,
-            trimmer: Some(trimmer),
-            drop,
-            emitted: start_sample,
-        })
-    }
-
-    /// Decodes up to `max_units` more units and trims them; `None` once
-    /// everything was returned. Keeps decoding while the trim swallows
-    /// everything, so a returned chunk is never empty.
-    fn decode_units(&mut self, max_units: usize) -> Result<Option<Chunk>> {
-        loop {
-            let Some((raw, finished)) = self.decode_raw(max_units)? else {
-                return Ok(None);
-            };
-            let trimmer = self.trimmer.as_mut().context("stream already finished")?;
-            let mut audio = trimmer.push(&raw)?;
-            drop(raw);
-            if finished {
-                self.trimmer
-                    .take()
-                    .context("stream already finished")?
-                    .finish()?;
-            }
-            if self.drop > 0 {
-                let cut = self.drop.min(audio.len());
-                self.drop -= cut;
-                audio = audio.slice_rows(cut, audio.len());
-            }
-            if audio.is_empty() {
-                if finished {
-                    return Ok(None);
-                }
-                continue;
-            }
-            return Ok(Some(self.chunk(&audio)));
-        }
-    }
-
-    /// Converts final samples to a planar chunk at the current offset.
-    fn chunk(&mut self, audio: &Seq) -> Chunk {
-        let chunk = planar_chunk(self.emitted, audio);
-        self.emitted += chunk.length;
-        chunk
-    }
-
-    /// Units this stream decodes.
-    const fn unit_count(&self) -> usize {
-        match &self.source {
-            Source::Segmented { count, .. } => *count,
-            Source::Causal {
-                total, unit_frames, ..
-            } => total.div_ceil(*unit_frames),
-        }
-    }
-
-    /// Units decoded so far.
-    const fn units_done(&self) -> usize {
-        match &self.source {
-            Source::Segmented { done, .. } => *done,
-            Source::Causal {
-                next, unit_frames, ..
-            } => next.div_ceil(*unit_frames),
-        }
-    }
-
-    /// Decodes up to `max_units` more units of coded samples, untrimmed, and
-    /// whether they are the last; `None` once everything was returned.
-    fn decode_raw(&mut self, max_units: usize) -> Result<Option<(Seq, bool)>> {
-        let max_units = max_units.max(1);
-        let raw_length = self.raw_length;
-        let model = self.model;
-        let pages = &mut self.pages;
-        let audio = match &mut self.source {
-            Source::Segmented {
-                queue,
-                skip,
-                done,
-                count,
-                overlap,
-            } => {
-                let Some(acc) = overlap.as_mut() else {
-                    return Ok(None);
-                };
-                let want = max_units.min(*count - *done);
-                while queue.len() < want {
-                    let frames = pages.next()?.context("the stream ended early")?;
-                    queue.extend(frames.into_iter().skip(*skip));
-                    *skip = 0;
-                }
-                let batch: Vec<EncodedFrame> = queue.drain(..want).collect();
-                let mut parts = Vec::with_capacity(batch.len() + 1);
-                // Together: the LSTM advances all segments of the batch in
-                // one pass over its weights per time step, and the pool
-                // shares the convolutions of a few segments at a time.
-                for segment in &model.decode_segments(&batch)? {
-                    parts.push(acc.push(segment)?);
-                }
-                *done += want;
-                if *done == *count {
-                    let acc = overlap.take().context("overlap-add already finished")?;
-                    parts.push(acc.finish(raw_length)?);
-                }
-                Seq::concat(parts)?
-            }
-            Source::Causal {
-                codes,
-                num_codebooks,
-                unit_frames,
-                total,
-                next,
-                decoder,
-            } => {
-                let Some(stream) = decoder.as_mut() else {
-                    return Ok(None);
-                };
-                let nc = (*num_codebooks).max(1);
-                let step = max_units.saturating_mul(*unit_frames);
-                let mut parts = Vec::new();
-                // The first frames are held back until the reflection padding
-                // is known, so keep pushing until some audio comes out.
-                loop {
-                    let end = next.saturating_add(step).min(*total);
-                    while codes.len() < (end - *next) * nc {
-                        let frames = pages.next()?.context("the stream ended early")?;
-                        codes.extend(frames.into_iter().flat_map(|f| f.codes));
-                    }
-                    let take = (end - *next) * nc;
-                    let audio = stream.push(&codes[..take])?;
-                    drop(codes.drain(..take));
-                    *next = end;
-                    let got = audio.len();
-                    parts.push(audio);
-                    if end == *total {
-                        let stream = decoder.take().context("stream already finished")?;
-                        parts.push(stream.finish(raw_length)?);
-                        break;
-                    }
-                    if got > 0 {
-                        break;
-                    }
-                }
-                Seq::concat(parts)?
-            }
-        };
-        let finished = match &self.source {
-            Source::Segmented { overlap, .. } => overlap.is_none(),
-            Source::Causal { decoder, .. } => decoder.is_none(),
-        };
-        Ok(Some((audio, finished)))
-    }
-}
-
-/// The first segment whose output reaches coded sample `coded_start`
-/// unchanged by the segments before it: the last one that starts after the
-/// previous segment ends, at or before `coded_start`.
-fn first_needed_segment(info: &Info, stride: usize, coded_start: usize) -> Result<usize> {
-    let layout = info.layout()?;
-    let length = layout
-        .segment_length()
-        .context("a strided model has a segment length")?;
-    let count = layout.segment_count(info.audio_length);
-    // Segment j > 0 is alone from (j - 1) * stride + length on.
-    let mut first = 0;
-    for j in 1..count {
-        if (j - 1) * stride + length <= coded_start {
-            first = j;
-        } else {
-            break;
-        }
-    }
-    Ok(first)
-}
-
 #[wasm_bindgen]
 #[expect(
     clippy::missing_const_for_fn,
@@ -1117,35 +619,35 @@ impl Stream {
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn model(&self) -> String {
-        self.model.clone()
+        self.player.model().to_owned()
     }
 
     /// Output sample rate in Hz.
     #[wasm_bindgen(getter, js_name = sampleRate)]
     #[must_use]
     pub fn sample_rate(&self) -> usize {
-        self.sample_rate
+        self.player.sample_rate()
     }
 
     /// Output channel count.
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn channels(&self) -> usize {
-        self.channels
+        self.player.channels()
     }
 
     /// Audio length in samples per channel, after the pre-skip and end trim.
     #[wasm_bindgen(getter, js_name = audioLength)]
     #[must_use]
     pub fn audio_length(&self) -> usize {
-        self.audio_length
+        self.player.audio_length()
     }
 
     /// Whether the file is a seamless loop.
     #[wasm_bindgen(getter, js_name = isLoop)]
     #[must_use]
     pub fn is_loop(&self) -> bool {
-        self.looped
+        self.player.is_loop()
     }
 
     /// Codebooks per latent frame (bandwidth); for HQ files the largest
@@ -1153,21 +655,21 @@ impl Stream {
     #[wasm_bindgen(getter, js_name = numCodebooks)]
     #[must_use]
     pub fn num_codebooks(&self) -> usize {
-        self.num_codebooks
+        self.player.num_codebooks()
     }
 
     /// Milliseconds the cx2 (entropy) decode has taken so far.
     #[wasm_bindgen(getter, js_name = cx2Ms)]
     #[must_use]
     pub fn cx2_ms(&self) -> f64 {
-        self.cx2_ms
+        self.player.cx2_ms()
     }
 
     /// Milliseconds everything else (the network, stereo, trim) has taken.
     #[wasm_bindgen(getter, js_name = networkMs)]
     #[must_use]
     pub fn network_ms(&self) -> f64 {
-        self.network_ms
+        self.player.network_ms()
     }
 
     /// Number of units this stream decodes: coded segments, seconds of
@@ -1175,14 +677,14 @@ impl Stream {
     #[wasm_bindgen(getter, js_name = segmentCount)]
     #[must_use]
     pub fn segment_count(&self) -> usize {
-        self.unit_count()
+        self.player.unit_count()
     }
 
     /// Units decoded so far.
     #[wasm_bindgen(getter, js_name = segmentsDone)]
     #[must_use]
     pub fn segments_done(&self) -> usize {
-        self.units_done()
+        self.player.units_done()
     }
 
     /// Decodes up to `max_segments` more units and returns the samples that
@@ -1197,7 +699,7 @@ impl Stream {
         decoder: &Decoder,
         max_segments: usize,
     ) -> Result<Option<Chunk>, JsError> {
-        if decoder.model() != self.model {
+        if decoder.model() != self.player.model() {
             return Err(JsError::new("stream was opened with another model"));
         }
         self.decode_units(max_segments).map_err(|e| to_js(&e))
@@ -1269,6 +771,12 @@ mod tests {
     use picotone::layout::{self, Crossfade};
     use picotone::model::EncodeParams;
     use picotone::pico::Layout;
+
+    use picotone::cx2;
+    use picotone::cx2::hq::HqModel;
+    use picotone::hqstream::HqStream;
+    use picotone::layout::Trimmer;
+    use picotone::model::EncodedFrame;
 
     use super::*;
 
@@ -1394,7 +902,7 @@ mod tests {
                 chunks += 1;
             }
             assert_eq!(covered, len, "start {start} max_units {max_units}");
-            assert_eq!(stream.units_done(), stream.unit_count());
+            assert_eq!(stream.player.units_done(), stream.player.unit_count());
             assert!(
                 start > 0 || max_units > 2 || chunks > 1,
                 "max_units {max_units} should give several chunks"
@@ -1494,8 +1002,7 @@ mod tests {
         let Net::Hq(hq) = decoder.net else {
             bail!("dac44_vocos built an EnCodec decoder");
         };
-        let quantizer =
-            dac::DacQuantizer::load(&root.join("weights/dac44_quantizer.safetensors"))?;
+        let quantizer = dac::DacQuantizer::load(&root.join("weights/dac44_quantizer.safetensors"))?;
         assert_eq!(hq.codebook_hash(), quantizer.codebook_hash());
         Ok(())
     }
@@ -1564,7 +1071,7 @@ mod tests {
         assert_eq!(whole.len(), total);
         for start in [0, total / 3] {
             let mut stream = Stream::new(decoder.net, &bytes, None, &tables, start)?;
-            assert_eq!((stream.channels, stream.sample_rate), (2, 44_100));
+            assert_eq!((stream.channels(), stream.sample_rate()), (2, 44_100));
             let mut covered = start;
             while let Some(chunk) = stream.decode_units(1)? {
                 assert_eq!(chunk.offset, covered);
@@ -1577,8 +1084,8 @@ mod tests {
                 covered += chunk.length;
             }
             assert_eq!(covered, total);
-            assert_eq!(stream.units_done(), stream.unit_count());
-            assert!(stream.cx2_ms > 0.0 && stream.network_ms > 0.0);
+            assert_eq!(stream.player.units_done(), stream.player.unit_count());
+            assert!(stream.cx2_ms() > 0.0 && stream.network_ms() > 0.0);
         }
         // An EnCodec decoder refuses the file.
         let model: &'static Encodec =
@@ -1605,7 +1112,7 @@ mod tests {
             output_gain: 0,
             tags: Vec::new(),
         };
-        match tables.for_stream(&info) {
+        match tables.inner.for_stream(&info) {
             Ok(_) => anyhow::bail!("a table was found in an empty set"),
             Err(error) => assert!(format!("{error}").contains("not loaded")),
         }

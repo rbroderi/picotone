@@ -188,6 +188,16 @@ bit-exact with the command line.
 
 Playback starts while the rest decodes: first audio arrives after about 0.2–0.6 s.
 
+## In foobar2000
+
+`foo_input_pico` (`foobar/`) is a foobar2000 input component for Windows, for the 32-bit and 64-bit players. It plays
+HQ and EnCodec `.pico` files, seeks, shows the tags, and uses an HQ file's `.picol` layer when one lies next to
+it (`song.pico` + `song.picol`). The decoding is the library's streaming player, linked into the component, so
+the output is the same as the command line's. Build and install it with
+`powershell -ExecutionPolicy Bypass -File foobar\build.ps1 -Install`, or install the
+`foobar\build\foo_input_pico.fb2k-component` it packs from foobar2000's Components page. See
+[`foobar/README.md`](foobar/README.md).
+
 ## As a library
 
 ```toml
@@ -197,6 +207,8 @@ picotone = { path = "../encodecx", features = ["audio-io"] }            # plus f
 
 The main entry points:
 
+- `player::Player`: a streaming player for any `.pico` file (with its `.picol`), from any sample, a block at a
+  time; the browser decoder and the foobar2000 component use it.
 - `pico::DacStream::parse` (with `attach_layer` for a `.picol`) and `hqstream::HqStream`: HQ streams, decoded page by
   page.
 - `Encodec::from_bytes` and `ModelKind::load_with(dir, LoadOptions)`: load only the EnCodec encoder, decoder or

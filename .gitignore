@@ -7,6 +7,11 @@ web/public/build/
 # (or `npm run build:ts` in wasm/ for the .js/.d.ts files alone).
 wasm/www/picotone/
 
+# The foobar2000 component: the downloaded SDK, the builds and package, test files
+foobar/sdk/
+foobar/build/
+foobar/testfiles/
+
 # Large or downloaded data (re-created by the tools; see the READMEs)
 work/
 dwp/out/

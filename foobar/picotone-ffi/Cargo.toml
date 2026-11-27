@@ -1,0 +1,55 @@
+[package]
+name = "picotone-ffi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "C interface to the picotone player, for the foobar2000 input component"
+license = "GPL-3.0-or-later"
+publish = false
+
+# Its own workspace, so it never joins (or builds into) the parent crate's.
+[workspace]
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+picotone = { path = "../..", default-features = false }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+# A panic must not unwind into C++; the C functions catch them first.
+panic = "unwind"
+strip = "debuginfo"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[lints.rust]
+# The C interface needs raw pointers; every unsafe block says why it is sound.
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+unused_qualifications = "deny"
+unused_results = "deny"
+trivial_casts = "deny"
+let_underscore_drop = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+warnings = { level = "deny", priority = -2 }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+multiple_crate_versions = "allow"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+expect_used = "deny"
+panic = "deny"
+unwrap_used = "deny"
+undocumented_unsafe_blocks = "deny"
