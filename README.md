@@ -182,12 +182,12 @@ bit-exact with the command line.
 
 | Decoder | Stereo decode speed |
 |---|---|
-| WebAssembly, single thread, HQ | about 4.4–4.7× real time |
+| WebAssembly, single thread, HQ | about 4.2–4.7× real time |
 | WebAssembly, EnCodec 48 kHz, threaded (8 threads) | about 12× |
 | WebAssembly, EnCodec 48 kHz, single thread | about 5× (6× in browsers with relaxed SIMD) |
 | WebGPU, EnCodec 48 kHz (f32 weights) | 10–21× |
 
-Playback starts while the rest decodes: first audio arrives after about 0.2–0.6 s.
+Playback starts while the rest decodes: first audio arrives after about 0.2–0.6 s (about 2 s for HQ at q1–q5, whose declicker looks 2 s ahead).
 
 ## In foobar2000
 

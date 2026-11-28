@@ -112,7 +112,7 @@ alone. A player upgrades a playing file by restarting at the current position wi
 
 ### 2.5 Speed
 
-The WebAssembly decoder runs HQ at about 4.4–4.7× real time for single-threaded stereo, in about 77 MiB of
+The WebAssembly decoder runs HQ at about 4.2–4.7× real time for single-threaded stereo (the low end at q1–q5, with the post-filter and declicker), in about 77 MiB of
 memory.
 
 ### 2.6 The low-tier post-filter
@@ -417,7 +417,7 @@ never the integer cx2 decode.
 | Single-threaded | 5.6× / 5.1× |
 | Single-threaded, relaxed SIMD | 6.8× / 6.0× |
 
-First audio arrives after 0.1–0.3 s. HQ decodes at about 4.4–4.7× real time single-threaded (§2.5). A decode
+First audio arrives after 0.1–0.3 s; HQ at q1–q5 waits about 2 s, the declicker's look-ahead (§2.7). HQ decodes at about 4.2–4.7× real time single-threaded (§2.5). A decode
 from a later sample (a seek) equals the same samples of a whole decode.
 
 ### 9.2 WebGPU (`web/`)
