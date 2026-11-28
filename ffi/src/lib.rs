@@ -1,12 +1,19 @@
-//! A C interface to picotone's [`Player`], for the foobar2000 input component
-//! (`foo_input_pico`), which links it as a static library.
+//! A C interface to picotone's [`Player`] and encoder, for the foobar2000
+//! input component (`foo_input_pico`) and the `FFmpeg` wrapper, which link it
+//! as a static library. The header is `include/picotone.h`.
 //!
-//! - [`pt_init`] names the folders holding the weights and the cx2 tables;
-//!   the tables load at once, each network the first time a file needs it.
+//! - [`pt_init`] names the folders holding the weights and the cx2 tables
+//!   (or finds them as the command line does); the tables load at once, each
+//!   network the first time a file needs it.
 //! - [`pt_header`] and [`pt_tags`] read a file's headers without decoding.
 //! - [`pt_open`] opens a file (with its `.picol` layer, when given) at a
 //!   sample, [`pt_decode`] returns the next block of final samples, and
 //!   [`pt_close`] frees it. A seek is a new [`pt_open`] at the new sample.
+//! - [`pt_encoder_new`] starts an encode of interleaved float audio,
+//!   [`pt_encoder_set`] and [`pt_encoder_tag`] take `picotone encode`'s
+//!   options, [`pt_encoder_push`] adds audio, [`pt_encoder_finish`] codes it
+//!   to the `.pico` bytes (and a `.picol` layer's) exactly as the command
+//!   line does, and [`pt_encoder_free`] frees it.
 //!
 //! Every function catches panics, and reports failures through its return
 //! value; [`pt_last_error`] then gives the message (per thread). All strings
@@ -16,10 +23,12 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use picotone::ModelKind;
+use picotone::audio::Audio;
+use picotone::encode::{self, Encoded, Models, Options};
 use picotone::model::LoadOptions;
 use picotone::pico::{self, ChannelLayout, Codec, DacStream};
 use picotone::player::{Net, Player, Tables, no_clock};
@@ -64,14 +73,31 @@ pub struct PtStream {
     block: Vec<f32>,
 }
 
+/// An encode in progress: the audio pushed so far and the options, then the
+/// encoded file.
+#[derive(Debug)]
+pub struct PtEncoder {
+    sample_rate: u32,
+    /// The audio, one vector per channel.
+    channels: Vec<Vec<f32>>,
+    options: Options,
+    /// Whether [`pt_encoder_finish`] has been called.
+    finished: bool,
+    /// Its result.
+    encoded: Option<Encoded>,
+}
+
 /// The loaded tables and networks.
 #[derive(Debug)]
 struct Engine {
     weights: PathBuf,
     tables: Tables,
-    hq: OnceLock<Result<Net, String>>,
+    /// The HQ decoder, shared with the encoder's stereo pick.
+    hq: OnceLock<Result<&'static Arc<VocosDecoder>, String>>,
     encodec48: OnceLock<Result<Net, String>>,
     encodec24: OnceLock<Result<Net, String>>,
+    /// The encoder's networks and tables; one encode at a time.
+    encoder: Mutex<Models>,
 }
 
 static ENGINE: OnceLock<Engine> = OnceLock::new();
@@ -101,19 +127,45 @@ fn guard<T>(failed: T, f: impl FnOnce() -> Result<T>) -> T {
     }
 }
 
-/// A UTF-8 path from C.
+/// A UTF-8 path from C; `None` for null.
 ///
 /// # Safety
 /// `text` must be null or a NUL-terminated string.
-unsafe fn path_arg(text: *const c_char) -> Result<PathBuf> {
+unsafe fn path_arg(text: *const c_char) -> Result<Option<PathBuf>> {
     if text.is_null() {
-        bail!("a folder path is null");
+        return Ok(None);
+    }
+    // SAFETY: the caller passes a NUL-terminated string.
+    let text = unsafe { str_arg(text)? };
+    Ok(Some(PathBuf::from(text)))
+}
+
+/// A UTF-8 string from C.
+///
+/// # Safety
+/// `text` must be null or a NUL-terminated string that outlives `'a`.
+unsafe fn str_arg<'a>(text: *const c_char) -> Result<&'a str> {
+    if text.is_null() {
+        bail!("a string argument is null");
     }
     // SAFETY: the caller passes a NUL-terminated string.
     let text = unsafe { CStr::from_ptr(text) };
-    Ok(PathBuf::from(
-        text.to_str().context("a folder path is not UTF-8")?,
-    ))
+    text.to_str().context("a string argument is not UTF-8")
+}
+
+/// The encoder behind a pointer from C, before [`pt_encoder_finish`].
+///
+/// # Safety
+/// `enc` must be null or come from [`pt_encoder_new`], not freed, used by one
+/// thread at a time.
+unsafe fn open_encoder<'a>(enc: *mut PtEncoder) -> Result<&'a mut PtEncoder> {
+    if enc.is_null() {
+        bail!("the encoder is null");
+    }
+    // SAFETY: the caller passes a live encoder from pt_encoder_new.
+    let enc = unsafe { &mut *enc };
+    ensure!(!enc.finished, "the encoder has already finished");
+    Ok(enc)
 }
 
 /// A byte buffer from C; an empty slice when `len` is 0.
@@ -153,12 +205,40 @@ impl Engine {
             }
         }
         Ok(Self {
+            encoder: Mutex::new(Models::new(weights.clone(), tables_dir.to_path_buf())),
             weights,
             tables,
             hq: OnceLock::new(),
             encodec48: OnceLock::new(),
             encodec24: OnceLock::new(),
         })
+    }
+
+    /// The HQ decoder, loaded on first use (by a decode or an encode's
+    /// stereo pick).
+    fn hq_decoder(&self) -> Result<&'static Arc<VocosDecoder>> {
+        let slot = self.hq.get_or_init(|| {
+            VocosDecoder::load(&self.weights.join(encode::hq::DECODER_FILE))
+                .map(|decoder| &*Box::leak(Box::new(Arc::new(decoder))))
+                .map_err(|e| format!("{e:#}"))
+        });
+        slot.clone().map_err(|e| anyhow!(e))
+    }
+
+    /// Encodes `audio` with the shared networks.
+    fn encode(&self, audio: Audio, options: &Options) -> Result<Encoded> {
+        let mut models = self.encoder.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(Ok(decoder)) = self.hq.get() {
+            models.set_hq_decoder(Arc::clone(decoder));
+        }
+        let encoded = encode::encode(&mut models, audio, options, &mut |_| {});
+        let decoder = models.loaded_hq_decoder();
+        drop(models);
+        // A decoder the pick loaded serves later decodes too.
+        if let Some(decoder) = decoder {
+            let _ = self.hq.get_or_init(|| Ok(&*Box::leak(Box::new(decoder))));
+        }
+        encoded
     }
 
     /// The network a file of `codec` needs, loaded on first use.
@@ -175,11 +255,7 @@ impl Engine {
                 .map_err(|e| format!("{e:#}"))
         };
         let slot = match codec {
-            Codec::Dac44 => self.hq.get_or_init(|| {
-                VocosDecoder::load(&dir.join("dac44_vocos.safetensors"))
-                    .map(|decoder| Net::Hq(Box::leak(Box::new(decoder))))
-                    .map_err(|e| format!("{e:#}"))
-            }),
+            Codec::Dac44 => return Ok(Net::Hq(&**self.hq_decoder()?)),
             Codec::Encodec(ModelKind::Stereo48k) => self
                 .encodec48
                 .get_or_init(|| load_encodec(ModelKind::Stereo48k)),
@@ -192,19 +268,25 @@ impl Engine {
 }
 
 /// Loads the cx2 tables (`*.ecxm`) from `tables_dir` and remembers
-/// `weights_dir` for the networks. Only the first successful call counts.
-/// Returns 0, or -1 on failure.
+/// `weights_dir` for the networks (decoders and encoders).
+///
+/// Either may be null for the command line's default: `$PICOTONE_WEIGHTS` (or
+/// `$PICOTONE_TABLES`), then `weights/` (or `models/`) next to the
+/// executable or its parents, then the picotone project's. Only the first
+/// successful call counts. Returns 0, or -1 on failure.
 ///
 /// # Safety
-/// Both arguments must be NUL-terminated UTF-8 strings.
+/// Each argument must be null or a NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pt_init(weights_dir: *const c_char, tables_dir: *const c_char) -> i32 {
     guard(-1, || {
         if ENGINE.get().is_some() {
             return Ok(0);
         }
-        // SAFETY: the caller passes NUL-terminated strings.
+        // SAFETY: the caller passes null or NUL-terminated strings.
         let (weights, tables) = unsafe { (path_arg(weights_dir)?, path_arg(tables_dir)?) };
+        let weights = encode::weights_dir(weights.as_deref());
+        let tables = encode::tables_dir(tables.as_deref());
         let engine = Engine::load(weights, &tables)?;
         // A racing first call may have won; its engine is as good.
         drop(ENGINE.set(engine));
@@ -413,5 +495,166 @@ pub unsafe extern "C" fn pt_close(stream: *mut PtStream) {
     if !stream.is_null() {
         // SAFETY: the caller passes a stream from pt_open, not used after this.
         drop(unsafe { Box::from_raw(stream) });
+    }
+}
+
+/// Starts an encode of interleaved 32-bit float audio at `sample_rate` Hz
+/// with `channels` channels.
+///
+/// The options start as `picotone encode`'s defaults. Any rate and channel
+/// count the command line reads works: the audio is
+/// converted as it converts a file's. Returns null on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn pt_encoder_new(sample_rate: u32, channels: u32) -> *mut PtEncoder {
+    guard(std::ptr::null_mut(), || {
+        ensure!(sample_rate > 0, "the sample rate is 0");
+        ensure!(channels > 0, "the channel count is 0");
+        Ok(Box::into_raw(Box::new(PtEncoder {
+            sample_rate,
+            channels: vec![Vec::new(); usize::try_from(channels)?],
+            options: Options::default(),
+            finished: false,
+            encoded: None,
+        })))
+    })
+}
+
+/// Sets an encode option from its text.
+///
+/// The key is `picotone encode`'s long flag without the dashes
+/// (`model`, `fast`, `channel-format`, `stereo`, `bandwidth`, `preset`,
+/// `codebooks`, `side-codebooks`, `layer-codebooks`, `layer-side-codebooks`,
+/// `ps-bands`, `ps-frames`, `stride`, `crossfade`, `beam`, `loop`), its value
+/// as the flag's text; `fast` and `loop` take `1` or `0`. Returns 0, or -1 for
+/// an unknown key or a value that does not parse; settings that do not go
+/// together fail [`pt_encoder_finish`].
+///
+/// # Safety
+/// `enc` must come from [`pt_encoder_new`] and not be freed; `key` and
+/// `value` must be NUL-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pt_encoder_set(
+    enc: *mut PtEncoder,
+    key: *const c_char,
+    value: *const c_char,
+) -> i32 {
+    guard(-1, || {
+        // SAFETY: the caller passes a live encoder and NUL-terminated strings.
+        let (enc, key, value) = unsafe { (open_encoder(enc)?, str_arg(key)?, str_arg(value)?) };
+        enc.options.set(key, value)?;
+        Ok(0)
+    })
+}
+
+/// Adds a `KEY=value` comment (as `--tag`). Returns 0, or -1 when it is not
+/// `KEY=value`.
+///
+/// # Safety
+/// `enc` must come from [`pt_encoder_new`] and not be freed; `tag` must be a
+/// NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pt_encoder_tag(enc: *mut PtEncoder, tag: *const c_char) -> i32 {
+    guard(-1, || {
+        // SAFETY: the caller passes a live encoder and a NUL-terminated string.
+        let (enc, tag) = unsafe { (open_encoder(enc)?, str_arg(tag)?) };
+        enc.options.add_tag(tag)?;
+        Ok(0)
+    })
+}
+
+/// Appends `frames` interleaved frames (`frames` x channels floats at
+/// `data`). Returns 0, or -1 on failure.
+///
+/// # Safety
+/// `enc` must come from [`pt_encoder_new`] and not be freed; `data` must hold
+/// `frames` x channels readable floats (or be anything when `frames` is 0).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pt_encoder_push(
+    enc: *mut PtEncoder,
+    data: *const f32,
+    frames: usize,
+) -> i32 {
+    guard(-1, || {
+        // SAFETY: the caller passes a live encoder.
+        let enc = unsafe { open_encoder(enc)? };
+        if frames == 0 {
+            return Ok(0);
+        }
+        ensure!(!data.is_null(), "the audio is null");
+        let width = enc.channels.len();
+        let count = frames.checked_mul(width).context("too many frames")?;
+        // SAFETY: the caller passes `frames` x channels readable floats.
+        let samples = unsafe { std::slice::from_raw_parts(data, count) };
+        for (c, channel) in enc.channels.iter_mut().enumerate() {
+            channel.extend(samples.iter().skip(c).step_by(width));
+        }
+        Ok(0)
+    })
+}
+
+/// Encodes everything pushed, as `picotone encode` codes the same audio with
+/// the same options.
+///
+/// `*pico`/`*pico_len` get the `.pico` file, and
+/// `*layer`/`*layer_len` the `.picol` enhancement layer (null and 0 when the
+/// options ask for none; `layer` and `layer_len` may be null). The bytes stay
+/// valid until [`pt_encoder_free`]. The networks load on first use and are
+/// kept; encodes run one at a time. Only once per encoder; [`pt_init`] must
+/// have succeeded. Returns 0, or -1 on failure.
+///
+/// # Safety
+/// `enc` must come from [`pt_encoder_new`] and not be freed; `pico` and
+/// `pico_len` must be writable, and `layer` and `layer_len` null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pt_encoder_finish(
+    enc: *mut PtEncoder,
+    pico: *mut *const u8,
+    pico_len: *mut usize,
+    layer: *mut *const u8,
+    layer_len: *mut usize,
+) -> i32 {
+    guard(-1, || {
+        // SAFETY: the caller passes a live encoder.
+        let enc = unsafe { open_encoder(enc)? };
+        if pico.is_null() || pico_len.is_null() {
+            bail!("a pt_encoder_finish output is null");
+        }
+        let engine = engine()?;
+        enc.finished = true;
+        let audio = Audio {
+            sample_rate: enc.sample_rate,
+            channels: std::mem::take(&mut enc.channels),
+        };
+        let encoded = enc.encoded.insert(engine.encode(audio, &enc.options)?);
+        let (layer_ptr, layer_size) = encoded
+            .layer
+            .as_ref()
+            .map_or((std::ptr::null(), 0), |l| (l.as_ptr(), l.len()));
+        // SAFETY: the caller passes writable outputs (the layer's may be null).
+        unsafe {
+            pico.write(encoded.bytes.as_ptr());
+            pico_len.write(encoded.bytes.len());
+            if !layer.is_null() {
+                layer.write(layer_ptr);
+            }
+            if !layer_len.is_null() {
+                layer_len.write(layer_size);
+            }
+        }
+        Ok(0)
+    })
+}
+
+/// Frees an encoder from [`pt_encoder_new`] and its output (null is
+/// ignored).
+///
+/// # Safety
+/// `enc` must come from [`pt_encoder_new`] and not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pt_encoder_free(enc: *mut PtEncoder) {
+    if !enc.is_null() {
+        // SAFETY: the caller passes an encoder from pt_encoder_new, not used
+        // after this.
+        drop(unsafe { Box::from_raw(enc) });
     }
 }

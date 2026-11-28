@@ -11,6 +11,8 @@ wasm/www/picotone/
 foobar/sdk/
 foobar/build/
 foobar/testfiles/
+# FFmpeg with libpicotone: `ffmpeg/build.sh linux|windows`
+ffmpeg/dist/
 
 # Large or downloaded data (re-created by the tools; see the READMEs)
 work/

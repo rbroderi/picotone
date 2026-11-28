@@ -3,7 +3,7 @@ name = "picotone-ffi"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "C interface to the picotone player, for the foobar2000 input component"
+description = "C interface to the picotone player and encoder, for the foobar2000 component and the FFmpeg wrapper"
 license = "LGPL-3.0-or-later"
 publish = false
 
@@ -16,7 +16,11 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0.104"
-picotone = { path = "../..", default-features = false }
+picotone = { path = "..", default-features = false }
+
+[dev-dependencies]
+# The tests read and write WAV files as the command line does.
+picotone = { path = "..", default-features = false, features = ["audio-io"] }
 
 [profile.release]
 codegen-units = 1

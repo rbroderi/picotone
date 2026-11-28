@@ -1,18 +1,30 @@
-//! Audio file input (WAV, FLAC, MP3, Ogg Vorbis, AAC/M4A, ... via Symphonia),
-//! WAV output, channel conversion and resampling.
+//! Planar audio, channel conversion and resampling; with the `audio-io`
+//! feature, audio file input (WAV, FLAC, MP3, Ogg Vorbis, AAC/M4A, ... via
+//! Symphonia) and WAV output.
 
 use std::f64::consts::PI;
+#[cfg(feature = "audio-io")]
 use std::fs::File;
+#[cfg(feature = "audio-io")]
 use std::path::Path;
 
-use anyhow::{Context as _, Result, bail, ensure};
+#[cfg(feature = "audio-io")]
+use anyhow::Context as _;
+use anyhow::{Result, bail, ensure};
 use rayon::prelude::*;
+#[cfg(feature = "audio-io")]
 use symphonia::core::audio::SampleBuffer;
+#[cfg(feature = "audio-io")]
 use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
+#[cfg(feature = "audio-io")]
 use symphonia::core::errors::Error as SymphoniaError;
+#[cfg(feature = "audio-io")]
 use symphonia::core::formats::FormatOptions;
+#[cfg(feature = "audio-io")]
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
+#[cfg(feature = "audio-io")]
 use symphonia::core::meta::MetadataOptions;
+#[cfg(feature = "audio-io")]
 use symphonia::core::probe::Hint;
 
 use crate::config::{floor_to_usize, to_f64};
@@ -129,6 +141,7 @@ const fn narrow(v: f64) -> f32 {
 ///
 /// # Errors
 /// Fails when the file cannot be opened or decoded.
+#[cfg(feature = "audio-io")]
 pub fn read(path: &Path) -> Result<Audio> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
@@ -199,6 +212,7 @@ pub fn read(path: &Path) -> Result<Audio> {
 }
 
 /// WAV sample encoding.
+#[cfg(feature = "audio-io")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WavFormat {
     /// 16-bit signed PCM.
@@ -213,6 +227,7 @@ pub enum WavFormat {
 ///
 /// # Errors
 /// Fails when the file cannot be written.
+#[cfg(feature = "audio-io")]
 pub fn write_wav(
     path: &Path,
     audio: &Audio,
@@ -259,6 +274,7 @@ pub fn write_wav(
     Ok(())
 }
 
+#[cfg(feature = "audio-io")]
 #[expect(
     clippy::cast_possible_truncation,
     reason = "input is clamped to ±0.99 first"

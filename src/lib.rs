@@ -10,16 +10,17 @@
 //! [`model::Encodec::from_bytes`] (or [`model::Encodec::decoder_from_bytes`]
 //! for a decoder-only subset of the weights) and decode incrementally with
 //! [`model::Encodec::stream_decoder`] or [`model::Encodec::decode_segment`]
-//! plus [`model::OverlapAdd`]. Audio file input and WAV output live in the
-//! `audio` module behind the default-on `audio-io` feature; the command-line
-//! program is behind `cli`.
+//! plus [`model::OverlapAdd`]. [`encode`] codes in-memory [`audio::Audio`]
+//! to `.pico` files with the command line's settings. Audio file input and
+//! WAV output in [`audio`] need the default-on `audio-io` feature; the
+//! command-line program is behind `cli`.
 
-#[cfg(feature = "audio-io")]
 pub mod audio;
 pub mod config;
 pub mod cx2;
 pub mod dac;
 pub mod declick;
+pub mod encode;
 mod fft;
 pub mod hqstream;
 mod kernels;

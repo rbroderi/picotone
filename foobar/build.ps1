@@ -22,10 +22,10 @@ $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere
     -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
 if (-not $msbuild) { throw "MSBuild was not found (install Visual Studio Build Tools with C++)" }
 
-# picotone-ffi, the Rust static library, for each platform.
+# picotone-ffi (ffi\ at the root), the Rust static library, for each platform.
 $targets = @{ Win32 = "i686-pc-windows-msvc"; x64 = "x86_64-pc-windows-msvc" }
 foreach ($platform in "Win32", "x64") {
-    cargo build --release --lib --manifest-path (Join-Path $here "picotone-ffi\Cargo.toml") --target $targets[$platform]
+    cargo build --release --lib --manifest-path (Join-Path $root "ffi\Cargo.toml") --target $targets[$platform]
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed for $platform" }
     & $msbuild (Join-Path $here "foo_input_pico\foo_input_pico.vcxproj") /p:Configuration=Release `
         /p:Platform=$platform /m /nologo /v:minimal

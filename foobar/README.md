@@ -14,9 +14,10 @@ Tags are read-only: the component does not write tags to `.pico` files.
 
 | Path | What it is |
 |---|---|
-| `picotone-ffi/` | A small C interface (`pt_init`, `pt_header`, `pt_tags`, `pt_open`, `pt_decode`, `pt_close`) to picotone's `player::Player`, built as a static library |
-| `picotone-ffi/examples/ptcheck.rs` | Checks the C interface on a file: header, a whole decode, and seeks that must match the whole decode exactly |
-| `foo_input_pico/` | The component (C++, foobar2000 SDK) and `picotone.h`, the C header |
+| `../ffi/` | picotone-ffi, the C interface to picotone's `player::Player` (`pt_init`, `pt_header`, `pt_tags`, `pt_open`, `pt_decode`, `pt_close`) and encoder (`pt_encoder_*`, which the component does not use), built as a static library; shared with the FFmpeg wrapper |
+| `../ffi/include/picotone.h` | The C header |
+| `../ffi/examples/ptcheck.rs` | Checks the C interface on a file: header, a whole decode, and seeks that must match the whole decode exactly |
+| `foo_input_pico/` | The component (C++, foobar2000 SDK) |
 | `build.ps1` | Builds both platforms and packs `build/foo_input_pico.fb2k-component` |
 | `sdk/` | The foobar2000 SDK, which you download (not in the repository) |
 
@@ -53,7 +54,7 @@ reads only their headers and loads no network.
 ## Checking the C interface
 
 ```powershell
-cargo run --release --manifest-path foobar\picotone-ffi\Cargo.toml --example ptcheck -- weights models song.pico [song.picol]
+cargo run --release --manifest-path ffi\Cargo.toml --example ptcheck -- weights models song.pico [song.picol]
 ```
 
 It prints the header and the decode speed, and fails if the decode is the wrong length, if two decodes differ,
@@ -61,8 +62,8 @@ or if a seek's samples differ from the whole decode's.
 
 ## Licence
 
-The component (everything in `foobar/`, and the `foo_input_pico.dll` it builds, which includes picotone's library)
-is licensed under the [GNU Lesser General Public License v3.0](COPYING.LESSER) or later, so it can link the
+The component (everything in `foobar/`, the C interface in `ffi/`, and the `foo_input_pico.dll` they build, which
+includes picotone's library) is licensed under the [GNU Lesser General Public License v3.0](COPYING.LESSER) or later, so it can link the
 foobar2000 SDK (its own licence is in `sdk/sdk-license.txt`) and run inside foobar2000, which is closed source. The
 LGPL adds permissions to the GPL, whose text is in [`LICENSE`](../LICENSE). The weights carry their own notices,
 which the package includes.

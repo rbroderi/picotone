@@ -199,15 +199,34 @@ the output is the same as the command line's. Build and install it with
 `foobar\build\foo_input_pico.fb2k-component` it packs from foobar2000's Components page. See
 [`foobar/README.md`](foobar/README.md).
 
+## In FFmpeg
+
+`ffmpeg/` adds a `libpicotone` demuxer and muxer to FFmpeg 8.1: `ffmpeg -i song.pico song.flac` decodes (with the
+`.picol` next to it, and exact seeks), and `ffmpeg -i song.flac -codebooks 3 song.pico` encodes, byte for byte as
+`picotone encode` does. `bash ffmpeg/build.sh linux` or `windows` (on Linux or WSL) builds `ffmpeg` and `ffprobe`
+with it; the programs are GPLv3. See [`ffmpeg/README.md`](ffmpeg/README.md).
+
+## From C
+
+`ffi/` (picotone-ffi) is a static library with a C interface, [`ffi/include/picotone.h`](ffi/include/picotone.h):
+the streaming player (`pt_open`, `pt_decode`) and the encoder (`pt_encoder_new`, `pt_encoder_set` with the
+`picotone encode` flag names, `pt_encoder_push`, `pt_encoder_finish`), whose output is byte for byte the command
+line's. The foobar2000 component and the FFmpeg wrapper link it. `cargo test --release --manifest-path
+ffi\Cargo.toml` checks the encoder against the command line (build the command line first).
+
 ## As a library
 
 ```toml
-picotone = { path = "../encodecx", default-features = false }           # decoder only, no audio I/O
+picotone = { path = "../encodecx", default-features = false }           # no audio file I/O
 picotone = { path = "../encodecx", features = ["audio-io"] }            # plus file reading and WAV writing
 ```
 
 The main entry points:
 
+- `encode::encode`: codes an in-memory `audio::Audio` to `.pico` bytes (and a `.picol` layer's), byte for byte as
+  `picotone encode` does, with `encode::Options` (the command's flags and defaults); `encode::Models` loads the
+  networks and tables on first use and keeps them. `encode::weights_dir` and `encode::tables_dir` find the folders
+  as the command line does.
 - `player::Player`: a streaming player for any `.pico` file (with its `.picol`), from any sample, a block at a
   time, limited (`limiter::Limiter`); the browser decoder and the foobar2000 component use it.
 - `pico::DacStream::parse` (with `attach_layer` for a `.picol`) and `hqstream::HqStream`: HQ streams, decoded page by
@@ -235,8 +254,9 @@ greedy codes (`--beam 1`) and the decoder against the Hugging Face reference imp
 ## Licence
 
 The code is licensed under the [GNU General Public License v3.0](LICENSE) or later. The foobar2000 component
-(`foobar/`, and the DLL it builds with picotone's library inside) is licensed under the
-[GNU Lesser General Public License v3.0](foobar/COPYING.LESSER) or later.
+and the C interface (`foobar/`, `ffi/`, and the DLL they build with picotone's library inside) are licensed under the
+[GNU Lesser General Public License v3.0](foobar/COPYING.LESSER) or later. The FFmpeg files (`ffmpeg/libavformat/`)
+are LGPL-2.1-or-later, like FFmpeg's.
 
 picotone runs Meta's EnCodec model weights and weights derived from Descript's DAC, both MIT-licensed. Any copy
 of the weights, including the browser model files, must carry their notices (Meta's in [`LICENSES/EnCodec-MIT.txt`](LICENSES/EnCodec-MIT.txt), which the browser

@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- foobar2000 input component for picotone. Build with ..\build.ps1, which
-     first builds picotone-ffi (Rust) for the platform. The SDK is expected in
+     first builds picotone-ffi (Rust, ..\..\ffi; header in ..\..\ffi\include)
+     for the platform. The SDK is expected in
      ..\sdk (the 7z from foobar2000.org/SDK, unpacked there). -->
 <Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
@@ -51,21 +52,21 @@
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;_USRDLL;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\sdk\foobar2000;$(ProjectDir)..\sdk;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\sdk\foobar2000;$(ProjectDir)..\sdk;$(ProjectDir)..\..\ffi\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>$(ProjectDir)..\sdk\foobar2000\shared\shared-$(Platform).lib;$(ProjectDir)..\picotone-ffi\target\$(RustTarget)\release\picotone_ffi.lib;kernel32.lib;user32.lib;ntdll.lib;userenv.lib;ws2_32.lib;dbghelp.lib;synchronization.lib;bcrypt.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(ProjectDir)..\sdk\foobar2000\shared\shared-$(Platform).lib;$(ProjectDir)..\..\ffi\target\$(RustTarget)\release\picotone_ffi.lib;kernel32.lib;user32.lib;ntdll.lib;userenv.lib;ws2_32.lib;dbghelp.lib;synchronization.lib;bcrypt.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="foo_input_pico.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="picotone.h" />
+    <ClInclude Include="..\..\ffi\include\picotone.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\sdk\pfc\pfc.vcxproj">

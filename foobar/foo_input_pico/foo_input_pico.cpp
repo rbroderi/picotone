@@ -1,8 +1,8 @@
 // foo_input_pico: plays picotone's .pico files in foobar2000, HQ and EnCodec,
 // with an HQ file's .picol enhancement layer when one lies next to it.
 //
-// The decoding is picotone's Rust player (picotone-ffi, linked statically; C
-// interface in picotone.h). It finds the weights and cx2 tables in, in order:
+// The decoding is picotone's Rust player (picotone-ffi in ffi/, linked
+// statically; C interface in ffi/include/picotone.h). It finds the weights and cx2 tables in, in order:
 // the PICOTONE_WEIGHTS / PICOTONE_TABLES environment variables, then
 // `weights` and `models` next to this DLL, then one folder up (the x64 DLL of
 // a component package sits in an `x64` subfolder).

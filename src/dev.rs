@@ -731,7 +731,7 @@ fn dac_encode(
     latent_out: Option<&Path>,
 ) -> Result<()> {
     use picotone::dac::{CODEBOOKS, SAMPLE_RATE};
-    let encoder = crate::hq::load_encoder(weights)?;
+    let encoder = picotone::encode::hq::load_encoder(weights, &mut |m| eprintln!("{m}"))?;
     let bytes = read(input)?;
     let audio: Vec<f32> = bytes
         .as_chunks::<4>()
