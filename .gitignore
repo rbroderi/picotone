@@ -28,8 +28,9 @@ train/hq/pf_lowtier/
 train/hq/weights/
 train/hq/data/*.jsonl
 train/hq/data/*.jsonl.*
-# Scratch audio
+# Scratch audio, and the sample song's original (samples/README.md)
 *.wav
+samples/*.flac
 
 # Python
 .venv/
