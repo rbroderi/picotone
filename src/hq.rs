@@ -15,6 +15,7 @@ use anyhow::{Context as _, Result, ensure};
 use picotone::audio::Audio;
 use picotone::cx2::hq::HqModel;
 use picotone::dac::{self, DacQuantizer};
+use picotone::declick;
 use picotone::hqstream::HqStream;
 use picotone::layout;
 use picotone::pico::{self, ChannelLayout, DacInfo, DacStream};
@@ -611,10 +612,15 @@ fn pick(
 pub(crate) fn decode(weights: &Path, table: &HqModel, stream: DacStream) -> Result<Audio> {
     let decoder = load_decoder(weights)?;
     let start = Instant::now();
+    let tier = stream.info.codebooks.iter().copied().max().unwrap_or(0);
+    let pre_skip = stream.info.pre_skip;
     let mut stream = HqStream::new(stream, table, &decoder, 0)?;
     stream.fetch(usize::MAX)?;
     let cx2_seconds = start.elapsed().as_secs_f64();
-    let out = stream.decode_rest()?;
+    let mut out = stream.decode_rest()?;
+    if declick::applies(tier) {
+        out = declick::declick(&out, pre_skip)?;
+    }
     let audio = Audio::from_seq(&out, dac::SAMPLE_RATE);
     eprintln!(
         "decoded {:.2} s with {DECODER_NAME} in {:.2} s (cx2 {cx2_seconds:.2} s)",

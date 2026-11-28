@@ -179,6 +179,48 @@ fn chunked_decodes_equal_the_whole_file_bit_for_bit() -> Result<()> {
     Ok(())
 }
 
+/// The shipped decoder and post-filter against the training code's output,
+/// when `PICOTONE_PF_REF` names a folder of reference cases: per case
+/// `n_q`, and per channel `codes.chC.u16` (`[frames][n_q]`), `frozen.chC.f32`
+/// (the decoder without the post-filter) and `pf.chC.f32` (with it).
+#[test]
+fn shipped_post_filter_matches_the_training_code() -> Result<()> {
+    let Some(dir) = std::env::var_os("PICOTONE_PF_REF") else {
+        eprintln!("skipped: PICOTONE_PF_REF is not set");
+        return Ok(());
+    };
+    let d = VocosDecoder::load(&root().join("weights/dac44_vocos.safetensors"))?;
+    ensure!(d.has_post_filter(), "weights/dac44_vocos has no post-filter");
+    let mut cases: Vec<_> = std::fs::read_dir(&dir)?.collect::<Result<_, _>>()?;
+    cases.sort_by_key(std::fs::DirEntry::path);
+    ensure!(!cases.is_empty(), "no reference cases");
+    for case in cases {
+        let case = case.path();
+        let n: usize = std::fs::read_to_string(case.join("n_q"))?.trim().parse()?;
+        for ch in 0..2 {
+            let codes: Vec<u16> = std::fs::read(case.join(format!("codes.ch{ch}.u16")))?
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&b| u16::from_le_bytes(b))
+                .collect();
+            let got = d.decode(&codes, n)?;
+            let pf = read_f32(&case.join(format!("pf.ch{ch}.f32")))?;
+            let frozen = read_f32(&case.join(format!("frozen.ch{ch}.f32")))?;
+            assert_eq!(got.len(), pf.len());
+            let (err, rel, snr) = compare(&got, &pf);
+            let (moved, _, _) = compare(&frozen, &pf);
+            eprintln!(
+                "{} ch{ch}: max abs error {err:.3e} ({rel:.3e} of peak), SNR {snr:.1} dB; \
+                 the post-filter itself moves samples by up to {moved:.3e}",
+                case.display()
+            );
+            assert!(rel < 1e-4, "{}: max error {err:e}", case.display());
+        }
+    }
+    Ok(())
+}
+
 /// The post-filter changes tiers 1 to 5 and leaves the others bit for bit.
 #[test]
 fn the_post_filter_runs_at_tiers_1_to_5_only() -> Result<()> {

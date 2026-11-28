@@ -19,6 +19,7 @@ pub mod audio;
 pub mod config;
 pub mod cx2;
 pub mod dac;
+pub mod declick;
 mod fft;
 pub mod hqstream;
 mod kernels;

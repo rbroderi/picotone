@@ -10,6 +10,7 @@ use anyhow::{Context as _, Result};
 use picotone::cx2::hq::HqModel;
 use picotone::dac::HOP;
 use picotone::hqstream::{HqDecoder, HqStream};
+use picotone::declick;
 use picotone::layout::Trimmer;
 use picotone::limiter;
 use picotone::player::{Net, Player, Tables, no_clock};
@@ -188,6 +189,9 @@ fn cases() -> Result<Vec<Case>> {
         case("ms q7/q3", ChannelLayout::MidSide, vec![7, 3], 130, |i| {
             i.pre_skip = 512 * 3 + 5;
         })?,
+        case("lr q3/q2, long (declicked)", ChannelLayout::LeftRight, vec![3, 2], 600, |i| {
+            i.pre_skip = 300;
+        })?,
         case(
             "parametric q9",
             ChannelLayout::Parametric(pstereo::Config::DEFAULT),
@@ -248,8 +252,8 @@ fn streaming_decodes_equal_the_whole_file_bit_for_bit() -> Result<()> {
     Ok(())
 }
 
-/// The player: the streaming decode, then the limiter, from every kind of
-/// start. (The small fixture decoder stays under the ceiling, so this checks
+/// The player: the streaming decode, then (at one to five codebooks) the
+/// declicker, then the limiter, from every kind of start. (The small fixture decoder stays under the ceiling, so this checks
 /// the plumbing and the seek pre-roll; the limiter's own tests cover overs.)
 #[test]
 fn player_equals_the_limited_whole_file_bit_for_bit() -> Result<()> {
@@ -259,7 +263,11 @@ fn player_equals_the_limited_whole_file_bit_for_bit() -> Result<()> {
     let d: &'static dyn HqDecoder = decoder()?;
     let mut limited = 0;
     for case in cases()? {
-        let raw = reference(&case.bytes)?;
+        let mut raw = reference(&case.bytes)?;
+        let info = DacStream::parse(&case.bytes)?.info;
+        if declick::applies(info.codebooks.iter().copied().max().unwrap_or(0)) {
+            raw = declick::declick(&raw, info.pre_skip)?;
+        }
         let want = limiter::limit(&raw)?;
         let total = want.len();
         let channels = want.channels();
@@ -267,7 +275,9 @@ fn player_equals_the_limited_whole_file_bit_for_bit() -> Result<()> {
             limited += 1;
         }
         assert!(want.data().iter().all(|v| v.abs() <= limiter::CEILING));
-        for start in [0, 1, limiter::LOOKBACK + 3, total / 2, total - 1] {
+        let pre_roll = limiter::LOOKBACK + declick::LOOKBACK;
+        let starts = [0, 1, limiter::LOOKBACK + 3, pre_roll + 3, total / 2, total - 1];
+        for start in starts.into_iter().filter(|&s| s < total) {
             for units in [1, usize::MAX] {
                 let mut p = Player::open(Net::Hq(d), &case.bytes, None, &tables, start, no_clock)?;
                 let mut got = Vec::new();

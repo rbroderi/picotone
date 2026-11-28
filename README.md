@@ -131,7 +131,7 @@ slightly better quality at no decode cost.
 
 Every decode ends in a look-ahead peak limiter, which lowers the gain smoothly around any sample the decoder
 puts over full scale (WHITEPAPER §3.4). `decode` takes `--float` (32-bit float WAV), `--rescale` (scale the
-whole file down to fit, instead of limiting) and `--no-limit` (the decoder's raw output, for measurements). HQ files decode with the Vocos (iSTFT) decoder, `weights/dac44_vocos.safetensors`; at 1 to 5 codebooks its post-filter removes most frame-boundary clicks (WHITEPAPER §2.6). `roundtrip` encodes and decodes in one step. `info` prints the headers, the tags and the bitrate.
+whole file down to fit, instead of limiting) and `--no-limit` (the decoder's raw output, for measurements). HQ files decode with the Vocos (iSTFT) decoder, `weights/dac44_vocos.safetensors`; at 1 to 5 codebooks its post-filter removes most frame-boundary clicks and a declicker repairs those left on the frame grid (WHITEPAPER §2.6–2.7). `roundtrip` encodes and decodes in one step. `info` prints the headers, the tags and the bitrate.
 
 ## The `.pico` format
 

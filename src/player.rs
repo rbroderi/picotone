@@ -11,10 +11,12 @@
 //! Segmented models (`encodec_48khz`) decode each segment with
 //! [`Encodec::decode_segment`] and stitch them with [`OverlapAdd`]; causal
 //! models (`encodec_24khz`) run a [`StreamDecoder`] over the codes; HQ files
-//! run through [`HqStream`]. The decoded audio then goes through the
-//! [`Limiter`]. Every way, the output equals a whole-file decode bit for bit
-//! (a seek starts decoding [`limiter::LOOKBACK`] samples early for the
-//! limiter), and memory depends on the chunk size, not the file length.
+//! run through [`HqStream`], and at one to five codebooks through the
+//! [`Declicker`]. The decoded audio then goes through the [`Limiter`]. Every
+//! way, the output equals a whole-file decode bit for bit (a seek starts
+//! decoding [`limiter::LOOKBACK`] samples early for the limiter, plus
+//! [`declick::LOOKBACK`] when the declicker runs), and memory depends on the
+//! chunk size, not the file length.
 
 use std::collections::VecDeque;
 
@@ -23,6 +25,7 @@ use anyhow::{Context as _, Result, ensure};
 use crate::ModelKind;
 use crate::cx2::{self, hq::HqModel};
 use crate::dac;
+use crate::declick::{self, Declicker};
 use crate::hqstream::{HqDecoder, HqStream};
 use crate::layout::Trimmer;
 use crate::limiter::{self, Limiter};
@@ -235,6 +238,8 @@ pub struct Player {
     looped: bool,
     num_codebooks: usize,
     layered: bool,
+    /// Declicks HQ decodes at low tiers, before the limiter.
+    declicker: Option<Declicker>,
     /// Limits the decoded audio; `None` once it has finished.
     limiter: Option<Limiter>,
     /// Limited samples still to drop: the pre-roll of a seek.
@@ -281,8 +286,9 @@ impl Player {
             "this file needs model {model}, but {} is loaded",
             net.model()
         );
-        let pre_roll = start_sample.min(limiter::LOOKBACK);
-        let first = start_sample - pre_roll;
+        let mut pre_roll = start_sample.min(limiter::LOOKBACK);
+        let mut first = start_sample - pre_roll;
+        let mut declicker = None;
         let (inner, sample_rate, channels, num_codebooks, audio_length, looped) = match net {
             Net::Encodec(encodec) => {
                 ensure!(layer.is_none(), "only HQ files have enhancement layers");
@@ -330,6 +336,11 @@ impl Player {
                     "start sample {start_sample} is past the end ({} samples)",
                     facts.2
                 );
+                if declick::applies(facts.1) {
+                    pre_roll = start_sample.min(limiter::LOOKBACK + declick::LOOKBACK);
+                    first = start_sample - pre_roll;
+                    declicker = Some(Declicker::new(facts.0, first + info.pre_skip));
+                }
                 let stream = HqStream::new(stream, table, decoder, first)?;
                 (
                     Inner::Hq(Box::new(stream)),
@@ -350,6 +361,7 @@ impl Player {
             looped,
             num_codebooks,
             layered: layer.is_some(),
+            declicker,
             limiter: Some(Limiter::new(channels)),
             skip: pre_roll,
             emitted: start_sample,
@@ -372,17 +384,22 @@ impl Player {
             }
             let raw = self.decode_raw(max_units)?;
             let start = (self.clock)();
-            let mut audio = match &raw {
-                Some(chunk) => self
-                    .limiter
+            let mut audio = if let Some(chunk) = &raw {
+                let declicked = match self.declicker.as_mut() {
+                    Some(d) => Some(d.push(&chunk.audio)?),
+                    None => None,
+                };
+                self.limiter
                     .as_mut()
                     .context("player already finished")?
-                    .push(&chunk.audio)?,
-                None => self
-                    .limiter
-                    .take()
-                    .context("player already finished")?
-                    .finish()?,
+                    .push(declicked.as_ref().unwrap_or(&chunk.audio))?
+            } else {
+                let mut limiter = self.limiter.take().context("player already finished")?;
+                let head = match self.declicker.take() {
+                    Some(d) => limiter.push(&d.finish()?)?,
+                    None => Seq::zeros(0, self.channels),
+                };
+                Seq::concat(vec![head, limiter.finish()?])?
             };
             drop(raw);
             if self.skip > 0 {

@@ -60,7 +60,8 @@ picotone uses its own container, `.pico` (§7), not Meta's `.ecdc`.
   trained on DAC's residual, 16 in all (`dac44_quantizer`). A lower codebook count is a prefix of the full code,
   so one encode serves every rate.
 - **Decoder:** a Vocos (iSTFT) decoder trained on those codes (`dac44_vocos`) decodes every codebook count.
-  At 1 to 5 codebooks a post-filter reshapes its spectrum before the iSTFT (§2.6).
+  At 1 to 5 codebooks a post-filter reshapes its spectrum before the iSTFT (§2.6), and a declicker repairs
+  the clicks left on the frame grid (§2.7).
 - **Limiter:** every decode, HQ and EnCodec, in every player, ends in a look-ahead peak limiter (§3.4).
 
 A file names its code space by a hash of the codebooks, not a decoder, so any decoder of these codes can play
@@ -137,6 +138,27 @@ The 4 k7 convolutions add 12 frames of context per side: a chunked or streamed d
 (476 ms), against 29 for the decoder alone, and still equals a whole-file decode bit for bit. The post-filter
 costs about 13% of the HQ decode's speed at q3. On a 60 s Boléro excerpt at q3, frame-boundary pops (a frame's
 high-frequency burst 6 dB over its neighbours') fall from 113 to 27.
+
+### 2.7 The declicker
+
+The clicks the post-filter leaves sit in the first quarter of a 512-sample frame. After the decoder, at 1 to 5
+codebooks, `declick::Declicker` finds and repairs them:
+
+- **Detection:** in 128-sample windows, four per frame, a window is a hit when the energy of the mono mix's
+  second difference is 3 dB over the median of the 101 windows around it. Only first-quarter hits are
+  candidates.
+- **Grid gate:** consonants and drum hits are hits too, but they fall in all four quarters alike. A candidate is
+  repaired only if, within 2 s of it, first-quarter hits outnumber the mean of the other quarters by 1.5 times.
+  On speech, rock and hip-hop the gate repairs nothing; on the Boléro it keeps nearly every first-quarter hit.
+- **Repair:** the 192 samples around the window are rebuilt per channel by Janssen's iterative autoregressive
+  interpolation (Janssen, Veldhuis and Vries 1986). An order-32 predictor is fitted to 1,024 samples either
+  side and the current fill, then the gap is solved as the least-squares minimum of the prediction error, 4
+  times.
+
+Each repair reads the decoder's output, not earlier repairs, so an output sample depends only on the input within
+about 2.2 s of it. Any chunking gives the same samples, and a seek decodes `declick::LOOKBACK` (95,040) samples
+early, on top of the limiter's, to match a whole decode bit for bit. On a 60 s Boléro excerpt at q3 it rebuilds
+575 gaps, at about 50× real time on one thread.
 
 ## 3. The EnCodec implementation
 
