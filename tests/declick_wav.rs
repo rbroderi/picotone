@@ -20,7 +20,7 @@ fn declick_a_wav_file() -> Result<()> {
     let output = parts.next().context("no output")?;
     let start: usize = parts.next().unwrap_or("0").parse()?;
     let audio = audio::read(Path::new(input))?;
-    let out = declick::declick(&audio.to_seq()?, start)?;
+    let out = declick::declick(&audio.to_seq()?, start, start)?;
     let out = Audio::from_seq(&out, audio.sample_rate);
     audio::write_wav(Path::new(output), &out, WavFormat::Float32, false, false)?;
     eprintln!("wrote {output}");

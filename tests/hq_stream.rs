@@ -266,7 +266,7 @@ fn player_equals_the_limited_whole_file_bit_for_bit() -> Result<()> {
         let mut raw = reference(&case.bytes)?;
         let info = DacStream::parse(&case.bytes)?.info;
         if declick::applies(info.codebooks.iter().copied().max().unwrap_or(0)) {
-            raw = declick::declick(&raw, info.pre_skip)?;
+            raw = declick::declick(&raw, info.pre_skip, info.pre_skip)?;
         }
         let want = limiter::limit(&raw)?;
         let total = want.len();

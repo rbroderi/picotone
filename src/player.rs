@@ -339,7 +339,7 @@ impl Player {
                 if declick::applies(facts.1) {
                     pre_roll = start_sample.min(limiter::LOOKBACK + declick::LOOKBACK);
                     first = start_sample - pre_roll;
-                    declicker = Some(Declicker::new(facts.0, first + info.pre_skip));
+                    declicker = Some(Declicker::new(facts.0, info.pre_skip, first + info.pre_skip));
                 }
                 let stream = HqStream::new(stream, table, decoder, first)?;
                 (

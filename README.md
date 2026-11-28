@@ -187,7 +187,7 @@ bit-exact with the command line.
 | WebAssembly, EnCodec 48 kHz, single thread | about 5× (6× in browsers with relaxed SIMD) |
 | WebGPU, EnCodec 48 kHz (f32 weights) | 10–21× |
 
-Playback starts while the rest decodes: first audio arrives after about 0.2–0.6 s (about 2 s for HQ at q1–q5, whose declicker looks 2 s ahead).
+Playback starts while the rest decodes: first audio arrives after about 0.2–0.6 s (about 0.8 s for HQ at q1–q5).
 
 ## In foobar2000
 

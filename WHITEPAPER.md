@@ -149,6 +149,8 @@ codebooks, `declick::Declicker` finds and repairs them:
   candidates.
 - **Grid gate:** consonants and drum hits are hits too, but they fall in all four quarters alike. A candidate is
   repaired only if, within 2 s of it, first-quarter hits outnumber the mean of the other quarters by 1.5 times.
+  In a file's first 2 s the gate looks ahead only as far as the file has gone (t seconds at time t), so
+  playback need not wait 2 s for it: first audio in the browser comes after about 0.8 s instead of 0.25 s.
   On speech, rock and hip-hop the gate repairs nothing; on the Boléro it keeps nearly every first-quarter hit.
 - **Repair:** the 192 samples around the window are rebuilt per channel by Janssen's iterative autoregressive
   interpolation (Janssen, Veldhuis and Vries 1986). An order-32 predictor is fitted to 1,024 samples either
@@ -417,7 +419,7 @@ never the integer cx2 decode.
 | Single-threaded | 5.6× / 5.1× |
 | Single-threaded, relaxed SIMD | 6.8× / 6.0× |
 
-First audio arrives after 0.1–0.3 s; HQ at q1–q5 waits about 2 s, the declicker's look-ahead (§2.7). HQ decodes at about 4.2–4.7× real time single-threaded (§2.5). A decode
+First audio arrives after 0.1–0.3 s. HQ decodes at about 4.2–4.7× real time single-threaded (§2.5). A decode
 from a later sample (a seek) equals the same samples of a whole decode.
 
 ### 9.2 WebGPU (`web/`)

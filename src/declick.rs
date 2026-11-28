@@ -13,7 +13,8 @@
 //!   they fall in all four quarters alike. So a candidate is repaired only
 //!   if, among the windows within [`SPAN`] windows of it (2 s), the first
 //!   quarters hold at least [`RATIO`] times as many hits as the mean of the
-//!   other three.
+//!   other three. In the file's first 2 s the gate looks ahead only as far
+//!   as the file has gone, so playback starts without waiting 2 s.
 //! - **The repair.** The [`GAP`] samples around the window are rebuilt per
 //!   channel by Janssen's iterative autoregressive interpolation (Janssen,
 //!   Veldhuis and Vries 1986): fit an order-[`ORDER`] predictor to
@@ -23,7 +24,8 @@
 //! Each repair reads the decoder's output, not earlier repairs, so an output
 //! sample depends only on the input from [`LOOKBACK`] samples before it to
 //! about as many after it (window edges are where the stream starts and
-//! ends). The output is the same bit for bit however the input is split into
+//! ends; the gate's shorter look-ahead is set by the file's start, not the
+//! stream's). The output is the same bit for bit however the input is split into
 //! chunks, and a decode that starts [`LOOKBACK`] samples before a seek point
 //! gives exactly the samples of a whole-file decode from that point.
 
@@ -74,6 +76,9 @@ pub struct Declicker {
     channels: usize,
     /// Position of the first sample pushed.
     start: usize,
+    /// The file's first window wholly inside it, which sets the gate's
+    /// look-ahead near the start.
+    origin_window: usize,
     /// Position of `input[0]`.
     base: usize,
     /// The decoder's samples from `base`, `[sample][channel]`.
@@ -99,14 +104,16 @@ pub struct Declicker {
 }
 
 impl Declicker {
-    /// A declicker for `channels` interleaved channels whose first sample is
-    /// at position `start`.
+    /// A declicker for `channels` interleaved channels of a file whose first
+    /// sample is at position `origin`, for a stream whose first sample is at
+    /// position `start` (`origin` itself unless the stream starts at a seek).
     #[must_use]
-    pub fn new(channels: usize, start: usize) -> Self {
+    pub fn new(channels: usize, origin: usize, start: usize) -> Self {
         let first_window = (start + 2).div_ceil(WIN);
         Self {
             channels: channels.max(1),
             start,
+            origin_window: (origin + 2).div_ceil(WIN),
             base: start,
             input: Vec::new(),
             emitted: start,
@@ -217,7 +224,7 @@ impl Declicker {
             let gap_end = w * WIN + GAP_BEFORE + GAP;
             let known = match self.end {
                 Some(_) => true,
-                None => w + SPAN < marked && gap_end + CONTEXT <= pushed,
+                None => w + self.ahead(w) < marked && gap_end + CONTEXT <= pushed,
             };
             if !known || (self.end.is_some() && w >= self.last_window()) {
                 break;
@@ -234,11 +241,17 @@ impl Declicker {
         self.emit(ready)
     }
 
+    /// How many windows past `w` the gate reads: [`SPAN`], or in the file's
+    /// first [`SPAN`] windows as many as come before `w`.
+    fn ahead(&self, w: usize) -> usize {
+        SPAN.min(w.saturating_sub(self.origin_window))
+    }
+
     /// Whether, around first-quarter window `w`, the hits bunch in the first
     /// quarters.
     fn gate(&self, w: usize) -> bool {
         let lo = w.saturating_sub(SPAN).max(self.first_window);
-        let hi = (w + SPAN + 1).min(self.window_base + self.hit.len());
+        let hi = (w + self.ahead(w) + 1).min(self.window_base + self.hit.len());
         let mut counts = [0_u32; QUARTERS];
         for v in lo..hi {
             if self.hit[v - self.window_base] {
@@ -301,13 +314,14 @@ impl Declicker {
     }
 }
 
-/// Declicks a whole signal whose first sample is at position `start`: the
-/// same samples as pushing it in any chunks.
+/// Declicks a whole stream, of a file starting at position `origin`, whose
+/// first sample is at position `start`: the same samples as pushing it in any
+/// chunks.
 ///
 /// # Errors
 /// Fails only on an internal size mismatch.
-pub fn declick(audio: &Seq, start: usize) -> Result<Seq> {
-    let mut declicker = Declicker::new(audio.channels(), start);
+pub fn declick(audio: &Seq, origin: usize, start: usize) -> Result<Seq> {
+    let mut declicker = Declicker::new(audio.channels(), origin, start);
     let head = declicker.push(audio)?;
     Seq::concat(vec![head, declicker.finish()?])
 }
@@ -499,7 +513,7 @@ mod tests {
     fn removes_grid_clicks_and_chunks_give_the_whole_signal() -> Result<()> {
         let start = 300;
         let x = clicky(6 * 44_100, start);
-        let whole = declick(&x, start)?;
+        let whole = declick(&x, start, start)?;
         assert_eq!(whole.len(), x.len());
         // The clicks in the middle are gone.
         let mid = 3 * 44_100 / FRAME * FRAME + 40 - start;
@@ -507,7 +521,7 @@ mod tests {
         let after = (whole.row(mid)[0] - whole.row(mid - 1)[0]).abs();
         assert!(after < before / 4.0, "click {before} -> {after}");
         for chunk in [1, 97, 4096, 50_000] {
-            let mut d = Declicker::new(2, start);
+            let mut d = Declicker::new(2, start, start);
             let mut parts = Vec::new();
             let mut t = 0;
             while t < x.len() {
@@ -522,11 +536,32 @@ mod tests {
         // signal's samples from there.
         let point = 4 * 44_100 + 77;
         let first = point - LOOKBACK;
-        let tail = declick(&x.slice_rows(first, x.len()), start + first)?;
+        let tail = declick(&x.slice_rows(first, x.len()), start, start + first)?;
         assert!(same_bits(
             &tail.slice_rows(LOOKBACK, tail.len()),
             &whole.slice_rows(point, whole.len())
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn starts_playing_without_the_full_look_ahead() -> Result<()> {
+        let start = 300;
+        let x = clicky(6 * 44_100, start);
+        let whole = declick(&x, start, start)?;
+        // Half a second in, a third of it can already be played: in the
+        // first 2 s the gate reads as far ahead as the file has gone, so the
+        // output keeps up with half the input.
+        let mut d = Declicker::new(2, start, start);
+        let half = 44_100 / 2;
+        let head = d.push(&x.slice_rows(0, half))?;
+        assert!(head.len() > half / 3, "only {} of {half} samples out", head.len());
+        assert!(same_bits(&head, &whole.slice_rows(0, head.len())));
+        // Clicks early in the file are still repaired.
+        let early = 3 * FRAME + 40 - start + 20 * FRAME;
+        let before = (x.row(early)[0] - x.row(early - 1)[0]).abs();
+        let after = (whole.row(early)[0] - whole.row(early - 1)[0]).abs();
+        assert!(after < before / 4.0, "click {before} -> {after}");
         Ok(())
     }
 
@@ -545,7 +580,7 @@ mod tests {
             })
             .collect();
         let x = Seq::from_vec(len, 2, data)?;
-        assert!(same_bits(&declick(&x, 0)?, &x));
+        assert!(same_bits(&declick(&x, 0, 0)?, &x));
         Ok(())
     }
 }

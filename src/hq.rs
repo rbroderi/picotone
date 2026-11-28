@@ -619,7 +619,7 @@ pub(crate) fn decode(weights: &Path, table: &HqModel, stream: DacStream) -> Resu
     let cx2_seconds = start.elapsed().as_secs_f64();
     let mut out = stream.decode_rest()?;
     if declick::applies(tier) {
-        out = declick::declick(&out, pre_skip)?;
+        out = declick::declick(&out, pre_skip, pre_skip)?;
     }
     let audio = Audio::from_seq(&out, dac::SAMPLE_RATE);
     eprintln!(
