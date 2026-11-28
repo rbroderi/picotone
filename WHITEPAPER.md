@@ -60,6 +60,7 @@ picotone uses its own container, `.pico` (§7), not Meta's `.ecdc`.
   trained on DAC's residual, 16 in all (`dac44_quantizer`). A lower codebook count is a prefix of the full code,
   so one encode serves every rate.
 - **Decoder:** a Vocos (iSTFT) decoder trained on those codes (`dac44_vocos`) decodes every codebook count.
+  At 1 to 5 codebooks a post-filter reshapes its spectrum before the iSTFT (§2.6).
 - **Limiter:** every decode, HQ and EnCodec, in every player, ends in a look-ahead peak limiter (§3.4).
 
 A file names its code space by a hash of the codebooks, not a decoder, so any decoder of these codes can play
@@ -112,6 +113,30 @@ alone. A player upgrades a playing file by restarting at the current position wi
 
 The WebAssembly decoder runs HQ at about 4.4–4.7× real time for single-threaded stereo, in about 77 MiB of
 memory.
+
+### 2.6 The low-tier post-filter
+
+At 1 to 5 codebooks the decoder's output clicks: the frames' phases do not quite agree where their windows
+overlap, which leaves a short burst near some frame boundaries. A post-filter, trained after the decoder with
+the decoder frozen, removes most of them. It runs between the decoder's head and its iSTFT:
+
+- **Inputs:** the head's spectrum S (1025 bins per frame), the decoder's last hidden state and the tier.
+- **Features:** S with its magnitude compressed, `S (|S| + 1e-5)^-0.7`, as real and imaginary parts.
+- **Network:** a Linear of the features plus a Linear of the hidden state plus a learned vector per tier, a
+  `LayerNorm`, 4 `ConvNeXt` blocks 192 wide (depthwise k7, MLP 576), a final `LayerNorm` and a Linear to one
+  value `o` per bin: 1.6M parameters, stored as `pf.*` in `dac44_vocos.safetensors`.
+- **Output:** `S' = S exp(tanh(o))`, a real gain between e^-1 and e^1 per bin and frame. The phase is never
+  changed; the gain is what the post-filter has to work with.
+
+Training used the decoder's mel and multi-resolution STFT losses plus adversarial and feature-matching terms
+from a discriminator trained from scratch alongside it; a post-filter trained on the spectral losses alone, or
+one allowed to change the phase, sounded metallic. At 6 codebooks and above the post-filter does not run, and
+the decode is the decoder's own, bit for bit.
+
+The 4 k7 convolutions add 12 frames of context per side: a chunked or streamed decode carries 41 frames per side
+(476 ms), against 29 for the decoder alone, and still equals a whole-file decode bit for bit. The post-filter
+costs about 13% of the HQ decode's speed at q3. On a 60 s Boléro excerpt at q3, frame-boundary pops (a frame's
+high-frequency burst 6 dB over its neighbours') fall from 113 to 27.
 
 ## 3. The EnCodec implementation
 
@@ -416,6 +441,7 @@ trusted certificate unlocks the faster paths.
 | EnCodec cx2 tables | `tools/build_tables.py`, `tools/check_testset.py`, `picotone dev check`; network training in `train/` |
 | HQ table | `tools/dac_codes.py` (dump codes), `train/hq_net.py` (train and export); `picotone dev dac-pack` (rates) |
 | HQ layer cost | `picotone dev layer-cost` |
+| HQ post-filter weights | `tools/export_postfilter.py` (adds `pf.*` to `dac44_vocos`); test fixture `tools/postfilter_fixture.py` |
 | Browser decoders | `web`: `npm run test:parity`; `wasm`: `node test/run.mjs` |
 
 Python tooling uses uv with `pyproject.toml`.

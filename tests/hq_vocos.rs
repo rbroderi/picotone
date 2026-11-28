@@ -1,6 +1,7 @@
 //! The Vocos HQ decoder against PyTorch (random-init fixtures written by
 //! `tools/vocos_fixture.py`), and its chunked and streaming decodes against
-//! a whole-file decode, bit for bit.
+//! a whole-file decode, bit for bit, with and without the low-tier
+//! post-filter (`tools/postfilter_fixture.py`).
 
 use std::path::{Path, PathBuf};
 
@@ -9,7 +10,7 @@ use picotone::cx2::hq::HqModel;
 use picotone::dac::{CODEBOOKS, HOP};
 use picotone::hqstream::{HqDecoder, HqStream};
 use picotone::pico::{self, ChannelLayout, DacInfo, DacStream};
-use picotone::vocos::VocosDecoder;
+use picotone::vocos::{POST_FILTER_MAX_Q, VocosDecoder};
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -132,6 +133,16 @@ fn tiny() -> Result<VocosDecoder> {
     VocosDecoder::load(&root().join("tests/data/vocos_tiny.safetensors"))
 }
 
+/// The tiny decoder with a random post-filter (`tools/postfilter_fixture.py`).
+fn tiny_pf() -> Result<VocosDecoder> {
+    VocosDecoder::load(&root().join("tests/data/vocos_tiny_pf.safetensors"))
+}
+
+/// Both fixtures, with their receptive fields.
+fn fixtures() -> Result<[(VocosDecoder, usize); 2]> {
+    Ok([(tiny()?, 29), (tiny_pf()?, 41)])
+}
+
 /// Pseudo-random codes.
 fn codes(frames: usize, n: usize, seed: u32) -> Vec<u16> {
     let mut state = seed;
@@ -149,19 +160,39 @@ fn same_bits(a: &[f32], b: &[f32]) -> bool {
 
 #[test]
 fn chunked_decodes_equal_the_whole_file_bit_for_bit() -> Result<()> {
-    let d = tiny()?;
-    assert_eq!(d.receptive_field(), 29);
-    for (frames, n) in [(300, 9), (131, 3), (5, 2), (1, 9)] {
-        let c = codes(frames, n, 11);
-        let whole = d.decode_chunked(&c, n, 100_000)?;
-        assert_eq!(whole.len(), frames * HOP);
-        assert!(whole.iter().all(|v| v.is_finite()));
-        for chunk in [1, 7, 40, 80, 256] {
-            let parts = d.decode_chunked(&c, n, chunk)?;
-            assert!(
-                same_bits(&whole, &parts),
-                "{frames} frames q{n}, chunk {chunk}"
-            );
+    for (d, field) in fixtures()? {
+        assert_eq!(d.receptive_field(), field);
+        for (frames, n) in [(300, 9), (300, 5), (131, 3), (5, 2), (1, 9), (1, 1)] {
+            let c = codes(frames, n, 11);
+            let whole = d.decode_chunked(&c, n, 100_000)?;
+            assert_eq!(whole.len(), frames * HOP);
+            assert!(whole.iter().all(|v| v.is_finite()));
+            for chunk in [1, 7, 40, 80, 256] {
+                let parts = d.decode_chunked(&c, n, chunk)?;
+                assert!(
+                    same_bits(&whole, &parts),
+                    "field {field}: {frames} frames q{n}, chunk {chunk}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The post-filter changes tiers 1 to 5 and leaves the others bit for bit.
+#[test]
+fn the_post_filter_runs_at_tiers_1_to_5_only() -> Result<()> {
+    let (plain, pf) = (tiny()?, tiny_pf()?);
+    assert!(!plain.has_post_filter() && pf.has_post_filter());
+    for n in [1, 3, 5, 6, 9, 16] {
+        let c = codes(120, n, 5);
+        let (a, b) = (plain.decode(&c, n)?, pf.decode(&c, n)?);
+        if n <= POST_FILTER_MAX_Q {
+            let moved = a.iter().zip(&b).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
+            assert!(moved > a.len() / 2, "q{n}: only {moved} of {} samples changed", a.len());
+            assert!(b.iter().all(|v| v.is_finite()), "q{n}");
+        } else {
+            assert!(same_bits(&a, &b), "q{n}");
         }
     }
     Ok(())
@@ -173,7 +204,13 @@ fn table() -> Result<HqModel> {
 
 #[test]
 fn streaming_decodes_equal_the_whole_file_bit_for_bit() -> Result<()> {
-    let d = tiny()?;
+    for (d, _) in fixtures()? {
+        streams_equal_the_whole_file(&d)?;
+    }
+    Ok(())
+}
+
+fn streams_equal_the_whole_file(d: &VocosDecoder) -> Result<()> {
     let table = table()?;
     let frames = 2100;
     let info = DacInfo {
@@ -198,7 +235,7 @@ fn streaming_decodes_equal_the_whole_file_bit_for_bit() -> Result<()> {
     let want: Vec<f32> = (300..300 + playable)
         .flat_map(|t| [left[t], right[t]])
         .collect();
-    let dyn_d: &dyn HqDecoder = &d;
+    let dyn_d: &dyn HqDecoder = d;
     for start in [0, 777, playable - 1] {
         for units in [1, 3, usize::MAX] {
             let mut s = HqStream::new(DacStream::parse(&bytes)?, &table, dyn_d, start)?;

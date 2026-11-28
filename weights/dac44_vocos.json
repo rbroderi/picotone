@@ -14,8 +14,8 @@
  "codebook_size": 1024,
  "codebook_dim": 8,
  "input_per_codebook": 9,
- "receptive_frames": 29,
- "params": 14345730,
+ "receptive_frames": 41,
+ "params": 15934019,
  "step": 30000,
  "licences": "sharealike",
  "teacher": "descript-audio-codec 1.0.0, 44khz 8kbps weights (MIT, Copyright (c) 2023-present, Descript)",
@@ -24,5 +24,18 @@
   "dac": "a88eed82a7024ccc1facdb1e605c4c2f99281c8118c22c9895ffa846d8fb61aa",
   "ext": "85c3871eac1490be9d16187c15e62a598cedd9619f5b86524b8d66a3cdad0b7f"
  },
- "fold_max_rel_dev": 8.619052209724032e-07
+ "fold_max_rel_dev": 8.619052209724032e-07,
+ "post_filter": {
+  "tiers": "1-5 (the frame's codebook count); bypassed above",
+  "dim": 192,
+  "blocks": 4,
+  "mlp": 576,
+  "params": 1588289,
+  "step": 7500,
+  "weights": "G_ema",
+  "source_sha256": {
+   "checkpoint": "0ec5c3673ce82f23ada99463aa8719c5db744c2566cd210aa5ce48cc5fee9d70",
+   "export": "3f5b160ce0a90f581bb7454e471fbb676d331173aabf0a7a1cc31acc34f9fb8e"
+  }
+ }
 }

@@ -18,13 +18,19 @@
 //!   padding give exactly 512 samples per frame, divided by the overlapped
 //!   squared window. Only hop 512 (`n_fft` 2048, one STFT frame per latent
 //!   frame) is built.
+//! - **The post-filter** (tensors `pf.*`, when present; WHITEPAPER §2.6). At
+//!   1 to [`POST_FILTER_MAX_Q`] codebooks, a small `ConvNeXt` (4 blocks) reads
+//!   the head's spectrum `S`, the final hidden state and the tier, and gives
+//!   one gain per bin and frame: `S' = S exp(tanh(o))`, phase kept. Above
+//!   that tier it does not run and the decode is the network's own.
 //!
 //! At load, each `LayerNorm`'s scale and offset are folded into the Linear
 //! after it, and the layer scale into the second Linear of its block.
 //!
 //! **Chunking.** An output frame depends on the codes within
-//! `3 (blocks + 1) + 2` frames of it (29 for 8 blocks): 3 per k7 conv, and 2
-//! for the windows that overlap its samples. Every value is computed per
+//! `3 (blocks + 1) + 2` frames of it (29 for 8 blocks), 3 more per
+//! post-filter block (41 with it): 3 per k7 conv, and 2 for the windows that
+//! overlap its samples. Every value is computed per
 //! frame by the same operations wherever the frame sits in a window (the
 //! matrix products are row by row, the depthwise conv adds its taps in
 //! order, the overlap-add sums frames in order), so a decode window needs no
@@ -87,6 +93,8 @@ pub struct VocosDecoder {
     /// The head with the final `LayerNorm` folded in, `[dim, n_fft + 2]`.
     head: PackedMat,
     head_bias: Vec<f32>,
+    /// The low-tier post-filter, when the weights have one.
+    post_filter: Option<PostFilter>,
     fft: RealInverse,
     /// The Hann window over `n_fft` (the FFT's normalisation folded in).
     window: Vec<f32>,
@@ -191,7 +199,11 @@ impl Block {
 
     /// Block `index` of the checkpoint, folded.
     pub(crate) fn load(w: &Weights<'_>, index: usize, dim: usize, mlp: usize) -> Result<Self> {
-        let p = format!("block{index}");
+        Self::load_named(w, &format!("block{index}"), dim, mlp)
+    }
+
+    /// The block whose tensors are `{p}.dwconv.weight` and so on, folded.
+    pub(crate) fn load_named(w: &Weights<'_>, p: &str, dim: usize, mlp: usize) -> Result<Self> {
         let taps_in = w.get(&format!("{p}.dwconv.weight"), &[dim, KERNEL])?;
         let mut taps = vec![0.0; KERNEL * dim];
         for c in 0..dim {
@@ -224,6 +236,184 @@ impl Block {
             pw2,
             pw2_bias: Affine::new(pw2_bias.into_iter().map(|b| (1.0, b))),
         })
+    }
+}
+
+/// The low-tier post-filter (tensors `pf.*`): a real gain per bin and frame on
+/// the head's spectrum at tiers 1 to [`POST_FILTER_MAX_Q`]; the phase is kept.
+#[derive(Debug, Clone)]
+struct PostFilter {
+    dim: usize,
+    mlp: usize,
+    decoder_dim: usize,
+    /// The spectrum features' Linear, `[2 bins, dim]`.
+    embed: PackedMat,
+    /// The decoder's hidden state's Linear, `[decoder dim, dim]`, with the
+    /// decoder's final `LayerNorm` affine part folded in.
+    h_embed: PackedMat,
+    /// Per tier 1 to [`POST_FILTER_MAX_Q`]: both Linears' biases plus the
+    /// tier's embedding, `[tier - 1][dim]`.
+    bias: Vec<Vec<f32>>,
+    norm_weight: Vec<f32>,
+    norm_bias: Vec<f32>,
+    blocks: Vec<Block>,
+    /// The head with the final `LayerNorm` folded in, `[dim, bins]`.
+    head: PackedMat,
+    head_bias: Vec<f32>,
+}
+
+/// The highest tier (codebooks per frame) the post-filter runs at; above it
+/// the decode is the network's own, bit for bit.
+pub const POST_FILTER_MAX_Q: usize = 5;
+/// The power the post-filter's input features compress magnitudes with.
+const PF_COMPRESSION: f32 = 0.3;
+/// Added to the magnitude before the compression.
+const PF_EPS: f32 = 1e-5;
+/// The gain is `exp(PF_GAIN_BOUND tanh(o))`.
+const PF_GAIN_BOUND: f32 = 1.0;
+
+impl PostFilter {
+    /// Loads `pf.*` for a decoder `decoder_dim` wide with final `LayerNorm`
+    /// `final_norm`, and `bins` spectrum bins.
+    fn load(
+        w: &Weights<'_>,
+        decoder_dim: usize,
+        final_norm: (&[f32], &[f32]),
+        bins: usize,
+    ) -> Result<Self> {
+        let dim = *w
+            .shape("pf.embed.bias")
+            .and_then(<[usize]>::first)
+            .context("the post-filter has no pf.embed.bias")?;
+        let mlp = *w
+            .shape("pf.block0.pw1.bias")
+            .and_then(<[usize]>::first)
+            .context("the post-filter has no pf.block0.pw1.bias")?;
+        let v = |name: &str, len: usize| vector(w, name, len);
+        let (embed, embed_bias) = fold_linear(
+            &w.get("pf.embed.weight", &[dim, 2 * bins])?,
+            &v("pf.embed.bias", dim)?,
+            (dim, 2 * bins),
+            None,
+            None,
+        )?;
+        let (h_embed, h_bias) = fold_linear(
+            &w.get("pf.h_embed.weight", &[dim, decoder_dim])?,
+            &v("pf.h_embed.bias", dim)?,
+            (dim, decoder_dim),
+            Some(final_norm),
+            None,
+        )?;
+        let tiers = w.get("pf.tier_emb.weight", &[POST_FILTER_MAX_Q + 1, dim])?;
+        let tier_bias = (1..=POST_FILTER_MAX_Q)
+            .map(|q| {
+                (0..dim)
+                    .map(|c| {
+                        let b = f64::from(embed_bias[c])
+                            + f64::from(h_bias[c])
+                            + f64::from(tiers[q * dim + c]);
+                        #[expect(clippy::cast_possible_truncation, reason = "rounding the sum once")]
+                        let value = b as f32;
+                        value
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut blocks = Vec::new();
+        while w.contains(&format!("pf.block{}.gamma", blocks.len())) {
+            let name = format!("pf.block{}", blocks.len());
+            blocks.push(Block::load_named(w, &name, dim, mlp)?);
+        }
+        let (final_w, final_b) = (v("pf.final_norm.weight", dim)?, v("pf.final_norm.bias", dim)?);
+        let (head, head_bias) = fold_linear(
+            &w.get("pf.head.weight", &[bins, dim])?,
+            &v("pf.head.bias", bins)?,
+            (bins, dim),
+            Some((&final_w, &final_b)),
+            None,
+        )?;
+        Ok(Self {
+            dim,
+            mlp,
+            decoder_dim,
+            embed,
+            h_embed,
+            bias: tier_bias,
+            norm_weight: v("pf.norm.weight", dim)?,
+            norm_bias: v("pf.norm.bias", dim)?,
+            blocks,
+            head,
+            head_bias,
+        })
+    }
+
+    /// Latent frames of context per side the post-filter adds.
+    const fn receptive_field(&self) -> usize {
+        (KERNEL / 2) * self.blocks.len()
+    }
+
+    /// Filters `spec` (`[frame][re of the bins, then im]`) in place at tier
+    /// `q`, from the decoder's normalised hidden state `hidden`
+    /// (`[frames, decoder dim]`, before its final affine part). `x`, `h`,
+    /// `wide` and `tile` are working memory.
+    fn apply(
+        &self,
+        spec: &mut [f32],
+        hidden: &[f32],
+        q: usize,
+        [x, h, wide, tile]: [&mut Vec<f32>; 4],
+    ) -> Result<()> {
+        let (dim, decoder_dim) = (self.dim, self.decoder_dim);
+        let bins = self.head_bias.len();
+        let frames = spec.len() / (2 * bins);
+        let x = sized(x, frames * dim);
+        {
+            let _prof = crate::prof::scope("postfilter embed", 2 * bins, dim, frames);
+            for (t0, x_tile) in (0..frames).step_by(TILE).zip(x.chunks_mut(TILE * dim)) {
+                let rows = x_tile.len() / dim;
+                let feat = sized(tile, rows * 2 * bins);
+                for (f, s) in feat
+                    .chunks_exact_mut(2 * bins)
+                    .zip(spec[t0 * 2 * bins..].chunks_exact(2 * bins))
+                {
+                    let (re, im) = s.split_at(bins);
+                    let (fr, fi) = f.split_at_mut(bins);
+                    for (((fr, fi), &a), &b) in fr.iter_mut().zip(fi).zip(re).zip(im) {
+                        let scale = (a.hypot(b) + PF_EPS).powf(PF_COMPRESSION - 1.0);
+                        (*fr, *fi) = (a * scale, b * scale);
+                    }
+                }
+                self.embed.mul(feat, 2 * bins, Some(&self.bias[q - 1]), x_tile)?;
+                self.h_embed.mul(
+                    &hidden[t0 * decoder_dim..(t0 + rows) * decoder_dim],
+                    decoder_dim,
+                    None,
+                    x_tile,
+                )?;
+            }
+            kernels::layer_norm_in_place(x, dim, EPS, Some((&self.norm_weight, &self.norm_bias)));
+        }
+        let h = sized(h, frames * dim);
+        let wide = sized(wide, TILE.min(frames) * self.mlp);
+        for block in &self.blocks {
+            block.forward(x, h, wide)?;
+        }
+        kernels::layer_norm_in_place(x, dim, EPS, None);
+        let _prof = crate::prof::scope("postfilter head", dim, bins, frames);
+        for (x_tile, s_tile) in x.chunks(TILE * dim).zip(spec.chunks_mut(TILE * 2 * bins)) {
+            let rows = x_tile.len() / dim;
+            let o = sized(tile, rows * bins);
+            self.head.mul(x_tile, dim, Some(&self.head_bias), o)?;
+            for (o, s) in o.chunks_exact(bins).zip(s_tile.chunks_exact_mut(2 * bins)) {
+                let (re, im) = s.split_at_mut(bins);
+                for ((&o, re), im) in o.iter().zip(re).zip(im) {
+                    let gain = (PF_GAIN_BOUND * o.tanh()).exp();
+                    *re *= gain;
+                    *im *= gain;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -277,6 +467,14 @@ impl VocosDecoder {
             Some((&final_w, &final_b)),
             None,
         )?;
+        let post_filter = if w.contains("pf.embed.bias") {
+            Some(
+                PostFilter::load(w, dim, (&final_w, &final_b), n_fft / 2 + 1)
+                    .context("loading the post-filter")?,
+            )
+        } else {
+            None
+        };
         let (window, window_sq) = hann_windows(n_fft);
         Ok(Self {
             dim,
@@ -290,6 +488,7 @@ impl VocosDecoder {
             blocks,
             head,
             head_bias,
+            post_filter,
             fft: RealInverse::new(n_fft)?,
             window,
             window_sq,
@@ -326,10 +525,20 @@ impl VocosDecoder {
         self.blocks.len()
     }
 
+    /// Whether the weights include the low-tier post-filter.
+    #[must_use]
+    pub const fn has_post_filter(&self) -> bool {
+        self.post_filter.is_some()
+    }
+
     /// Latent frames of context per side for an exact chunked decode.
     #[must_use]
     pub const fn receptive_field(&self) -> usize {
-        (KERNEL / 2) * (1 + self.blocks.len()) + (self.n_fft / 2).div_ceil(HOP)
+        let post_filter = match &self.post_filter {
+            Some(pf) => pf.receptive_field(),
+            None => 0,
+        };
+        (KERNEL / 2) * (1 + self.blocks.len()) + post_filter + (self.n_fft / 2).div_ceil(HOP)
     }
 
     /// Decodes `codes`, `[frames][num_codebooks]` (codebooks 0 to
@@ -399,8 +608,8 @@ impl VocosDecoder {
             h,
             wide,
             head,
-            re,
-            im,
+            spec,
+            pf_x,
             frame,
             ola,
             fft,
@@ -421,38 +630,52 @@ impl VocosDecoder {
                 .mul(input, FOLDED_INPUT, Some(&self.embed_bias), x)?;
             kernels::layer_norm_in_place(x, dim, EPS, Some((&self.norm_weight, &self.norm_bias)));
         }
-        let h = sized(h, frames * dim);
-        let wide = sized(wide, TILE.min(frames) * self.mlp);
-        for block in &self.blocks {
-            block.forward(x, h, wide)?;
+        {
+            let h = sized(h, frames * dim);
+            let wide = sized(wide, TILE.min(frames) * self.mlp);
+            for block in &self.blocks {
+                block.forward(x, h, wide)?;
+            }
         }
         kernels::layer_norm_in_place(x, dim, EPS, None);
         let (n_fft, bins) = (self.n_fft, self.n_fft / 2 + 1);
         let width = 2 * bins;
-        let ola = sized(ola, (frames - 1) * HOP + n_fft);
-        ola.fill(0.0);
-        let head = sized(head, TILE.min(frames) * width);
-        let (re, im, frame) = (sized(re, bins), sized(im, bins), sized(frame, n_fft));
-        for (tile, x_tile) in x.chunks(TILE * dim).enumerate() {
-            let rows = x_tile.len() / dim;
-            let o = &mut head[..rows * width];
-            let prof = crate::prof::scope("vocos head", dim, width, rows);
-            self.head.mul(x_tile, dim, Some(&self.head_bias), o)?;
-            prof.stop();
-            let _prof = crate::prof::scope("vocos istft", n_fft, HOP, rows);
-            for (r, row) in o.chunks_exact(width).enumerate() {
-                let t = tile * TILE + r;
-                kernels::polar(&row[..bins], &row[bins..], re, im);
-                self.fft.run(re, im, frame, fft);
-                for ((y, &v), &w) in ola[t * HOP..t * HOP + n_fft]
-                    .iter_mut()
-                    .zip(frame.iter())
-                    .zip(&self.window)
-                {
-                    *y += v * w;
+        // The spectrum of every frame, `[frame][re of the bins, then im]`.
+        let spec = sized(spec, frames * width);
+        {
+            let o = sized(head, TILE.min(frames) * width);
+            for (x_tile, s_tile) in x.chunks(TILE * dim).zip(spec.chunks_mut(TILE * width)) {
+                let rows = x_tile.len() / dim;
+                let o = &mut o[..rows * width];
+                let _prof = crate::prof::scope("vocos head", dim, width, rows);
+                self.head.mul(x_tile, dim, Some(&self.head_bias), o)?;
+                for (row, s) in o.chunks_exact(width).zip(s_tile.chunks_exact_mut(width)) {
+                    let (re, im) = s.split_at_mut(bins);
+                    kernels::polar(&row[..bins], &row[bins..], re, im);
                 }
             }
         }
+        if let Some(pf) = &self.post_filter
+            && (1..=POST_FILTER_MAX_Q).contains(&num_codebooks)
+        {
+            pf.apply(spec, x, num_codebooks, [pf_x, h, wide, head])?;
+        }
+        let ola = sized(ola, (frames - 1) * HOP + n_fft);
+        ola.fill(0.0);
+        let frame = sized(frame, n_fft);
+        let prof = crate::prof::scope("vocos istft", n_fft, HOP, frames);
+        for (t, s) in spec.chunks_exact(width).enumerate() {
+            let (re, im) = s.split_at(bins);
+            self.fft.run(re, im, frame, fft);
+            for ((y, &v), &w) in ola[t * HOP..t * HOP + n_fft]
+                .iter_mut()
+                .zip(frame.iter())
+                .zip(&self.window)
+            {
+                *y += v * w;
+            }
+        }
+        prof.stop();
         // "Same" padding: sample s is at s + pad of the overlap-add, divided
         // by the squared windows that overlap there, added in frame order.
         let _prof = crate::prof::scope("vocos istft", n_fft, HOP, frames);
@@ -486,8 +709,8 @@ struct Scratch {
     h: Vec<f32>,
     wide: Vec<f32>,
     head: Vec<f32>,
-    re: Vec<f32>,
-    im: Vec<f32>,
+    spec: Vec<f32>,
+    pf_x: Vec<f32>,
     frame: Vec<f32>,
     ola: Vec<f32>,
     fft: fft::Scratch,
@@ -501,8 +724,8 @@ impl Scratch {
             h: Vec::new(),
             wide: Vec::new(),
             head: Vec::new(),
-            re: Vec::new(),
-            im: Vec::new(),
+            spec: Vec::new(),
+            pf_x: Vec::new(),
             frame: Vec::new(),
             ola: Vec::new(),
             fft: fft::Scratch::new(),
