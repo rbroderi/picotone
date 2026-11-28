@@ -773,17 +773,14 @@ fn data_candidates(name: &str) -> Vec<PathBuf> {
     candidates
 }
 
-/// Finds the weights directory: `explicit`, `$PICOTONE_WEIGHTS`, the older
-/// `$ENCODEC_WEIGHTS`, `weights/` beside the executable or its ancestors, then
-/// the project's `weights/`.
+/// Finds the weights directory: `explicit`, `$PICOTONE_WEIGHTS`, `weights/`
+/// beside the executable or its ancestors, then the project's `weights/`.
 #[must_use]
 pub fn weights_dir(explicit: Option<&Path>) -> PathBuf {
     if let Some(dir) = explicit {
         return dir.to_path_buf();
     }
-    if let Some(dir) =
-        std::env::var_os("PICOTONE_WEIGHTS").or_else(|| std::env::var_os("ENCODEC_WEIGHTS"))
-    {
+    if let Some(dir) = std::env::var_os("PICOTONE_WEIGHTS") {
         return PathBuf::from(dir);
     }
     let marker = ModelKind::Mono24k.files(Path::new("")).1;

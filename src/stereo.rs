@@ -1,15 +1,15 @@
 //! Stereo decisions for the HQ codec: the automatic mono flag and the
-//! left/right against mid/side pick (`distill/INTEGRATION.md`, decision 2).
+//! left/right against mid/side pick.
 //!
-//! - **Mono flag** (`distill/stereo_scan.py`'s rule). Pages of 40,960
+//! - **Mono flag** (`tools/stereo_scan.py`'s rule). Pages of 40,960
 //!   samples. A page where both channels are below -60 dBFS is silent and
 //!   skipped. A side below -70 dBFS counts as none. The file is mono when
 //!   every other page's side, `(L - R) / 2`, is more than 40 dB below its
 //!   mid, `(L + R) / 2`.
-//! - **Layout pick** (`distill/stereo_pick_check.py`). Up to 4 excerpts of
+//! - **Layout pick** (`tools/stereo_pick_check.py`). Up to 4 excerpts of
 //!   3 s, the loudest window in each of 4 equal regions, each coded both ways
 //!   with 1 s of context on each side and scored on its centre. The score is
-//!   the log-mel distance of `distill/metrics.py` (80 mels, 2048-point FFT,
+//!   the log-mel distance of `train/hq/metrics.py` (80 mels, 2048-point FFT,
 //!   floor 80 dB under the peak), averaged over L, R and the side. Sampling
 //!   stops after 2 excerpts when the layouts differ by more than 5%.
 //!   Checked against coding whole tracks both ways: 35 of 36 tracks agreed,
@@ -460,7 +460,7 @@ mod tests {
         let mel = LogMel::new();
         let x = mix([0.3, 0.2, 0.05]);
         assert!(mel.distance(&x, &x).is_some_and(|d| d.abs() < 1e-9));
-        // distill/metrics.py's score(x, y)["logmel"] on the same signals.
+        // train/hq/metrics.py's score(x, y)["logmel"] on the same signals.
         let y = mix([0.25, 0.1, 0.025]);
         let d = mel.distance(&x, &y).unwrap_or(f64::NAN);
         assert!((d - 4.778_193).abs() < 1e-3, "{d}");

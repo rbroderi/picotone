@@ -3,7 +3,8 @@
 Decodes `.pico` files (EnCodec 24 kHz mono / 48 kHz stereo, cx2-coded) in the browser. The cx2 range decode
 runs in WebAssembly, in the same Rust code as the command line (so the codes are bit-exact), one Ogg page at a
 time; the codes are then fed to the EnCodec network on the GPU. The network is a port of the Rust decoder in
-`../src`, and the parity tests check it against the exe.
+`../src`, and the parity tests check it against the exe. It refuses HQ (`dac44`) files: those play through the
+WebAssembly decoder in `../wasm`.
 
 ## Build and run
 
@@ -29,8 +30,7 @@ cx2-tables.json                      { tables: [{ file, model, hash }] }
 cx2/picotone.js, cx2/picotone_bg.wasm   (from npm run build)
 ```
 
-Each `manifest.json` has `"format": "picotone-webgpu-weights"`. The loader refuses any other format,
-including models exported before the rename (`encodec-webgpu-weights`): run `export-weights` again.
+Each `manifest.json` has `"format": "picotone-webgpu-weights"`. The loader refuses any other format.
 
 `test:parity` and `make-refs` read `PICOTONE_TEST_DIR` (where the test audio goes; default
 `%TEMP%/picotone-web-test`), `PICOTONE_EXE` (the path to `picotone.exe`) and `PICOTONE_LISTEN_DIR` (adds two
@@ -68,6 +68,9 @@ const out = await model.decode(bytes, {
   folds the coded pre-roll into the last 100 ms, so the last sample runs into the first. `out.loop` is then
   true, and `play(ctx, out)` loops the whole buffer with no click and no loop points
   (`AudioBufferSourceNode.loop = true`). Do not pad loops by hand.
+- Every decode ends in the look-ahead peak limiter (`src/limit.ts`, a port of the library's `limiter::Limiter`
+  with the same f32 arithmetic): it lowers the gain smoothly around any sample the network puts over full
+  scale, and leaves the rest unchanged.
 - A file decodes only with the exact cx2 table it was coded with; `PicoError` names the missing hash.
 - This decoder always starts at the beginning of the file. For seeking, use the WebAssembly decoder.
 - The library builds under `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`,
@@ -77,7 +80,8 @@ const out = await model.decode(bytes, {
 ## Speed
 
 On a desktop GPU (Chrome, f32 weights): 48 kHz stereo 10–21× real time (75 s at music6: 21×), 24 kHz mono
-23–33×. First audio after 0.1–0.6 s: only the first page is range-decoded before the GPU starts.
+23–33×. First audio after 0.1–0.6 s (`npm run test:parity` prints it cold and warm): only the first page is
+range-decoded before the GPU starts.
 
 ## Memory bounds
 

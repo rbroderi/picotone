@@ -2,7 +2,7 @@ This encoder was trained to feed DAC's (descript-audio-codec, 44 kHz weights) fr
 DAC's own encoder output, then end to end through that quantiser and the dac44_vocos decoder. DAC is MIT licensed,
 Copyright (c) 2023-present, Descript; these weights are a derivative of DAC's MIT weights and the MIT notice applies.
 
-It was trained on the same third-party audio as dac44_vocos (tracks by licence: by 9423, by-sa 32630, cc0 953,
+It was trained on the same third-party audio as dac44_vocos (tracks by licence: by 9423, by-sa 32630, cc0 901,
 fal 663, pd 425). Every training track is credited, with its licence URL, in dac44_stftenc.credits.jsonl.
 
 Some training audio is licensed CC BY-SA (or the Free Art Licence). Whether trained weights are an adaptation of

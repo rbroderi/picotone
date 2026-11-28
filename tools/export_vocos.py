@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Convert a Vocos-style HQ decoder exported by distill/export.py into picotone's Rust format
-(`src/vocos.rs`, decoder name `dac44_vocos`). Run it in distill/'s environment:
+"""Convert a Vocos-style HQ decoder exported by train/hq/export.py into picotone's Rust format
+(`src/vocos.rs`, decoder name `dac44_vocos`). Run it in train/hq's environment:
 
-    cd distill
-    uv run --extra cpu python ../tools/export_vocos.py --vocos X:/audio/distill/weights/dac44_vocos_q16.pt \
-        --dac export/weights_44khz_8kbps_0.0.1.pth --ext X:/audio/distill/weights/q16_codebooks.pt \
-        --out ../weights/dac44_vocos
+    cd train/hq
+    uv run --extra cpu python ../../tools/export_vocos.py --vocos weights/dac44_vocos_q16.pt \
+        --dac export/weights_44khz_8kbps_0.0.1.pth --ext weights/q16_codebooks.pt \
+        --out ../../weights/dac44_vocos
 
 Reads <vocos>.pt (export.py's state dict) and <vocos>.json (its config; `arch` must be a vocos config), and
 writes <out>.safetensors and <out>.json. It copies <vocos>.NOTICE.txt and <vocos>.credits.jsonl to
 <out>.NOTICE.txt and <out>.credits.jsonl when they exist.
 
-As in distill/export_rust.py, the codebook projections are folded into the embed conv (k7, 1024 -> dim becomes
+As in train/hq/export_rust.py, the codebook projections are folded into the embed conv (k7, 1024 -> dim becomes
 k7, 144 -> dim: per codebook, its 8 embedding values and a "present" 1), in float64, rounded to float32 once. The
 16 codebooks are DAC's 9 (from --dac) and the q16 run's 7 (--ext, `quantizer.quantizers.{9..15}.*`, no weight
 norm). Everything else is copied unchanged (float32):
@@ -42,8 +42,8 @@ import sys
 import torch
 from torch import nn
 
-DISTILL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "distill")
-sys.path.insert(0, os.path.abspath(DISTILL))
+HQ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "train", "hq")
+sys.path.insert(0, os.path.abspath(HQ))
 
 from export_rust import CB_SIZE, CB_DIM, IN_PER_CB, load_quantiser, sha, write_safetensors  # noqa: E402
 from vocos_student import FRAME, VocosDecoder  # noqa: E402

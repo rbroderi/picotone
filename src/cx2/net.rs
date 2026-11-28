@@ -17,7 +17,6 @@
 //! 512 inputs, so every accumulator stays inside an `i32` (the three first-layer
 //! biases are each at most 2^28: 3 x 2^28 + 512 x 2047 x 1023 < 2^31).
 //!
-//! The position term exists only in the second net format (table version 5).
 //! `t` counts frames since the last reset and `P` is the table's period (150 for
 //! the 48 kHz model, one 1 s segment; 0 switches the term off). Resets of the
 //! segmented model always fall on segment starts, so `t mod P` is the frame's
@@ -133,15 +132,14 @@ const MAX_PERIOD: usize = 4096;
 impl Net {
     /// Parses a network for `codebooks` codebooks from the start of `bytes`.
     ///
-    /// `positioned` selects the second format, which carries the position input
-    /// after the bandwidth biases: u32 period, u32 bucket count, one u8 bucket per
-    /// position, then one `h1`-long i32 bias per bucket.
+    /// The position input follows the bandwidth biases: u32 period, u32 bucket
+    /// count, one u8 bucket per position, then one `h1`-long i32 bias per bucket.
     ///
     /// Returns the network and the number of bytes it occupied.
     ///
     /// # Errors
     /// Fails on truncated or implausible input.
-    pub fn parse(bytes: &[u8], codebooks: usize, positioned: bool) -> Result<(Self, usize)> {
+    pub fn parse(bytes: &[u8], codebooks: usize) -> Result<(Self, usize)> {
         let mut r = Reader { bytes, pos: 0 };
         let h1 = r.size()?;
         let h2 = r.size()?;
@@ -153,22 +151,18 @@ impl Net {
         );
         let bandwidths = (0..count).map(|_| r.size()).collect::<Result<Vec<_>>>()?;
         let bandwidth_bias = r.biases(count * h1)?;
-        let (period, position_bucket, position_bias) = if positioned {
-            let period = r.size()?;
-            let buckets = r.size()?;
-            ensure!(
-                period <= MAX_PERIOD && buckets <= 256 && (period == 0) == (buckets == 0),
-                "implausible net position input"
-            );
-            let map = r.take(period)?.to_vec();
-            ensure!(
-                map.iter().all(|&b| usize::from(b) < buckets),
-                "net position bucket is out of range"
-            );
-            (period, map, r.biases(buckets * h1)?)
-        } else {
-            (0, Vec::new(), Vec::new())
-        };
+        let period = r.size()?;
+        let buckets = r.size()?;
+        ensure!(
+            period <= MAX_PERIOD && buckets <= 256 && (period == 0) == (buckets == 0),
+            "implausible net position input"
+        );
+        let position_bucket = r.take(period)?.to_vec();
+        ensure!(
+            position_bucket.iter().all(|&b| usize::from(b) < buckets),
+            "net position bucket is out of range"
+        );
+        let position_bias = r.biases(buckets * h1)?;
         let w1 = matrix(&r.weights(PAST * DIM * h1, WEIGHT_LIMIT)?, h1)?;
         let b1 = r.biases(h1)?;
         let w2 = matrix(&r.weights(h1 * h2, WEIGHT_LIMIT)?, h2)?;

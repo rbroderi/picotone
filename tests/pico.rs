@@ -67,21 +67,25 @@ fn push_values(out: &mut Vec<u8>, rng: &mut Lcg, count: usize, range: i32) {
     }
 }
 
-/// Model table (version 4) with small random values in every expert, including the net.
-fn table(rng: &mut Lcg) -> Vec<u8> {
-    table_with(rng, None, 0)
+/// Fixed-point centroids for `CODEBOOKS` layers, rounded from random weights.
+fn centroids(rng: &mut Lcg) -> Result<Vec<i16>> {
+    Ok(Centroids::from_safetensors(&weights(rng), CODEBOOKS)?
+        .values()
+        .to_vec())
 }
 
-/// Like [`table`], but version 5: the table stores `centroids` and its net has a
-/// position input with the given period (0: none).
-fn table_v5(rng: &mut Lcg, centroids: &[i16], period: u32) -> Vec<u8> {
-    table_with(rng, Some(centroids), period)
+/// Model table with random centroids and small random values in every expert,
+/// including the net (without a position input).
+fn table(rng: &mut Lcg) -> Result<Vec<u8>> {
+    let fixed = centroids(rng)?;
+    Ok(table_with(rng, &fixed, 0))
 }
 
-fn table_with(rng: &mut Lcg, centroids: Option<&[i16]>, period: u32) -> Vec<u8> {
+/// Model table that stores `centroids`; its net has a position input with the
+/// given period (0: none).
+fn table_with(rng: &mut Lcg, centroids: &[i16], period: u32) -> Vec<u8> {
     let mut out = b"ECXM".to_vec();
-    let version = if centroids.is_some() { 5 } else { 4 };
-    for value in [version, u32::try_from(CODEBOOKS).unwrap_or(0), 6, 64] {
+    for value in [5, u32::try_from(CODEBOOKS).unwrap_or(0), 6, 64] {
         out.extend_from_slice(&value.to_le_bytes());
     }
     for step in 0..64_u32 {
@@ -89,7 +93,7 @@ fn table_with(rng: &mut Lcg, centroids: Option<&[i16]>, period: u32) -> Vec<u8> 
         let value = (1_u32 << 24) - step * 180_000;
         out.extend_from_slice(&value.to_le_bytes());
     }
-    for &value in centroids.unwrap_or(&[]) {
+    for &value in centroids {
         out.extend_from_slice(&value.to_le_bytes());
     }
     for _ in 0..CODEBOOKS {
@@ -133,21 +137,19 @@ fn table_with(rng: &mut Lcg, centroids: Option<&[i16]>, period: u32) -> Vec<u8> 
         }
     };
     push_values(&mut out, rng, 2 * 16, 20_000);
-    if centroids.is_some() {
-        // Position input: buckets 0, 1, 2 for the first frames, 3 for the rest.
-        let buckets = period.min(4);
-        out.extend_from_slice(&period.to_le_bytes());
-        out.extend_from_slice(&buckets.to_le_bytes());
-        for position in 0..period {
-            out.push(u8::try_from(position.min(3)).unwrap_or(0));
-        }
-        push_values(
-            &mut out,
-            rng,
-            usize::try_from(buckets * h1).unwrap_or(0),
-            200_000,
-        );
+    // Position input: buckets 0, 1, 2 for the first frames, 3 for the rest.
+    let buckets = period.min(4);
+    out.extend_from_slice(&period.to_le_bytes());
+    out.extend_from_slice(&buckets.to_le_bytes());
+    for position in 0..period {
+        out.push(u8::try_from(position.min(3)).unwrap_or(0));
     }
+    push_values(
+        &mut out,
+        rng,
+        usize::try_from(buckets * h1).unwrap_or(0),
+        200_000,
+    );
     weights(&mut out, rng, 4 * 128 * h1, 300);
     push_values(&mut out, rng, 16, 20_000);
     weights(&mut out, rng, h1 * h2, 2000);
@@ -180,10 +182,9 @@ fn codes(rng: &mut Lcg, frames: usize, codebooks: usize) -> Vec<u16> {
     out
 }
 
-/// The synthetic model, from a version 4 table and random weights.
+/// The synthetic model.
 fn model(rng: &mut Lcg) -> Result<Model> {
-    let table = table(rng);
-    Model::load(&table, &weights(rng))
+    Model::from_table(&table(rng)?)
 }
 
 /// Decodes the raw chunks of [`encode_codes`] back to codes.
@@ -230,9 +231,14 @@ fn chunks_carry_scales_before_codes() -> Result<()> {
     let (back, codes) = decode_chunk(&model, 2, scales.len(), stream.len(), &chunk)?;
     assert_eq!(back, scales);
     assert_eq!(codes, stream);
-    // Twelve bits per scale, give or take the coder's final bytes.
+    // Twelve bits per scale (7.5 bytes), give or take a few bytes of coder rounding.
     let bare = encode_chunk(&model, 2, &[], &stream)?;
-    assert!(chunk.len() >= bare.len() + 6 && chunk.len() <= bare.len() + 10);
+    assert!(
+        chunk.len() >= bare.len() + 6 && chunk.len() <= bare.len() + 12,
+        "{} bytes with scales, {} without",
+        chunk.len(),
+        bare.len()
+    );
     assert!(encode_chunk(&model, 2, &[4096], &stream).is_err());
     Ok(())
 }
@@ -259,9 +265,9 @@ fn a_damaged_chunk_leaves_the_others_intact() -> Result<()> {
 #[test]
 fn every_dispatch_path_codes_identically() -> Result<()> {
     let mut rng = Lcg(21);
-    let (table, weights) = (table(&mut rng), weights(&mut rng));
-    let model = Model::load(&table, &weights)?;
-    let mut baseline = Model::load(&table, &weights)?;
+    let table = table(&mut rng)?;
+    let model = Model::from_table(&table)?;
+    let mut baseline = Model::from_table(&table)?;
     baseline.set_simd(Simd::baseline());
     let stream = codes(&mut rng, 50, CODEBOOKS);
     assert_eq!(
@@ -272,18 +278,12 @@ fn every_dispatch_path_codes_identically() -> Result<()> {
 }
 
 #[test]
-fn self_contained_tables_with_a_position_input_round_trip() -> Result<()> {
+fn tables_with_a_position_input_round_trip() -> Result<()> {
     let mut rng = Lcg(31);
-    let weights = weights(&mut rng);
-    let fixed = Centroids::from_safetensors(&weights, CODEBOOKS)?
-        .values()
-        .to_vec();
+    let fixed = centroids(&mut rng)?;
     for period in [0, 5, 150] {
-        let table = table_v5(&mut rng, &fixed, period);
-        // The table alone is enough; the weights, when given, are only checked.
+        let table = table_with(&mut rng, &fixed, period);
         let model = Model::from_table(&table)?;
-        let checked = Model::load(&table, &weights)?;
-        assert_eq!(model.hash_hex(), checked.hash_hex());
         assert_eq!(self_contained_hash(&table), Some(model.hash()));
         let mut baseline = Model::from_table(&table)?;
         baseline.set_simd(Simd::baseline());
@@ -292,7 +292,6 @@ fn self_contained_tables_with_a_position_input_round_trip() -> Result<()> {
             for reset in [0, 7, 15] {
                 let chunks = encode_codes(&model, codebooks, reset, &stream)?;
                 assert_eq!(chunks, encode_codes(&baseline, codebooks, reset, &stream)?);
-                assert_eq!(chunks, encode_codes(&checked, codebooks, reset, &stream)?);
                 assert_eq!(
                     decode_raw(&model, codebooks, reset, stream.len(), &chunks)?,
                     stream
@@ -304,40 +303,30 @@ fn self_contained_tables_with_a_position_input_round_trip() -> Result<()> {
 }
 
 #[test]
-fn a_self_contained_table_rejects_other_weights() -> Result<()> {
+fn other_table_versions_are_rejected() -> Result<()> {
     let mut rng = Lcg(33);
-    let weights = weights(&mut rng);
-    let other = weights_with_seed(34);
-    let fixed = Centroids::from_safetensors(&weights, CODEBOOKS)?
-        .values()
-        .to_vec();
-    let table = table_v5(&mut rng, &fixed, 150);
-    assert!(Model::load(&table, &other).is_err());
-    assert!(Model::load(&table, &[]).is_ok());
-    // A version 4 table cannot be used without weights, and has no file hash.
-    let old = table_with(&mut rng, None, 0);
-    assert!(Model::from_table(&old).is_err());
-    assert_eq!(self_contained_hash(&old), None);
+    let mut table = table(&mut rng)?;
+    for version in [4_u32, 6] {
+        table[4..8].copy_from_slice(&version.to_le_bytes());
+        assert!(Model::from_table(&table).is_err());
+        assert_eq!(self_contained_hash(&table), None);
+    }
     Ok(())
-}
-
-fn weights_with_seed(seed: u64) -> Vec<u8> {
-    weights(&mut Lcg(seed))
 }
 
 #[test]
 fn offline_fitting_runs_on_small_streams() -> Result<()> {
     let mut rng = Lcg(3);
-    let table = table(&mut rng);
     let weights = weights(&mut rng);
-    let streams = vec![codes(&mut rng, 60, 2), codes(&mut rng, 40, 2)];
     let centroids = Centroids::from_safetensors(&weights, 2)?;
+    let table = table(&mut rng)?;
+    let streams = vec![codes(&mut rng, 60, 2), codes(&mut rng, 40, 2)];
     let counts = fit::histograms(&centroids, 2, 1, 25, &streams)?;
     assert_eq!(counts.len(), 2);
     assert_eq!(counts[0].geo.hit.iter().sum::<u64>(), 100);
     assert_eq!(counts[1].geo.hit.iter().sum::<u64>(), 0);
     assert_eq!(counts[1].rec.all.iter().sum::<u64>(), 100 * 1024);
-    let model = Model::load(&table, &weights)?;
+    let model = Model::from_table(&table)?;
     let tuned = fit::tune(&model, 2, &streams, 20, 25)?;
     assert_eq!(tuned.len(), 2);
     assert!(
@@ -588,9 +577,8 @@ fn short_sounds_have_a_small_fixed_cost() -> Result<()> {
 #[test]
 fn a_different_table_is_rejected() -> Result<()> {
     let mut rng = Lcg(5);
-    let shared = weights(&mut rng);
-    let model = Model::load(&table(&mut rng), &shared)?;
-    let other = Model::load(&table(&mut rng), &shared)?;
+    let model = Model::from_table(&table(&mut rng)?)?;
+    let other = Model::from_table(&table(&mut rng)?)?;
     let (info, frames) = mono(&mut rng, &model, 10, 0);
     let stream = Stream::parse(&pico::write(&model, &info, &frames)?)?;
     assert!(stream.decode_all(&other).is_err());
@@ -1018,23 +1006,17 @@ fn fuzz_seeds(rng: &mut Lcg, model: &Model) -> Result<Vec<Vec<u8>>> {
 
 /// The model the fuzzer decodes with: a real self-contained table from `FUZZ_TABLE`,
 /// or the synthetic one. Real files in `FUZZ_FILES` need the real table.
-fn fuzz_model(rng: &mut Lcg) -> Result<(Model, Vec<u8>, Vec<u8>)> {
-    if let Ok(path) = std::env::var("FUZZ_TABLE") {
-        let table = std::fs::read(path)?;
-        return Ok((Model::from_table(&table)?, table, Vec::new()));
-    }
-    let (table, weights) = (table(rng), weights(rng));
-    Ok((Model::load(&table, &weights)?, table, weights))
+fn fuzz_model(rng: &mut Lcg) -> Result<(Model, Vec<u8>)> {
+    let table = match std::env::var("FUZZ_TABLE") {
+        Ok(path) => std::fs::read(path)?,
+        Err(_) => table(rng)?,
+    };
+    Ok((Model::from_table(&table)?, table))
 }
 
-/// Loads a damaged table (every fourth time, damaged weights) and codes with the result.
-fn exercise_table(rng: &mut Lcg, table: &[u8], weights: &[u8]) {
-    let loaded = if rng.next().is_multiple_of(4) {
-        Model::load(table, &mutate(rng, weights, table))
-    } else {
-        Model::load(&mutate(rng, table, weights), weights)
-    };
-    if let Ok(model) = loaded {
+/// Loads a damaged table and codes with the result.
+fn exercise_table(rng: &mut Lcg, table: &[u8]) {
+    if let Ok(model) = Model::from_table(&mutate(rng, table, table)) {
         let stream = codes(rng, 40, 2);
         if let Ok(chunk) = encode_chunk(&model, 2, &[7, 4000], &stream) {
             drop(decode_chunk(&model, 2, 2, 80, &chunk));
@@ -1050,11 +1032,11 @@ fn env_number(name: &str, default: u64) -> u64 {
 }
 
 /// Runs case `case` of the fuzzer; returns false if a reader panicked.
-fn fuzz_case(model: &Model, tables: (&[u8], &[u8]), seeds: &[Vec<u8>], case: u64) -> bool {
+fn fuzz_case(model: &Model, table: &[u8], seeds: &[Vec<u8>], case: u64) -> bool {
     let mut rng = Lcg(case.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5DEE_CE66);
     if case % 64 == 63 {
         return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            exercise_table(&mut rng, tables.0, tables.1);
+            exercise_table(&mut rng, table);
         }))
         .is_ok();
     }
@@ -1081,12 +1063,12 @@ fn fuzz_case(model: &Model, tables: (&[u8], &[u8]), seeds: &[Vec<u8>], case: u64
 fn fuzz_readers_never_panic_or_hang() -> Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     let mut rng = Lcg(43);
-    let (model, table, weights) = fuzz_model(&mut rng)?;
-    let tables = (table.as_slice(), weights.as_slice());
+    let (model, table) = fuzz_model(&mut rng)?;
+    let table = table.as_slice();
     let seeds = fuzz_seeds(&mut rng, &model)?;
     if let Ok(case) = std::env::var("FUZZ_CASE") {
         assert!(
-            fuzz_case(&model, tables, &seeds, case.parse()?),
+            fuzz_case(&model, table, &seeds, case.parse()?),
             "case {case} panicked"
         );
         return Ok(());
@@ -1113,7 +1095,7 @@ fn fuzz_readers_never_panic_or_hang() -> Result<()> {
                     slot.0.store(case, Ordering::Relaxed);
                     let now = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
                     slot.1.store(now, Ordering::Relaxed);
-                    if !fuzz_case(model, tables, seeds, case)
+                    if !fuzz_case(model, table, seeds, case)
                         && let Ok(mut list) = failures.lock()
                     {
                         list.push(case);

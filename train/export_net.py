@@ -1,4 +1,4 @@
-"""Quantises a trained net to the integer format of entropy/src/net.rs and checks it.
+"""Quantises a trained net to the integer format of src/cx2/net.rs and checks it.
 
     python export_net.py --ckpt out/net48v2.pt --data train_data_48k_full.npz
 
@@ -7,10 +7,9 @@ the archive; the two must agree to about 0.01 bit. `blob()` is what tools/build_
 embeds in a `.ecxm` table (weights are i16, biases i32, all shifts fixed, so the Rust side
 reproduces `int_logits()` exactly).
 
-Two net formats exist. Format 1 (table version 4) is the original one. Format 2 (table
-version 5) adds the position input after the bandwidth biases: u32 period, u32 bucket
-count, one u8 bucket per position, then one h1-long i32 bias per bucket. A format 1
-checkpoint (no position input) can be written in format 2 with period 0.
+The position input follows the bandwidth biases: u32 period, u32 bucket count, one u8
+bucket per position, then one h1-long i32 bias per bucket. A checkpoint without a position
+input is written with period 0.
 """
 import argparse
 import math
@@ -76,26 +75,21 @@ def quantise(path, weights=None):
     return q
 
 
-def blob(path, bandwidths=None, weights=None, net_format=None):
+def blob(path, bandwidths=None, weights=None):
     """Bytes of the net section of a model table.
 
-    `bandwidths` defaults to the checkpoint's own list; `net_format` to 2 when the
-    checkpoint has a position input, else 1. Table version 4 needs format 1, version 5
-    format 2.
+    `bandwidths` defaults to the checkpoint's own list.
     """
     sd = load_state(path)
     bandwidths = bandwidths or checkpoint_bandwidths(sd)
     q = quantise(path, weights)
-    net_format = net_format or (2 if q["period"] else 1)
     assert q["kemb"].shape[0] == len(bandwidths), "checkpoint was trained for other bandwidths"
-    assert net_format == 2 or not q["period"], "a net with a position input needs format 2 (table v5)"
+    buckets = q["pemb"].shape[0]
+    assert q["period"] <= 4096 and buckets <= 256
     out = [struct.pack("<3I", q["h1"], q["h2"], len(bandwidths)),
-           struct.pack(f"<{len(bandwidths)}I", *bandwidths), q["kemb"].tobytes()]
-    if net_format == 2:
-        buckets = q["pemb"].shape[0]
-        assert q["period"] <= 4096 and buckets <= 256
-        out += [struct.pack("<2I", q["period"], buckets), q["pos_map"].astype(np.uint8).tobytes(),
-                q["pemb"].tobytes()]
+           struct.pack(f"<{len(bandwidths)}I", *bandwidths), q["kemb"].tobytes(),
+           struct.pack("<2I", q["period"], buckets), q["pos_map"].astype(np.uint8).tobytes(),
+           q["pemb"].tobytes()]
     out += [q["w1"].tobytes(), q["b1"].tobytes(), q["w2"].tobytes(), q["b2"].tobytes()]
     for h in q["heads"]:
         out += [struct.pack("<I", h["a"].shape[1]), h["a"].tobytes(), h["b"].tobytes(),

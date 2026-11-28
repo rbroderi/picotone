@@ -1,9 +1,11 @@
-"""Parametric stereo prototype for the HQ codec (INTEGRATION.md, M8 item 2).
+"""Parametric stereo prototype for the HQ codec.
 
-    uv run python pstereo_proto.py prep          # 10 s excerpts at 44.1 kHz, their mids
+    uv run python pstereo_proto.py prep --source DIR  # 10 s excerpts at 44.1 kHz, their mids
     uv run python pstereo_proto.py code          # HQ round trips with picotone.exe (--threads 4)
     uv run python pstereo_proto.py eval          # parametric stereo, metrics, rates
-    uv run python pstereo_proto.py listen        # listening WAVs
+    uv run python pstereo_proto.py listen        # listening WAVs, in work/pstereo/listen
+
+Files go to work/pstereo; $PICOTONE_EXE overrides target/release/picotone.exe.
 
 Parametric stereo here: the file codes the mid (L + R) / 2 as one HQ channel, plus per band and per
 parameter frame the intensity difference (IID, dB), the coherence (ICC) and optionally the phase
@@ -37,9 +39,10 @@ from numpy.lib.stride_tricks import sliding_window_view
 SR = 44100
 HOP = 512
 PAGE = 80
-EXE = "E:/encodecx/target/release/picotone.exe"
-WORK = "E:/encodecx/work/pstereo"
-LISTEN = "X:/audio/distill/pstereo_listen"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EXE = os.environ.get("PICOTONE_EXE", os.path.join(ROOT, "target", "release", "picotone.exe"))
+WORK = os.path.join(ROOT, "work", "pstereo")
+LISTEN = os.path.join(WORK, "listen")
 SECONDS = 10
 
 CLIPS = [
@@ -377,7 +380,7 @@ def cost_bits(streams, codes):
 # ---------------------------------------------------------------- metrics
 
 class LogMel:
-    """distill/metrics.py's log-mel (src/stereo.rs's port): 80 mels, 2048 FFT, hop 512, 80 dB floor."""
+    """train/hq/metrics.py's log-mel (src/stereo.rs's port): 80 mels, 2048 FFT, hop 512, 80 dB floor."""
 
     def __init__(self):
         nfft, mels = 2048, 80
@@ -444,7 +447,9 @@ def prep(a):
         out = f"{WORK}/{short}_orig.wav"
         if os.path.exists(out):
             continue
-        sr, x = read_wav(f"X:/audio/work/{rel}")
+        if not a.source:
+            raise SystemExit("prep needs --source, the folder that holds the clips' wav/ directory")
+        sr, x = read_wav(os.path.join(a.source, rel))
         assert sr == 48000 and x.shape[0] == 2
         mid = x.shape[1] // 2
         seg = x[:, mid - SECONDS * sr // 2: mid + SECONDS * sr // 2]
@@ -615,6 +620,7 @@ def main():
     p.add_argument("--threads", type=int, default=4)
     p.add_argument("--config", default="ps20k8x")
     p.add_argument("--clips", default="band1,piano1,hiphop1,jazz1,pop2,ambient")
+    p.add_argument("--source", help="prep: the folder that holds the clips' wav/ directory (48 kHz stereo)")
     a = p.parse_args()
     {"prep": prep, "code": code, "eval": eval_, "listen": listen, "rates": rates_}[a.step](a)
 

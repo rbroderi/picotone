@@ -3,7 +3,7 @@
 //! Its layers all run at the latent frame rate (86.13 Hz) and its samples
 //! come from an inverse STFT: about a fifth of the work per second of the
 //! DAC-architecture decoder it replaced. The design follows Vocos (Siuzdak 2023, MIT, Copyright (c) 2023 Charactr
-//! Inc.); the network is `distill/vocos_student.py`, converted by
+//! Inc.); the network is `train/hq/vocos_student.py`, converted by
 //! `tools/export_vocos.py`:
 //!
 //! - **The input.** The codebook projections are folded into the embed conv

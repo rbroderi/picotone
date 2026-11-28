@@ -2,8 +2,7 @@
 //!
 //! The table tools read code bundles: a `.pico` file, or a `NumPy` `.npy` array
 //! of codes `[frames, codebooks]` with an optional `.json` sidecar of the same
-//! stem that gives the layout (written by `picotone dev codes` and by
-//! `tools/codes_from_ecdc.py`). Statistics and tuning need only the codes;
+//! stem that gives the layout (written by `picotone dev codes`). Statistics and tuning need only the codes;
 //! `check` needs the layout too. A file argument starting with `@` names a
 //! text file listing one path per line.
 
@@ -46,9 +45,6 @@ pub(crate) enum DevCommand {
         input: String,
         /// Output .pico file.
         output: PathBuf,
-        /// Codec weights for a version 4 table (`-`: none, the table is self-contained).
-        #[arg(long, default_value = "-")]
-        codec: String,
     },
     /// Code bundles with a table and check the round trip, seeking, a stream without
     /// a length field and the baseline code path. Prints one tab-separated line per
@@ -61,9 +57,6 @@ pub(crate) enum DevCommand {
         /// Code bundles (.pico, or .npy with a .json sidecar).
         #[arg(required = true)]
         files: Vec<String>,
-        /// Codec weights for a version 4 table (`-`: none, the table is self-contained).
-        #[arg(long, default_value = "-")]
-        codec: String,
         /// Only the round trip, for bulk size runs.
         #[arg(long)]
         quick: bool,
@@ -89,8 +82,6 @@ pub(crate) enum DevCommand {
     Tune {
         /// cx2 table (.ecxm).
         table: PathBuf,
-        /// Codec weights for a version 4 table, or `-`.
-        codec: String,
         /// Output .json file.
         output: PathBuf,
         /// Frames sampled per codebook.
@@ -101,7 +92,7 @@ pub(crate) enum DevCommand {
         #[arg(required = true)]
         files: Vec<String>,
     },
-    /// Time the HQ decoder (`dac44-vocos`) on random codes; prints the real-time factor.
+    /// Time the HQ decoder (`dac44_vocos`) on random codes; prints the real-time factor.
     DacBench {
         /// The decoder weights (`dac44_vocos.safetensors`).
         weights: PathBuf,
@@ -114,40 +105,6 @@ pub(crate) enum DevCommand {
         /// Channels to decode one after the other (2 = stereo).
         #[arg(long, default_value_t = 2)]
         channels: usize,
-    },
-    /// Decode a `.npy` of DAC codes (`[frames, codebooks]`) with the HQ decoder to raw
-    /// little-endian f32 samples, for parity checks against PyTorch.
-    DacDecode {
-        /// The decoder weights (`dac44_vocos.safetensors`).
-        weights: PathBuf,
-        /// Codes, `[frames, codebooks]` u16.
-        codes: PathBuf,
-        /// Output: raw f32 samples.
-        output: PathBuf,
-        /// Use the first N codebooks (the tier).
-        #[arg(long, default_value_t = 9)]
-        codebooks: usize,
-        /// Latent frames per chunk (default: the decoder's own).
-        #[arg(long)]
-        chunk: Option<usize>,
-    },
-    /// Encode raw little-endian f32 mono 44.1 kHz samples with the HQ encoder
-    /// (the STFT encoder, then DAC's quantiser) to a `.npy` of codes
-    /// `[frames, 16]`, for parity checks.
-    DacEncode {
-        /// The weights directory, holding `dac44_stftenc.safetensors` and
-        /// `dac44_quantizer.safetensors`.
-        weights: PathBuf,
-        /// Input: raw f32 samples.
-        input: PathBuf,
-        /// Output: codes, `[frames, 16]` u16.
-        output: PathBuf,
-        /// Latent frames per chunk (default: the encoder's own).
-        #[arg(long)]
-        chunk: Option<usize>,
-        /// Also write the latent, `[frames, 1024]` raw f32, here.
-        #[arg(long)]
-        latent: Option<PathBuf>,
     },
     /// Pack dumped HQ codes (`dev codes` output: `.json` sidecars with their
     /// `.npy` files) into cx2 HQ streams at each tier, check that they decode
@@ -194,9 +151,6 @@ pub(crate) enum DevCommand {
         table: PathBuf,
         /// Code bundle.
         input: String,
-        /// Codec weights for a version 4 table, or `-`.
-        #[arg(long, default_value = "-")]
-        codec: String,
     },
 }
 
@@ -219,9 +173,8 @@ pub(crate) fn run(command: &DevCommand, tables: &Path) -> Result<()> {
             table,
             input,
             output,
-            codec,
         } => {
-            let model = load(table, codec)?;
+            let model = load(table)?;
             let (info, frames) = stream_of(&read_bundle(tables, input)?, &model, None)?;
             std::fs::write(output, pico::write(&model, &info, &frames)?)
                 .with_context(|| format!("writing {}", output.display()))
@@ -230,12 +183,11 @@ pub(crate) fn run(command: &DevCommand, tables: &Path) -> Result<()> {
             table,
             page_length,
             files,
-            codec,
             quick,
             jobs,
         } => {
-            let model = load(table, codec)?;
-            let mut baseline = load(table, codec)?;
+            let model = load(table)?;
+            let mut baseline = load(table)?;
             baseline.set_simd(Simd::baseline());
             let page_length = if page_length == "auto" {
                 None
@@ -272,33 +224,25 @@ pub(crate) fn run(command: &DevCommand, tables: &Path) -> Result<()> {
         }
         DevCommand::Tune {
             table,
-            codec,
             output,
             frames,
             reset,
             files,
         } => {
-            let model = load(table, codec)?;
+            let model = load(table)?;
             let (num_codebooks, streams) = streams(tables, files)?;
             write_json(
                 output,
                 &fit::tune(&model, num_codebooks, &streams, *frames, *reset)?,
             )
         }
-        DevCommand::Profile {
-            table,
-            input,
-            codec,
-        } => profile(&load(table, codec)?, &read_bundle(tables, input)?),
+        DevCommand::Profile { table, input } => profile(&load(table)?, &read_bundle(tables, input)?),
         DevCommand::DacPack {
             table,
             inputs,
             tiers,
         } => dac_pack(table, inputs, tiers),
-        DevCommand::DacBench { .. }
-        | DevCommand::DacDecode { .. }
-        | DevCommand::DacEncode { .. }
-        | DevCommand::LayerCost { .. } => run_dac(command),
+        DevCommand::DacBench { .. } | DevCommand::LayerCost { .. } => run_dac(command),
     }
 }
 
@@ -696,20 +640,6 @@ fn run_dac(command: &DevCommand) -> Result<()> {
             codebooks,
             channels,
         } => dac_bench(weights, *seconds, *codebooks, *channels),
-        DevCommand::DacDecode {
-            weights,
-            codes,
-            output,
-            codebooks,
-            chunk,
-        } => dac_decode(weights, codes, output, *codebooks, *chunk),
-        DevCommand::DacEncode {
-            weights,
-            input,
-            output,
-            chunk,
-            latent,
-        } => dac_encode(weights, input, output, *chunk, latent.as_deref()),
         DevCommand::LayerCost {
             table,
             inputs,
@@ -722,84 +652,11 @@ fn run_dac(command: &DevCommand) -> Result<()> {
     }
 }
 
-/// Encodes raw f32 samples with the HQ encoder to a code array.
-fn dac_encode(
-    weights: &Path,
-    input: &Path,
-    output: &Path,
-    chunk: Option<usize>,
-    latent_out: Option<&Path>,
-) -> Result<()> {
-    use picotone::dac::{CODEBOOKS, SAMPLE_RATE};
-    let encoder = picotone::encode::hq::load_encoder(weights, &mut |m| eprintln!("{m}"))?;
-    let bytes = read(input)?;
-    let audio: Vec<f32> = bytes
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|&b| f32::from_le_bytes(b))
-        .collect();
-    let t = Instant::now();
-    let latent = match chunk {
-        Some(chunk) => encoder.net.latent_chunked(&audio, chunk)?,
-        None => encoder.net.latent(&audio)?,
-    };
-    let took = t.elapsed().as_secs_f64();
-    if let Some(path) = latent_out {
-        let raw: Vec<u8> = latent.data().iter().flat_map(|v| v.to_le_bytes()).collect();
-        std::fs::write(path, raw).with_context(|| format!("writing {}", path.display()))?;
-    }
-    let t = Instant::now();
-    let codes = encoder.quantizer.quantize(&latent)?;
-    let seconds = to_f64(audio.len()) / f64::from(SAMPLE_RATE);
-    eprintln!(
-        "encoded {seconds:.1} s: encoder {took:.2} s ({:.2}x real time), quantiser {:.3} s",
-        seconds / took,
-        t.elapsed().as_secs_f64()
-    );
-    eprint!("{}", picotone::prof::report());
-    write_npy(output, &codes, CODEBOOKS)
-}
-
 /// Loads the Vocos HQ decoder.
 fn load_vocos(weights: &Path) -> Result<picotone::vocos::VocosDecoder> {
     let d = picotone::vocos::VocosDecoder::load(weights)?;
     eprintln!("Vocos decoder: dim {}, {} blocks", d.dim(), d.blocks());
     Ok(d)
-}
-
-/// Decodes a code array with the HQ decoder to raw f32 samples.
-fn dac_decode(
-    weights: &Path,
-    codes: &Path,
-    output: &Path,
-    codebooks: usize,
-    chunk: Option<usize>,
-) -> Result<()> {
-    let decoder = load_vocos(weights)?;
-    let (all, columns) = read_npy(codes)?;
-    ensure!(
-        (1..=columns).contains(&codebooks),
-        "{} has {columns} codebooks, {codebooks} asked for",
-        codes.display()
-    );
-    let tier: Vec<u16> = all
-        .chunks_exact(columns)
-        .flat_map(|frame| frame[..codebooks].iter().copied())
-        .collect();
-    let t = Instant::now();
-    let y = match chunk {
-        Some(n) => decoder.decode_chunked(&tier, codebooks, n)?,
-        None => decoder.decode(&tier, codebooks)?,
-    };
-    eprintln!(
-        "decoded {} samples in {:.2} s",
-        y.len(),
-        t.elapsed().as_secs_f64()
-    );
-    eprint!("{}", picotone::prof::report());
-    let bytes: Vec<u8> = y.iter().flat_map(|v| v.to_le_bytes()).collect();
-    std::fs::write(output, bytes).with_context(|| format!("writing {}", output.display()))
 }
 
 /// Decodes random codes with the HQ decoder and reports the real-time factor.
@@ -843,14 +700,10 @@ fn read(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("reading {}", path.display()))
 }
 
-/// Loads a table; a version 4 table needs the codec's weights.
-fn load(table: &Path, weights: &str) -> Result<Model> {
-    if weights == "-" {
-        Model::from_table(&read(table)?)
-    } else {
-        Model::load(&read(table)?, &read(Path::new(weights))?)
-    }
-    .with_context(|| format!("loading the cx2 table {}", table.display()))
+/// Loads a table.
+fn load(table: &Path) -> Result<Model> {
+    Model::from_table(&read(table)?)
+        .with_context(|| format!("loading the cx2 table {}", table.display()))
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {

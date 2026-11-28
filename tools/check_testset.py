@@ -17,17 +17,13 @@ import lib
 TAG, MODEL = sys.argv[1], sys.argv[2]
 PAGES, SETDIR = sys.argv[3], sys.argv[4]
 KS = [int(a) for a in sys.argv[5:]]
-# A version 4 table takes its centroids from the codec weights; version 5 carries them.
-with open(MODEL, "rb") as f:
-    VERSION = int.from_bytes(f.read(8)[4:], "little")
-WEIGHTS = ["--codec", os.path.join(lib.WEIGHTS, lib.MODEL_NAME[TAG] + ".safetensors")] if VERSION == 4 else []
 JOBS = os.environ.get("CHECK_JOBS", "8")
 stem = os.path.splitext(os.path.basename(MODEL))[0]
 out = {"model_bytes": os.path.getsize(MODEL)}
 for kk in KS:
     files = sorted(glob.glob(os.path.join(lib.WORK, SETDIR, f"{TAG}_K{kk}", "*.ecdc")))
     bundles = [lib.bundle(f) for f in files]
-    r = subprocess.run([lib.PICOTONE, "dev", "check", MODEL, PAGES, *bundles, *WEIGHTS, "--jobs", JOBS],
+    r = subprocess.run([lib.PICOTONE, "dev", "check", MODEL, PAGES, *bundles, "--jobs", JOBS],
                        capture_output=True, text=True)
     if r.returncode != 0:
         raise SystemExit("check failed:\n" + r.stderr[-3000:])

@@ -1,7 +1,24 @@
 # Third-party notices and attributions
 
-picotone's own code is licensed under the [GNU General Public License v3.0 or later](LICENSE). It builds on
-the work below. Everything here is compatible with GPL-3.0.
+picotone's own code is licensed under the [GNU General Public License v3.0 or later](LICENSE), with the
+exceptions under [picotone's licences](#picotones-licences). It builds on the work below. Everything here is
+compatible with GPL-3.0.
+
+## picotone's licences
+
+| Part | Licence |
+|---|---|
+| The library, the `picotone` command, the cx2 coder and tables, the browser decoders (`wasm/`, `web/`), the Python tooling (`tools/`, `train/`) | [GPL-3.0-or-later](LICENSE) |
+| The C library (`ffi/`) and the foobar2000 component (`foobar/`), and the DLL they build with picotone's library inside | [LGPL-3.0-or-later](foobar/COPYING.LESSER) (the LGPL adds permissions to the GPL) |
+| The FFmpeg demuxer and muxer (`ffmpeg/libavformat/libpicotone*`) | LGPL-2.1-or-later, like FFmpeg's. picotone itself is GPL-3.0-or-later, so an FFmpeg built with `--enable-libpicotone` needs `--enable-gpl --enable-version3`, and its programs are GPLv3 |
+| The model weights in `weights/` | their own notices: see the EnCodec and DAC sections below |
+
+The foobar2000 component builds against the **foobar2000 SDK** (Copyright (c) Peter Pawlowski), which is
+downloaded into `foobar/sdk/` and is not in the repository. The SDK is under a BSD-style licence
+(`foobar/sdk/sdk-license.txt`: redistributions keep its copyright notice, conditions and disclaimer, and the
+author's name may not be used to endorse derived products); its `pfc` and `libPPUI` libraries are under a
+zlib-style licence (`pfc-license.txt`, `libPPUI-license.txt`). A distributed component must carry those
+notices.
 
 ## EnCodec (Meta), MIT
 
@@ -28,6 +45,50 @@ If you use this work in research, please cite the EnCodec paper:
 
 > A. Défossez, J. Copet, G. Synnaeve, Y. Adi. *High Fidelity Neural Audio Compression.* 2022.
 > arXiv:2210.13438.
+
+## DAC (Descript), MIT
+
+The HQ codec codes DAC 44 kHz's codes, and its weights derive from or are trained on DAC's:
+
+- **Code:** https://github.com/descriptinc/descript-audio-codec (descript-audio-codec 1.0.0), MIT. The HQ
+  training code in `train/hq/` re-implements DAC's losses and discriminators.
+- **Weights:** DAC's 44 kHz model. `dac44_quantizer` holds DAC's quantiser (its 9 codebooks, plus 7 that
+  picotone trained on DAC's residual); `dac44_stftenc` is trained to feed that quantiser, matching DAC's encoder
+  first; `dac44_vocos` is a Vocos decoder trained on DAC 44 kHz codes. All three are derivatives of DAC's MIT
+  weights.
+
+> Copyright (c) 2023-present, Descript. Released under the MIT License.
+
+The full text is in [`weights/DAC-MIT.txt`](weights/DAC-MIT.txt). **Every copy of the HQ weights must carry it**,
+with the weights' own `.NOTICE.txt` files; the WebAssembly exporter copies them next to `dac44_vocos` in
+`wasm/www/models/`.
+
+picotone is not made, endorsed or supported by Descript. If you use this work in research, please cite:
+
+> R. Kumar, P. Seetharaman, A. Luebs, I. Kumar, K. Kumar. *High-Fidelity Audio Compression with Improved
+> RVQGAN.* 2023. arXiv:2306.06546.
+
+## Vocos
+
+picotone's HQ decoder follows the Vocos architecture (a ConvNeXt backbone that predicts an STFT, then an
+inverse STFT). picotone implements it independently and trains its own weights; no Vocos code or weights are
+used. Vocos is by Hubert Siuzdak (https://github.com/gemelo-ai/vocos, MIT):
+
+> H. Siuzdak. *Vocos: Closing the gap between time-domain and Fourier-based neural vocoders for high-quality
+> audio synthesis.* 2023. arXiv:2306.00814.
+
+## Audio used to train the HQ networks
+
+The HQ networks (`dac44_stftenc`, `dac44_vocos` with its post-filter, and the 7 extra codebooks of
+`dac44_quantizer`) were trained on 44,042 third-party tracks licensed CC BY (9,423), CC BY-SA (32,630), the
+Free Art Licence (663), CC0 (901) or public domain (425). Every track is credited, with its artist, title,
+source URL and licence URL, in the `.credits.jsonl` next to each weights file
+(`weights/dac44_quantizer.credits.jsonl`, `dac44_stftenc.credits.jsonl`, `dac44_vocos.credits.jsonl`), and
+each weights file's `.NOTICE.txt` gives the counts.
+
+**ShareAlike.** Whether trained weights are an adaptation of their training data is legally unsettled. Since
+some of the audio is CC BY-SA or Free Art Licence, the HQ weights may be a ShareAlike derivative of it. Ship
+each weights file with its `.NOTICE.txt` and `.credits.jsonl`. None of this audio is in the repository.
 
 ## Reference implementation used for testing
 

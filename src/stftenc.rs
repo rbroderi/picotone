@@ -3,7 +3,7 @@
 //!
 //! It replaces DAC's own encoder (about 30.6 GMAC per second of audio) with
 //! a Vocos-style network at the latent frame rate (about 1.3 GMAC/s). The
-//! network is `STFTEncoder` in `distill/encoder.py`, converted by
+//! network is `STFTEncoder` in `train/hq/encoder.py`, converted by
 //! `tools/export_stftenc.py`:
 //!
 //! - **The features.** Per resolution `n_fft` `w` (2048 and 512), hop

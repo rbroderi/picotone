@@ -1,8 +1,0 @@
-stock: 1 s segments, overlap 1 %, Meta cross-fade          snr=10.007 logmel=3.396 mrstft=1.591 
-      SNR per 10 ms bin, after the seam ... before the next: [8.4, 8.8, 9.7, 9.9, 9.8, 9.8, '...', 10.4, 9.9, 9.5]
-[fmt] overlap 5.0 % (stride 45600), edge-avoiding cross-fade snr=10.065 logmel=3.375 mrstft=1.579 
-      SNR per 10 ms bin, after the seam ... before the next: [9.8, 9.9, 9.4, 10.7, 10.0, 10.3, '...', 10.0, 10.2, 10.4]
-[fmt] 15 codebooks, overlap 6.25 % (stride 45000), edge-avoiding cross-fade snr=9.924 logmel=3.403 mrstft=1.590 
-      SNR per 10 ms bin, after the seam ... before the next: [9.9, 10.1, 9.9, 10.6, 10.7, 10.2, '...', 10.0, 10.0, 9.9]
-[fmt] 2 s segments, 2400-sample overlap, edge-avoiding cross-fade snr=10.048 logmel=3.495 mrstft=1.659 
-      SNR per 10 ms bin, after the seam ... before the next: [10.9, 10.5, 9.7, 10.5, 9.5, 9.7, '...', 8.8, 8.9, 9.3]

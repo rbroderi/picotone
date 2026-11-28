@@ -2,13 +2,13 @@
 """Export DAC 44 kHz's residual vector quantiser (MIT, Copyright (c) 2023-present, Descript) for picotone's
 HQ encoder (`src/dac.rs`, `DacQuantizer`): the trained STFT encoder (`dac44_stftenc`) makes the latent, DAC's
 own 9 codebooks code it, and 7 more codebooks, trained with the decoder (the q16 run), code what is left. Run it in
-distill/'s environment:
+train/hq's environment:
 
-    cd distill
-    uv run --extra cpu python ../tools/export_quantizer.py --dac export/weights_44khz_8kbps_0.0.1.pth \
-        --ext X:/audio/distill/weights/q16_codebooks.pt --out ../weights/dac44_quantizer
+    cd train/hq
+    uv run --extra cpu python ../../tools/export_quantizer.py --dac export/weights_44khz_8kbps_0.0.1.pth \
+        --ext weights/q16_codebooks.pt --out ../../weights/dac44_quantizer
 
-Stages 0..8 are DAC's, as distill/export_encoder.py exports them (weight norm removed with PyTorch's
+Stages 0..8 are DAC's, as train/hq/export_encoder.py exports them (weight norm removed with PyTorch's
 remove_weight_norm), without DAC's conv encoder. Stages 9..15 are `--ext`'s `quantizer.quantizers.{9..15}.*`
 tensors (trained without weight norm, so copied as they are). Writes <out>.safetensors and <out>.json, all float32,
 i = 0..15:
@@ -24,7 +24,7 @@ not the running residual (see `src/dac.rs`).
 `--check <file>.safetensors` also compares every tensor, bit for bit, with the same name in another export
 (such as an older dac44_encoder.safetensors), so the codebook hash the .pico header binds stays the same.
 
-distill/ is found next to this file, or at $PICOTONE_DISTILL. The DAC weights are only read.
+train/hq/ is found at ../train/hq from this file. The DAC weights are only read.
 """
 import argparse
 import json
@@ -35,9 +35,8 @@ import warnings
 import numpy as np
 import torch
 
-DISTILL = os.environ.get("PICOTONE_DISTILL") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
-                                                             "distill")
-sys.path.insert(0, os.path.abspath(DISTILL))
+HQ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "train", "hq")
+sys.path.insert(0, os.path.abspath(HQ))
 
 from export_encoder import plain, tensors  # noqa: E402
 from export_rust import N_CB, sha, write_safetensors  # noqa: E402

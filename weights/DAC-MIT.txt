@@ -1,9 +1,10 @@
 Descript Audio Codec (descript-audio-codec 1.0.0): code and the 44 kHz model weights.
 https://github.com/descriptinc/descript-audio-codec
 
-The student decoder (student.py) re-implements DAC's decoder architecture, losses.py re-implements DAC's
-losses and discriminators, and train.py uses the DAC 44 kHz encoder, quantiser and decoder weights. A student
-trained here is a derivative of DAC's MIT-licensed weights; ship this notice with it.
+picotone's HQ weights derive from or are trained on DAC's MIT-licensed 44 kHz weights: dac44_quantizer holds
+DAC's quantiser (its 9 codebooks, plus 7 trained on DAC's residual), dac44_stftenc is trained to feed that
+quantiser, and dac44_vocos is a Vocos decoder trained on DAC 44 kHz codes. The training code (train/hq/)
+re-implements DAC's losses and discriminators. Ship this notice with those weights.
 
 MIT License
 

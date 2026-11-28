@@ -1,13 +1,13 @@
-"""Trains the optional "net" expert of the cx entropy model (gradient descent, PyTorch).
+"""Trains the optional "net" expert of the cx2 entropy model for the EnCodec tables (gradient descent, PyTorch).
 
-    python train_net.py --data train_data_48k_full.npz --out out/net48v2.pt
+    uv run python train_net.py --data train_data_48k_full.npz --out out/net48v2.pt
 
 Self-contained: needs only the data archive made by collect_data.py (codes and the
 fixed-point RVQ centroids), numpy and torch. Runs on CUDA when available, else CPU.
 
 The network predicts each EnCodec code from the previous four frames' latents and the part
 of the current frame already coded. Every size and range below is chosen so that the
-integer inference in entropy/src/net.rs is exact and overflow-free; do not change the
+integer inference in src/cx2/net.rs is exact and overflow-free; do not change the
 clamps without changing that file:
 
   x     = centroid sums of the previous 4 frames over the stream's K codebooks,

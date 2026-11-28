@@ -16,18 +16,18 @@ ffmpeg/dist/
 
 # Large or downloaded data (re-created by the tools; see the READMEs)
 work/
-dwp/out/
-dwp/cache/
 web/public/models/
 wasm/www/models/
 train/**/*.npz
 train/**/*.pt
 train/**/*.ckpt
-# DAC distillation: training runs, exports and the corpus manifests (made by prep_*.py)
-distill/runs/
-distill/export/
-distill/data/*.jsonl
-distill/data/*.jsonl.*
+# HQ training: runs, exports and the corpus manifests (made by prep_*.py)
+train/hq/runs/
+train/hq/export/
+train/hq/pf_lowtier/
+train/hq/weights/
+train/hq/data/*.jsonl
+train/hq/data/*.jsonl.*
 # Scratch audio
 *.wav
 

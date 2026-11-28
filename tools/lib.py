@@ -10,7 +10,7 @@ import ecdcio
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORK = os.environ.get("ENTROPY_WORK", os.path.join(ROOT, "work"))
-WEIGHTS = os.environ.get("PICOTONE_WEIGHTS") or os.environ.get("ENCODEC_WEIGHTS") or os.path.join(ROOT, "weights")
+WEIGHTS = os.environ.get("PICOTONE_WEIGHTS") or os.path.join(ROOT, "weights")
 # The picotone executable; its `dev` subcommands are the table builder's Rust steps.
 PICOTONE = os.environ.get("PICOTONE_EXE", os.path.join(ROOT, "target", "release", "picotone.exe"))
 # ENTROPY_K48 lets the 48 kHz tools work on files with another codebook count (music24: 15).

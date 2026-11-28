@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Real-weights parity of the Rust STFT encoder (`src/stftenc.rs`) with PyTorch, in latent SNR and in DAC codes.
-Run in distill/'s environment, in three steps:
+Run in train/hq's environment, in three steps:
 
-    cd distill
-    uv run --extra cpu python ../tools/stftenc_parity.py prepare --ckpt X:/audio/distill/runs/encB_arm4/ckpt_end_20000.pt \
-        --out ../work/stftenc X:/audio/distill/listen_encoder/arm4_20k/*original*.wav
-    cd .. && cargo test --release --test hq_stftenc -- --ignored real_weights_parity_files
-    cd distill && uv run --extra cpu python ../tools/stftenc_parity.py compare --out ../work/stftenc \
+    cd train/hq
+    uv run --extra cpu python ../../tools/stftenc_parity.py prepare --ckpt runs/encB_arm4/ckpt_0020000.pt \
+        --out ../../work/stftenc <clip.wav> [<clip.wav> ...]
+    cd ../.. && cargo test --release --test hq_stftenc -- --ignored real_weights_parity_files
+    cd train/hq && uv run --extra cpu python ../../tools/stftenc_parity.py compare --out ../../work/stftenc \
         --dac export/weights_44khz_8kbps_0.0.1.pth
 
 prepare: per WAV (16-bit PCM, mono-downmixed, the first --seconds, cut to a whole number of 512-sample frames),
@@ -30,7 +30,7 @@ import torch
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from export_stftenc import forward64, load_encoder  # noqa: E402  (puts distill/ on the path)
+from export_stftenc import forward64, load_encoder  # noqa: E402  (puts train/hq/ on the path)
 
 FRAME = 512
 

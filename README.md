@@ -22,11 +22,13 @@ in a browser, starts quickly and loops without a click.
 | cx2 tables | `models/` | The fitted `.ecxm` tables the coder reads |
 | WebAssembly decoder | `wasm/` | Decodes HQ and EnCodec files in a Web Worker on the CPU. Works everywhere, threaded when the page allows it |
 | WebGPU decoder | `web/` | Decodes EnCodec files in the browser: cx2 in WebAssembly, the network on the GPU |
-| Table tooling | `tools/`, `train/` | Python scripts that fit and check the tables and train their networks |
-| Measurements | `dwp/` | Scripts behind the EnCodec seam and beam-search measurements |
+| C library | `ffi/` | A static library with a C interface: the streaming player and the encoder |
+| foobar2000 component | `foobar/` | `foo_input_pico`, a foobar2000 input component that plays `.pico` files |
+| FFmpeg glue | `ffmpeg/` | A `libpicotone` demuxer and muxer for FFmpeg 8.1, and a build script |
+| Table and network tooling | `tools/`, `train/` | Python scripts that fit and check the tables, train the networks (`train/hq/`) and export the weights |
 
 The table and training tooling lives at the top level (`tools/`, `train/`) rather than inside the crate: it is
-Python, it is only needed to make new tables, and it drives the `picotone dev` commands.
+Python, it is only needed to make new tables and weights, and it drives the `picotone dev` commands.
 
 ## Quick start
 
@@ -55,8 +57,7 @@ The weights are in `weights/`:
 - EnCodec: `encodec_24khz` and `encodec_48khz` (`.json` and `.safetensors`), with Meta's licence notice in
   `weights/EnCodec-MIT.txt`.
 
-To use another folder, point `--weights` or `PICOTONE_WEIGHTS` at it (`ENCODEC_WEIGHTS` is read when
-`PICOTONE_WEIGHTS` is not set). The cx2 tables are read from `models/` (or `--tables` / `PICOTONE_TABLES`).
+To use another folder, point `--weights` or `PICOTONE_WEIGHTS` at it. The cx2 tables are read from `models/` (or `--tables` / `PICOTONE_TABLES`).
 
 Encode with the HQ codec (the default: 44.1 kHz, about 6 kbps per channel at its default 9 codebooks, up to about 10.6 kbps at `--codebooks 16`), or with
 EnCodec (`--fast`, or a preset):
@@ -103,7 +104,7 @@ to the model automatically.
 "Typical file" is the whole `.pico` file, headers and Ogg framing included (HQ: the 23 test clips; EnCodec: two
 120 s music clips).
 
-The EnCodec music presets use a longer segment overlap than EnCodec's own (stride 44800 instead of 47520), which
+The EnCodec music presets use a longer segment overlap than EnCodec's own (stride 44800, where EnCodec's is 47520), which
 removes stock EnCodec's faint once-a-second "beat", and an 8-wide beam search in the quantiser, which gives
 slightly better quality at no decode cost.
 
@@ -111,7 +112,7 @@ slightly better quality at no decode cost.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--fast` | off | EnCodec instead of HQ: `encodec-24k` for mono, `encodec-48k` for stereo |
+| `--fast` | off | EnCodec, not HQ: `encodec-24k` for mono, `encodec-48k` for stereo |
 | `--model` | HQ | The exact model: `hq`, `encodec-48k` or `encodec-24k`; overrides `--fast` and presets |
 | `--channel-format` | `auto` | `auto` (follow the input), `mono` or `stereo`. With HQ, `auto` codes a stereo input whose side is over 40 dB under its mid as mono. A model that can't give the format is an error |
 | `--stereo` | `pick` | HQ only: `lr`, `ms` (mid/side), `parametric`, or `pick` the better on sampled excerpts |
@@ -119,6 +120,8 @@ slightly better quality at no decode cost.
 | `--side-codebooks` | `--codebooks` | HQ mid/side: codebooks for the side |
 | `--layer-codebooks` | none | HQ: also write OUTPUT.picol, a layer up to this many codebooks (2–16, not 10) |
 | `--layer-side-codebooks` | `--layer-codebooks` | HQ mid/side or parametric base: the side's codebooks with the layer |
+| `--ps-bands` | `20` | HQ parametric stereo: parameter bands, 20 or 10 (about half the rate) |
+| `--ps-frames` | `8` | HQ parametric stereo: frames per parameter set, 1, 2, 4, 8 (10.8 sets/s) or 16; the rate is about inversely proportional |
 | `-b, --bandwidth` | `6` | EnCodec only: target kbps; sets the number of codebooks |
 | `--preset` | none | EnCodec only: `music24`, `music12` or `music6` (implies `encodec-48k`); the flags below override it |
 | `--stride` | 47520 | EnCodec 48 kHz only (as are `--crossfade`, `--beam` and `--table`): samples between segment starts, 24000–48000 |
@@ -131,7 +134,7 @@ slightly better quality at no decode cost.
 
 Every decode ends in a look-ahead peak limiter, which lowers the gain smoothly around any sample the decoder
 puts over full scale (WHITEPAPER §3.4). `decode` takes `--float` (32-bit float WAV), `--rescale` (scale the
-whole file down to fit, instead of limiting) and `--no-limit` (the decoder's raw output, for measurements). HQ files decode with the Vocos (iSTFT) decoder, `weights/dac44_vocos.safetensors`; at 1 to 5 codebooks its post-filter removes most frame-boundary clicks and a declicker repairs those left on the frame grid (WHITEPAPER §2.6–2.7). `roundtrip` encodes and decodes in one step. `info` prints the headers, the tags and the bitrate.
+whole file down to fit, with no limiter) and `--no-limit` (the decoder's raw output, for measurements). HQ files decode with the Vocos (iSTFT) decoder, `weights/dac44_vocos.safetensors`; at 1 to 5 codebooks its post-filter removes most frame-boundary clicks and a declicker repairs those left on the frame grid (WHITEPAPER §2.6–2.7). `roundtrip` encodes and decodes in one step. `info` prints the headers, the tags and the bitrate.
 
 ## The `.pico` format
 
@@ -152,17 +155,16 @@ of 10. On EnCodec files it saves 14–30% against plainly packed 10-bit codes:
 The lower figure is on a harder, more varied test set (pop, vocals). It decodes far faster than the neural
 decoders (tens of times real time on one thread).
 
-Four tables ship in `models/`:
+Three tables ship in `models/`:
 
 | Table | What it is |
 |---|---|
 | `cx2_dac44.ecxm` | HQ, every codebook count |
-| `cx2_encodec_48khz_net2_v5.ecxm` | The EnCodec 48 kHz default, with the trained network expert (`net48v2`) |
-| `cx2_encodec_48khz_v5.ecxm` | EnCodec 48 kHz without the network |
+| `cx2_encodec_48khz_net2_v5.ecxm` | EnCodec 48 kHz, with the trained network expert (`net48v2`) |
 | `cx2_encodec_24khz_v5.ecxm` | EnCodec 24 kHz |
 
-A file names its table by hash and decodes only with that exact table. picotone ships only its newest tables;
-when a table is replaced, re-encode files made with the old one. The tables are self-contained (they hold
+A file names its table by hash and decodes only with that exact table, so a file made with any other table must
+be re-encoded. The tables are self-contained (they hold
 the codebook centroids), so a decoder needs only the table and the decoder half of the weights.
 
 ## In the browser
@@ -187,7 +189,8 @@ bit-exact with the command line.
 | WebAssembly, EnCodec 48 kHz, single thread | about 5× (6× in browsers with relaxed SIMD) |
 | WebGPU, EnCodec 48 kHz (f32 weights) | 10–21× |
 
-Playback starts while the rest decodes: first audio arrives after about 0.2–0.6 s (about 0.8 s for HQ at q1–q5).
+Playback starts while the rest decodes: first audio arrives after about 0.1–0.3 s for EnCodec in WebAssembly, 0.1–0.6 s
+on WebGPU, and for HQ about 0.2–0.3 s at q6 and above or about 0.8 s at q1–q5.
 
 ## In foobar2000
 
@@ -217,8 +220,8 @@ ffi\Cargo.toml` checks the encoder against the command line (build the command l
 ## As a library
 
 ```toml
-picotone = { path = "../encodecx", default-features = false }           # no audio file I/O
-picotone = { path = "../encodecx", features = ["audio-io"] }            # plus file reading and WAV writing
+picotone = { path = "../picotone", default-features = false }           # no audio file I/O
+picotone = { path = "../picotone", features = ["audio-io"] }            # plus file reading and WAV writing
 ```
 
 The main entry points:

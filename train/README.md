@@ -1,68 +1,22 @@
-# Training the optional "net" expert
+# train: the cx2 entropy-coder networks
 
-The cx2 entropy model works without this. The net is one extra expert: a small MLP that
-predicts each EnCodec code from the previous four frames' latents. It is the only part of
-the model trained by gradient descent; inference is integer-only (`../src/cx2/net.rs`), so coded
-files stay bit-identical across machines. A table file (`.ecxm`) carries the net only when
-`tools/build_tables.py` is given `--net`.
+This folder trains the two networks inside picotone's cx2 tables:
 
-## What changed for the v2 retrain
+- **The EnCodec "net" expert** (`train_net.py`, `export_net.py`): one expert of the EnCodec cx2 model, in
+  `models/cx2_encodec_48khz_net2_v5.ecxm`. The other experts are counted from data by
+  `tools/build_tables.py`, and a table works without the net.
+- **The HQ network** (`hq_net.py`): the whole cx2 model for HQ streams, `models/cx2_dac44.ecxm`.
 
-| | v1 (`out/net48.pt`, replaced) | v2 (`out/net48v2.pt`, shipped) |
-|---|---|---|
-| data | `train_data_48k.npz`, 6.7 h | `train_data_48k_full.npz`, 24.3 h (13.14 M frames) |
-| batch, steps | 512, 200,000 (28 passes over 3.6 M frames) | 2048, 180,000 (28 passes over 13.14 M frames) |
-| peak learning rate | 1.5e-3 | 3e-3 (one-cycle, 5% warm-up) |
-| bandwidths | 2, 4, 8, 16 | 2, 4, 8, 15, 16 (`music24` has its own embedding) |
-| codebook counts per batch | 16 half the time, else uniform | 15: 35%, 16: 25%, 8: 15%, 4: 15%, 2: 10% (`--k-mix`) |
-| position in segment | none | learned first-layer bias per position bucket |
-| context cuts | 3% of samples at random frames | at segment starts, every 1, 2 or 4 segments (the page lengths) |
-| table | version 4 | version 5: self-contained, carries its centroids |
+The HQ codec's own networks (the STFT encoder, the Vocos decoder, codebooks 10–16 and the post-filter) are
+trained in [`hq/`](hq/README.md).
 
-Why these numbers:
+Both nets are trained with gradient descent but run with integer-only inference in Rust (`../src/cx2/net.rs`,
+`../src/cx2/hq.rs`), so coded files are bit-identical on every machine.
 
-- **Steps.** 28 passes over the set, as v1 made over its smaller one:
-  28 x 13.14 M frames / 2048 = 179,700, rounded to 180,000 steps (369 M frame samples).
-- **Learning rate.** Adam's noise scale grows with the square root of the batch, so 4x the
-  batch takes 2x the rate: 1.5e-3 x 2 = 3e-3. The one-cycle schedule is kept; its warm-up
-  (5% = 9,000 steps) is longer in samples than v1's, which helps at the higher peak. If
-  `train_bits` jumps up or turns NaN in the first 10,000 steps, restart with `--lr 2e-3`.
-- **Position.** The 48 kHz model codes 1 s segments of 150 frames whose first ~30 ms and last
-  ~10 ms are damaged, so code statistics depend on where a frame sits. The net adds a learned
-  bias to its first layer for the frame's position `t mod 150`: one bucket each for frames
-  0-11 and 138-149, nine for the middle (33 buckets). The archives keep each clip whole and
-  segments start every 150 frames from the clip start, so `t` = frames since the clip start
-  (checked against all 1,223 source clips). The coder uses frames since the last
-  reset, which is the same number because resets always fall on segment starts. The one
-  exception is a file's very last segment when the one before it is short (a 149-frame
-  penultimate segment occurs in 1 of 1,223 clips); both sides then still agree.
-  Cost: 384 additions per frame, once per frame (about 26 per code at 15 codebooks, against
-  about 70,000 multiply-adds per code for the rest of the net), plus 50 KB of table.
-- **Speed.** All data (about 0.6 GB on the GPU) stays on the GPU and every batch is gathered
-  there, so no NumPy runs per step; Adam is the fused CUDA one and TF32 matmuls are on
-  (`--no-tf32` turns them off). TF32 and the optional `--amp` (bf16) only change training
-  arithmetic; `export_net.py` measures the float/int gap with fp32 inference of the final
-  weights either way. `torch.compile` is not used: it needs Triton, which PyTorch does not
-  ship for Windows, and the model is small enough that kernel launches, not arithmetic, set
-  the pace. `--data-on-cpu` keeps the codes in host memory and copies pinned batches, for
-  small GPUs.
-- **Safety.** Every 5,000 steps (`--ckpt-every`) the full state (weights, optimiser,
-  schedule, both random generators, step) goes to `OUT.ckpt`; `--resume OUT.ckpt` continues
-  exactly where it stopped (verified: a resumed run ends with bit-identical weights). The
-  network itself (`OUT`), its description (`OUT.json`) and the progress log (`OUT.log`, one
-  JSON line per evaluation, appended) are rewritten at every evaluation (`--eval-every`).
-
-## On the training PC (Ryzen 9 7950X, RTX 3090, Windows 11)
-
-Copy this folder (`train/` at the top of the repository; it was `entropy/train/` before the
-picotone merge) with `train_data_48k_full.npz` and `train_data_48k.npz`.
-Nothing else is needed: no audio, no EnCodec weights, no Rust.
-
-Only uv and `pyproject.toml` are used (no pip, no venv by hand, no requirements file).
-`pyproject.toml` takes torch from the PyTorch CUDA index through `[tool.uv.sources]` and
-`[[tool.uv.index]]`; the index URL ends in the CUDA build (`cu132`), which the NVIDIA driver
-must support (`nvidia-smi` shows the highest CUDA version it supports; a recent 3090 driver
-is fine). Change the suffix there if needed, never install torch by hand.
+Only uv and `pyproject.toml` are used. `pyproject.toml` takes torch from the PyTorch CUDA index through
+`[tool.uv.sources]` and `[[tool.uv.index]]`; the index URL ends in the CUDA build (`cu132`), which the NVIDIA
+driver must support (`nvidia-smi` shows the highest CUDA version it supports). Change the suffix there if
+needed; never install torch by hand.
 
 ```
 cd train
@@ -70,83 +24,76 @@ uv sync --extra cuda
 uv run --extra cuda python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name())"
 ```
 
-The last line must print `True NVIDIA GeForce RTX 3090`. Always pass `--extra cuda` to
-`uv run`, so uv keeps the CUDA build installed.
+Always pass `--extra cuda` (or `--extra cpu`) to `uv run`, so uv keeps that torch build installed. Give every
+long run a timeout and check on it every 10–15 minutes.
 
-### Step 1: the learning-curve check (about 30-60 minutes)
+# The EnCodec net expert
 
-```
-uv run --extra cuda learning_curve.py --data train_data_48k_full.npz
-```
+A small MLP that predicts each EnCodec 48 kHz code from the previous four frames' latents and the part of the
+current frame already coded. A table carries the net only when `tools/build_tables.py` is given `--net`.
 
-Trains on 25%, 50% and 100% of the clips (chosen by clip, deterministically; each share
-contains the smaller ones) for 40,000 steps each at batch 2048, then prints held-out bits per
-code at K = 15, 8 and 4 for both test sets, and the 50% -> 100% gain. A gain above ~0.02 bits
-per code at K=15 means more data still helps and the full run is worth it. Each run has a
-1-hour limit (`--hours-per-run`). Outputs: `out/lc_f025.pt`, `out/lc_f05.pt`, `out/lc_f10.pt`
-with their `.log` and `.json`.
+## Settings
 
-### Step 1b (optional, in parallel or before): the long-context test (about 30-60 minutes)
+| | |
+|---|---|
+| data | `train_data_48k_full.npz`, 24.3 h (13.14 M frames) |
+| batch, steps | 2048, 180,000 (28 passes over 13.14 M frames) |
+| peak learning rate | 3e-3, one-cycle, 5% warm-up |
+| bandwidths | 2, 4, 8, 15, 16 kbps (`music24` has its own embedding) |
+| codebook counts per batch | 15: 35%, 16: 25%, 8: 15%, 4: 15%, 2: 10% (`--k-mix`) |
+| position in segment | a learned first-layer bias per position bucket |
+| context cuts | at segment starts, every 1, 2 or 4 segments (the page lengths) |
 
-```
-uv run --extra cuda train_gru.py --data train_data_48k.npz --steps 20000 --compare
-```
+- **Steps.** 28 × 13.14 M frames / 2048 = 179,700, rounded to 180,000 steps (369 M frame samples).
+- **Learning rate.** If `train_bits` jumps up or turns NaN in the first 10,000 steps, restart with `--lr 2e-3`.
+- **Position.** The 48 kHz model codes 1 s segments of 150 frames whose first ~30 ms and last ~10 ms are
+  damaged, so code statistics depend on where a frame sits. The net adds a learned bias to its first layer for
+  the frame's position `t mod 150`: one bucket each for frames 0-11 and 138-149, nine for the middle (33
+  buckets). The archive keeps each clip whole and segments start every 150 frames from the clip start, so `t` =
+  frames since the clip start. The coder uses frames since the last reset, which is the same number because
+  resets always fall on segment starts. Cost: 384 additions per frame (about 26 per code at 15 codebooks,
+  against about 70,000 multiply-adds per code for the rest of the net), plus 50 KB of table.
+- **Speed.** All data (about 0.6 GB) stays on the GPU and every batch is gathered there; Adam is the fused CUDA
+  one and TF32 matmuls are on (`--no-tf32` turns them off). TF32 and the optional `--amp` (bf16) only change
+  training arithmetic; `export_net.py` measures the float/int gap with fp32 inference of the final weights.
+  `torch.compile` is not used: it needs Triton, which PyTorch does not ship for Windows, and at this size kernel
+  launches, not arithmetic, set the pace. `--data-on-cpu` keeps the codes in host memory and copies pinned
+  batches, for small GPUs. Memory: under 3 GB of GPU memory, under 2 GB of RAM.
+- **Safety.** Every 5,000 steps (`--ckpt-every`) the full state (weights, optimiser, schedule, both random
+  generators, step) goes to `OUT.ckpt`; `--resume OUT.ckpt` continues exactly where it stopped (a resumed run
+  ends with bit-identical weights). The network (`OUT`), its description (`OUT.json`) and the progress log
+  (`OUT.log`, one JSON line per evaluation, appended) are rewritten at every evaluation (`--eval-every`).
 
-Float only, no Rust inference yet. It trains a GRU trunk (one layer, 320 units, state
-carried over chunks of 300 frames starting on segment starts and reset at each chunk start)
-in front of the same per-code heads, and the MLP baseline with `train_net.py` for the same
-20,000 steps (about the same number of frames per step: 7 chunks x 300 vs 2048). Both are
-scored on the same held-out chunks, all frames, with the MLP's context cut at chunk starts
-too. It prints bits per code at K = 4, 8, 15, 16 and the verdict; the kill rule is a gain under
-0.2 bits per code at K = 15. `--arch attn` tries two causal attention layers over the last 32
-frames instead. Multiply-adds per frame (printed too): MLP trunk 295 k, GRU trunk 860 k, attention
-trunk 1.9 M, heads at K=15 1.04 M, so a GRU net would cost about 1.4x today's per
-frame. Running it at the same time as step 1 is fine (both fit in 24 GB) but each then
-runs slower. Outputs: `out/cmp_mlp.pt` (+ `.log`), `out/cmp_gru.pt`, and the printed table.
+## Training
 
-### Step 2: the full run (about 45-75 minutes)
-
-```
-uv run --extra cuda train_net.py --data train_data_48k_full.npz --out out/net48v2.pt
-```
-
-The defaults are the v2 settings above. Expected time: the v1 run (200,000 steps at batch
-512) took 1.5-2 h, i.e. 27-36 ms per step, about a third of it NumPy batch assembly on one
-core, which is now gone. Steps at batch 2048 are 4x the arithmetic but the 3090 is
-launch-bound at this size, so expect roughly 15-25 ms per step: 45-75 minutes for 180,000
-steps, plus under 5 minutes of evaluations. Every log line has `ms_per_step`; at step 2000,
-`ms_per_step x 3` is the total in minutes. Memory: under 3 GB of GPU memory, under 2 GB of RAM.
-
-What to watch: `test_old_K16` (bits per code on the old test set, 16 codebooks, all context)
-is directly comparable with v1's log: 8.30 at 20,000 steps, 8.20 at 40,000, 7.87 at the end.
-`test_old_K15` is `music24`'s number.
-
-### Step 3: if it stops
-
-A crash, a reboot or Ctrl+C loses at most 5,000 steps:
+Training needs only the data archive (below): no audio, no EnCodec weights, no Rust.
 
 ```
-uv run --extra cuda train_net.py --data train_data_48k_full.npz --out out/net48v2.pt --resume out/net48v2.pt.ckpt
+uv run --extra cuda train_net.py --data train_data_48k_full.npz --out out/net48v3.pt
 ```
 
-The checkpoint's settings (steps, batch, learning rate, fraction, bandwidths, sizes, seed)
-override the command line, so the schedule continues unchanged. `OUT.log` is appended to.
-`OUT.ckpt` is about 17 MB and is not needed afterwards.
+On an RTX 3090 a step takes roughly 15-25 ms, so 180,000 steps take 45-75 minutes plus under 5 minutes of
+evaluations. Every log line has `ms_per_step`; at step 2000, `ms_per_step x 3` is the total in minutes. Watch
+`test_old_K16` (bits per code on the old test set, 16 codebooks, all context); `test_old_K15` is `music24`'s
+number.
 
-### Step 4: what to bring back
+If it stops, a run loses at most 5,000 steps:
 
-Into `train/out/` on the development machine:
+```
+uv run --extra cuda train_net.py --data train_data_48k_full.npz --out out/net48v3.pt --resume out/net48v3.pt.ckpt
+```
 
-- `out/net48v2.pt`, `out/net48v2.pt.json`, `out/net48v2.pt.log` (required);
-- `out/lc_f025.pt.log`, `out/lc_f05.pt.log`, `out/lc_f10.pt.log` and the printed learning-curve table;
-- `out/cmp_mlp.pt.log` and the printed long-context table (and `out/cmp_gru.pt` if it won).
+The checkpoint's settings (steps, batch, learning rate, fraction, bandwidths, sizes, seed) override the command
+line, so the schedule continues unchanged. `OUT.ckpt` (about 17 MB) is not needed afterwards.
 
-`out/net48.pt` (v1) stays as it is.
+Larger networks are allowed within the integer format's limits: `--h1` up to 512, `--h2` up to 256,
+`--rank-low` / `--rank-high` up to 128. Cost per coded symbol grows with the head ranks (a 1024 × rank product
+per code), so check speed after converting.
 
-## Bringing it back (development machine)
+## Making a table from it
 
-From the repository root, with the files above in `train/out/`. The new table gets a new
-name; the shipped tables never change in place (streams store their table's hash).
+From the repository root, with the network in `train/out/`. A new table gets a new name (streams store their
+table's hash).
 
 ```
 cargo build --release
@@ -154,15 +101,14 @@ cargo build --release
 # 1. Export check: float vs emulated-integer bits per code at K = 16, 15, 8, 4; must print OK.
 #    (Also checks that the GPU batching equals the NumPy reference.)
 cd train
-uv run --extra cpu export_net.py --ckpt out/net48v2.pt --data train_data_48k_full.npz
+uv run --extra cpu export_net.py --ckpt out/net48v3.pt --data train_data_48k_full.npz
 cd ..
 
-# 2. Build the lean hybrid table (version 5, centroids inside).
-uv run --project tools tools/build_tables.py 48k models/cx2_encodec_48khz_net2_v5.ecxm --net train/out/net48v2.pt --reset 2 --no-hist --no-static --geo 0
+# 2. Build the lean hybrid table.
+uv run --project tools tools/build_tables.py 48k models/cx2_encodec_48khz_net3_v5.ecxm --net train/out/net48v3.pt --reset 2 --no-hist --no-static --geo 0
 
-# 3. Determinism and size on the preset test sets, new table then the shipped one (name the
-#    new table after the next network, for example net3). Each line runs `picotone dev
-#    check`: .pico pack / unpack compare, seek decode, a stream without a length field,
+# 3. Determinism and size on the preset test sets, new table then the shipped one. Each line runs
+#    `picotone dev check`: .pico pack / unpack compare, seek decode, a stream without a length field,
 #    baseline (non-SIMD) path compare; it fails on any differing code.
 foreach ($t in "cx2_encodec_48khz_net3_v5", "cx2_encodec_48khz_net2_v5") {
   foreach ($s in "ps_music24_old 15", "ps_music24_new 15", "ps_music12_old 8", "ps_music12_new 8", "ps_music6_old 4", "ps_music6_new 4") {
@@ -177,98 +123,79 @@ cargo clippy --all-targets
 cargo test --release
 ```
 
-Compare the `bits/code` and `% saved` lines of step 3 between the two tables (WHITEPAPER §6.3
-has the shipped `net48v2` table's numbers: music24 8.00 / 8.64, music12 7.39 / 8.23, music6
-7.00 / 7.95 bits per code, old / new set). Each run also writes
-`work/eval_<table>_<set>_rauto.json`. A version 5 table needs no EnCodec weights.
+Compare the `bits/code` and `% saved` lines of step 3 between the two tables (WHITEPAPER §6.3 has the shipped
+table's numbers: music24 8.00 / 8.64, music12 7.39 / 8.23, music6 7.00 / 7.95 bits per code, old / new set).
+Each run also writes `work/eval_<table>_<set>_rauto.json`.
 
-5. **Make it the default** if it wins: point the 48 kHz default in `src/main.rs`
-   (`default_table`), `wasm/src/lib.rs`, `wasm/tools/export-models.mjs` and
-   `web/tools/export-weights.mjs` (`TABLES`) at the new file, **delete the old table** from
-   `models/`, re-export the browser models, and rerun the tests. picotone ships only its newest
-   tables; files coded with the old table must be re-encoded. Keep the new file name: the table
-   hash in old files then fails cleanly with a "wrong table" error.
+**Make it the default** if it wins: point the 48 kHz default in `src/main.rs` (`default_table`),
+`wasm/src/lib.rs`, `wasm/tools/export-models.mjs` and `web/tools/export-weights.mjs` (`TABLES`) at the new
+file, delete the old table from `models/`, re-export the browser models, rerun the tests, and re-encode every
+file coded with the old table. A file coded with a table picotone does not ship fails cleanly with a "wrong
+table" error, since its table hash matches none.
 
-## Table versions
+## The table format
 
-- **Version 4** (the tables before the picotone merge, kept in `work/legacy_tables/`):
-  centroids come from the EnCodec weights, rounded by `features.rs::to_fixed`; the hash covers
-  the table bytes and those centroids. Its net is in format 1. `picotone dev` still loads them
-  (with `--codec <weights>`), but `.pico` files are always written with version 5 tables.
-  `tools/upgrade_table.py` converted each one to version 5 exactly (the same predictions), and
-  `build_tables.py` with the settings above rebuilds the net table byte for byte.
-- **Version 5** (all shipped tables): the fixed-point centroids the coder uses are stored in the table, right
-  after the exponential table, `[codebook][code][128]` as i16 (16 x 1024 x 128 x 2 bytes =
-  4 MiB at 48 kHz; the latent dimension is 128). `Model::from_table` needs nothing else, and
-  the hash covers exactly what the coder computes with, so f16 or otherwise different weight
-  files cannot change it. Its net, if any, is in format 2 (the position input; period 0
-  turns it off, so a v1 net can be stored too). Old binaries reject version 5 cleanly.
-  Size: the centroids add 4,194,304 bytes. The shipped lean hybrid is 3,158,324 bytes (2.14 MB
-  gzipped); the smoke-test v5 lean hybrid is 7,405,014 bytes (4.59 MB gzipped). Storing less
-  would not be exact: the geo expert is off in the lean table, but every codebook's full
-  128-dimensional centroids enter the centroid sums the net reads (previous frames and the
-  partial sum), at the full 13-bit precision (values within +-4095). The only exact saving is
-  repacking to 13 bits per value (3.4 MB instead of 4.2 MB), which gzip already mostly gets.
+All tables are version 5. The fixed-point centroids the coder uses are stored in the table, right after the
+exponential table, `[codebook][code][128]` as i16 (16 × 1024 × 128 × 2 bytes = 4 MiB at 48 kHz; the latent
+dimension is 128). `Model::from_table` needs nothing else, and the hash covers exactly what the coder computes
+with, so f16 or otherwise different weight files cannot change it. The net is in format 2 (with the position
+input; period 0 turns it off). The shipped lean hybrid is 3,158,324 bytes (2.14 MB gzipped). Storing less
+would not be exact: the geo expert is off in the lean table, but every codebook's full 128-dimensional
+centroids enter the centroid sums the net reads (previous frames and the partial sum), at the full 13-bit
+precision (values within ±4095). The only exact saving is repacking to 13 bits per value (3.4 MB, against
+4.2 MB), which gzip already mostly gets.
 
-## Making or extending the data archive
+## The data archive
 
 ```
 uv run --extra cpu collect_data.py --tag 48k --weights ../weights \
-    --fit "../work/ecdc/fit__*.48k.ecdc" "../work/ecdc2/fit2__*.48k.ecdc" \
-    --test-old "../work/ecdc/test__*.48k.ecdc" --test-new "../work/ecdc2/test2__*.48k.ecdc" \
+    --fit "<codes>/fit__*.48k.pico" --test-old "<codes>/test__*.48k.pico" --test-new "<codes>/test2__*.48k.pico" \
     --out train_data_48k_full.npz
 ```
 
-The inputs are encoded at 24 kbps (16 codebooks for the 48 kHz model; `--tag 24k` and 32
-codebooks for the other one). The existing archive is flat `.ecdc` files (the codec's raw
-codes) from the encoder before the picotone merge: `work/ecdc` holds the phase 1 clips and
-`work/ecdc2` the phase 2 clips; `DATA_SOURCES.json` lists where each came from and its licence.
-`collect_data.py` still reads them directly, and it also reads `.pico` files (through
-`picotone dev codes`; build picotone first or set `PICOTONE_EXE`) and code-bundle `.npy`
-files. The codes, and so the archive, are the same whichever container carried them (checked
-on 48 kHz and 24 kHz clips packed both ways with `picotone dev pack`).
+The inputs are the codes of a folder of 48 kHz stereo WAV clips you provide, from the public-domain and CC0
+sources listed in `../DATA_SOURCES.json`, encoded at 24 kbps with no preset (16 codebooks and the stock stride;
+`--tag 24k` and 32 codebooks for the 24 kHz model):
 
-To add audio: clip it to 48 kHz stereo WAV, encode it with
-`picotone encode in.wav fit3__<genre>__<name>.48k.pico --model encodec-48k -b 24 --beam 1` (no preset, so
-it keeps the stock stride and 16 codebooks like the rest of the set), add it to
-`DATA_SOURCES.json`, and pass it to `--fit` beside the `.ecdc` patterns. Then re-run the
-command above. Test streams must stay out of `--fit`. Each clip is stored
-whole (`*_lengths`), which is what the position input relies on.
+```
+picotone encode in.wav fit__<genre>__<name>.48k.pico --model encodec-48k -b 24 --beam 1
+```
 
-Larger networks are allowed within the integer format's limits: `--h1` up to 512, `--h2`
-up to 256, `--rank-low` / `--rank-high` up to 128. Cost per coded symbol grows with the head
-ranks (a 1024 x rank product per code), so check speed after converting.
+`collect_data.py` reads `.pico` files (through `picotone dev codes`; build picotone first or set
+`PICOTONE_EXE`), code-bundle `.npy` files, and flat EnCodec code files (`.ecdc`, read by `tools/ecdcio.py`);
+the codes, and so the archive, are the same whichever container carried them. Test streams must stay out of
+`--fit`. Each clip is stored whole (`*_lengths`), which the position input relies on. List every new source
+in `DATA_SOURCES.json`.
 
 # The HQ table (`models/cx2_dac44.ecxm`)
 
-HQ streams (DAC 44 kHz codes) are coded by a separate cx2 model: one integer network, no other
-experts (`../src/cx2/hq.rs`). `hq_net.py` trains it and writes its table. The table depends only
-on the codes it is trained on and on DAC's 9 x 1024 codebook vectors (`quantK.codebook_unit` in
-`dac44_quantizer.safetensors`, a fixed half of each code's embedding). So a new encoder that keeps
-those codebooks needs only the three steps below, and nothing else changes.
+HQ streams (DAC 44 kHz codes) are coded by their own cx2 model: one integer network, no other experts
+(`../src/cx2/hq.rs`). `hq_net.py` trains it and writes its table. The table depends only on the codes it is
+trained on and on DAC's 9 × 1024 codebook vectors (`quantK.codebook_unit` in `dac44_quantizer.safetensors`, a
+fixed half of each code's embedding). So a new encoder that keeps those codebooks needs only the three steps
+below.
 
-The fit set is every clip of the `fit` split (`clips_fit.json`, X:/audio/work/wav) and of the `fit2`
-split (`clips2.json`, X:/audio/work/wav2) except the clips in `EXCLUDE` in `tools/dac_codes.py`
-(the six DTRASH clips that X:/audio/distill/data/pd.jsonl flags `drop:dtrash-distorted`, and two
-clips of digital silence). The test set is the 23 clips of the `test` split (`clips_test.json`).
-No fit clip shares a source file or URL with a test clip; some share an album (other Goldberg
-variations, Chopin pieces and Brahms symphonies).
+The fit set is every clip of the `fit` and `fit2` splits except the clips in `EXCLUDE` in `tools/dac_codes.py`
+(six clipped, distorted DTRASH masters and two clips of digital silence). The test set is the 23 clips of the
+`test` split. The clips are a folder of WAVs you provide, from the sources in `../DATA_SOURCES.json`, with a
+JSON list per split (`[{name, split}]`). No fit clip shares a source file or URL with a test clip; some share
+an album (other Goldberg variations, Chopin pieces and Brahms symphonies).
 
 ```sh
 # 1. Dump codes: per clip one [frames, 16] .npy per coded channel and a .json sidecar.
 #    Runs `picotone encode --dump-codes` at 16 codebooks (no cx2 coding, so any table loads);
-#    skips clips already dumped (about 7 s per clip on the PC, 2.8 s on the laptop).
-#    Point PICOTONE_EXE at a copy of the binary if you rebuild picotone meanwhile.
-python ../tools/dac_codes.py --list X:/audio/work/clips_fit.json --split fit --wav X:/audio/work/wav \
+#    skips clips already dumped (about 3-7 s per clip). Point PICOTONE_EXE at a copy of the
+#    binary if you rebuild picotone meanwhile.
+python ../tools/dac_codes.py --list <clips>/clips_fit.json --split fit --wav <clips>/wav \
     --out ../work/dac_codes/fit --threads 4 --jobs 4
-python ../tools/dac_codes.py --list X:/audio/work/clips2.json --split fit2 --wav X:/audio/work/wav2 \
+python ../tools/dac_codes.py --list <clips>/clips2.json --split fit2 --wav <clips>/wav2 \
     --out ../work/dac_codes/fit2 --threads 4 --jobs 4
-python ../tools/dac_codes.py --list X:/audio/work/clips_test.json --split test --wav X:/audio/work/wav \
+python ../tools/dac_codes.py --list <clips>/clips_test.json --split test --wav <clips>/wav \
     --out ../work/dac_codes/test --threads 4 --jobs 4
 
 # 2. Train: tiers mixed per channel (q1-q3 6% each, q4-q6 10%, q9 22%, q11-q16 5%; never q7,
 #    q8 or q10), 80-frame pages, 8 frames of history. Prints bits per code per tier and per role
-#    on the test codes. On the laptop GPU (--device cuda) 80,000 steps take about 9 minutes; on
+#    on the test codes. On a laptop GPU (--device cuda) 80,000 steps take about 9 minutes; on
 #    the CPU about 1.2 s per step at 16 codebooks, so use the GPU.
 uv run --extra cpu python hq_net.py train --fit ../work/dac_codes/fit ../work/dac_codes/fit2 \
     --test ../work/dac_codes/test --weights ../weights --out out/hq_net.pt --steps 80000 --device cuda
@@ -279,47 +206,39 @@ uv run --extra cpu python hq_net.py export --ckpt out/hq_net.pt --test ../work/d
     --weights ../weights --table ../models/cx2_dac44.ecxm --fixture ../tests/data/cx2_dac44_fixture.json
 ```
 
-Then `cargo test --release --test hq_cx2` checks Rust against the fixture: the logits on the AVX2
-and portable paths, page round trips, and truncation. `picotone --threads 1 dev dac-pack
-models/cx2_dac44.ecxm ../work/dac_codes/test` reports the real coded size per tier and the cx2
-time. A new table changes the table hash, so HQ files coded with the old one must be re-encoded.
-There is no backward compatibility: ship the new table only.
+Then `cargo test --release --test hq_cx2` checks Rust against the fixture: the logits on the AVX2 and portable
+paths, page round trips, and truncation. `picotone --threads 1 dev dac-pack models/cx2_dac44.ecxm
+../work/dac_codes/test` reports the real coded size per tier and the cx2 time. A new table changes the table
+hash, so HQ files coded with another table must be re-encoded; ship the new table only.
 
-What the network sees: the channel's previous 8 frames *in the same page* (pages are 80 frames,
-and every page and channel starts empty), the codebooks already coded in this frame, and the
-channel's role (left/right, mid or mono, side). Choices measured on the 23 test clips (stage 0,
-109 fit clips, `dac_cx_probe.py`):
+What the network sees: the channel's previous 8 frames *in the same page* (pages are 80 frames, and every page
+and channel starts empty), the codebooks already coded in this frame, and the channel's role (left/right, mid
+or mono, side). Choices measured on the 23 test clips:
 
 - **History.** 4 frames costs 0.03 bits per code more than 8, and 16 frames buys nothing.
 - **Other channel.** Coding the other stereo channel as an input saves under 0.01 bits.
 - **Page length.** Longer pages save under 0.03 bits.
 - **Additive experts** (codebook pairs, the codebook geometry): under 0.006 bits together.
-- **More fit data and longer training** help: half the fit data costs 0.18 bits, and 12k steps
-  beat 6k by 0.10 bits.
-- **Fit data, stage 1.** Going from 190 fit clips to 490 (fit plus fit2, 40k steps) saved 0.47
-  bits per code at q9, from 8.75 to 8.28.
-- **Fit data and steps, stage 2** (STFT encoder codes, float net, bits per code at q9 / q3 on the
-  test codes; "other" is the 13 test clips with no album in the fit set):
+- **Fit data and steps** (STFT encoder codes, float net, bits per code at q9 / q3 on the test codes; "other" is
+  the 13 test clips with no album in the fit set):
 
   | fit set | steps | all 23 clips | other 13 |
   |---|---|---|---|
-  | stage 1: 407 clips, 16.8 channel-hours | 40k | 7.984 / 7.100 | 8.283 / 7.405 |
-  | stage 1 | 80k | 7.893 / 7.060 | 8.204 / 7.372 |
+  | 407 clips, 16.8 channel-hours | 40k | 7.984 / 7.100 | 8.283 / 7.405 |
+  | 407 clips | 80k | 7.893 / 7.060 | 8.204 / 7.372 |
   | all fit and fit2: 1,110 clips, 45.3 channel-hours | 40k | 8.018 / 7.111 | 8.283 / 7.388 |
   | all fit and fit2 | 80k | 7.909 / 7.054 | 8.188 / 7.338 |
   | all fit and fit2, 16 codebooks (shipped) | 80k | 7.854 / 7.125 | |
 
-  Steps matter more than data here. The stage-1 set's 80k fit wins at q9 on all 23 clips only
-  through the four Goldberg test clips (0.13-0.23 bits each): 27 of its 407 clips are other
-  variations from the same recording. On the other 13 clips the larger set wins at both q9 and
-  q3, so the 9-codebook table was the 80k fit on 1,110 clips.
-- **16 codebooks** (stage 3, `hq_net16.pt` sha256 99d1d05a..., trained on the laptop GPU at 145
-  steps/s). The same 1,110 clips dumped at 16 codebooks. Against the 9-codebook table it saves
-  0.055 bits at q9 and costs 0.071 at q3, since q1-q3 get less of the tier mix. Real coded size
-  on the 23 test clips (`dev dac-pack`), kbps per channel: q1 0.60, q3 1.84, q6 3.94, q9 6.09,
-  q10 6.56, q11 7.32, q12 8.06, q13 8.38, q14 9.13, q15 9.87, q16 10.57. Codebooks 10 and 13 are
-  cheap (5.6 and 3.8 bits per code at q16: they use few of their entries).
-- **Head rank.** Rank 64 costs 0.085 bits at q9 and 0.048 at q3 against rank 128, and decodes only
-  about 1.2x faster. The shipped table keeps rank 128.
+  Steps matter more than data here. The 407-clip set wins at q9 on all 23 clips only through the four Goldberg
+  test clips (0.13-0.23 bits each): 27 of its 407 clips are other variations from the same recording. On the
+  other 13 clips the larger set wins at both q9 and q3, so the table uses all 1,110 clips.
+- **16 codebooks.** Against a 9-codebook table on the same clips, the 16-codebook table saves 0.055 bits at
+  q9 and costs 0.071 at q3, since q1-q3 get less of the tier mix. Real coded size on the 23 test clips
+  (`dev dac-pack`), kbps per channel: q1 0.60, q3 1.84, q6 3.94, q9 6.09, q10 6.56, q11 7.32, q12 8.06,
+  q13 8.38, q14 9.13, q15 9.87, q16 10.57. Codebooks 10 and 13 are cheap (5.6 and 3.8 bits per code at q16:
+  they use few of their entries).
+- **Head rank.** Rank 64 costs 0.085 bits at q9 and 0.048 at q3 against rank 128, and decodes only about 1.2x
+  faster. The table uses rank 128.
 
 The integer table codes within 0.002 bits per code of the float network.

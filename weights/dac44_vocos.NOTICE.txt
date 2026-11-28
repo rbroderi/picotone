@@ -1,4 +1,4 @@
-This decoder is a distilled student of DAC (descript-audio-codec, 44 kHz weights), MIT licence,
+This decoder is a Vocos decoder trained on DAC 44 kHz codes (descript-audio-codec, 44 kHz weights), MIT licence,
 Copyright (c) 2023-present, Descript. It is a derivative of DAC's MIT weights; the MIT notice applies.
 
 It was trained on third-party audio (tracks by licence: by 9423, by-sa 32630, cc0 901, fal 663, pd 425). Every training track is credited, with its

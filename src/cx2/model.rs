@@ -17,9 +17,8 @@
 //! Logits are integers in units of `2^-frac_bits` bits. All tables except
 //! the optional network are log-likelihood ratios (or an SVD of them)
 //! obtained by counting on a fit set; the network is trained by gradient
-//! descent. Any expert can be absent from a table file. A version 5 table also
-//! stores the fixed-point centroids, so it alone defines the coder (and its hash);
-//! a version 4 table takes them from the codec's weights. No step uses
+//! descent. Any expert can be absent from a table file. The table also stores
+//! the fixed-point centroids, so it alone defines the coder (and its hash). No step uses
 //! floating point, so the frequencies, and therefore the coded bitstream,
 //! are identical on every machine.
 
@@ -32,11 +31,9 @@ use crate::cx2::kernels::Simd;
 use crate::cx2::net::{Net, NetState};
 
 const TABLE_MAGIC: &[u8; 4] = b"ECXM";
-/// Table whose centroids come from the codec's weights; its net has no position input.
-const VERSION_WEIGHTS: u32 = 4;
-/// Table that carries its own fixed-point centroids (right after the exponential
-/// table, `[codebook][code][dimension]` as i16) and whose net, if any, is in the
-/// second format with the position input (see [`crate::cx2::net`]).
+/// The table version: it carries its own fixed-point centroids (right after the
+/// exponential table, `[codebook][code][dimension]` as i16), and its net, if any,
+/// has the position input (see [`crate::cx2::net`]).
 const VERSION_SELF_CONTAINED: u32 = 5;
 /// History experts per codebook.
 const HISTORIES: usize = 2;
@@ -262,7 +259,7 @@ fn fnv1a(hash: u64, bytes: &[u8]) -> u64 {
     })
 }
 
-/// The hash a self-contained (version 5) table file gives its model, without
+/// The hash a table file gives its model, without
 /// parsing the rest of the table; `None` for other files.
 ///
 /// Players use it to pick the table a stream names from a set of files.
@@ -274,26 +271,11 @@ pub fn self_contained_hash(table: &[u8]) -> Option<u64> {
 }
 
 impl Model {
-    /// Builds a model from a table file and the codec's `safetensors` weights.
-    ///
-    /// A version 5 table carries its own centroids; for it the weights are only
-    /// checked (they must round to exactly the stored centroids) and may be empty.
+    /// Builds a model from a table file.
     ///
     /// # Errors
-    /// Fails when either input is malformed or they do not fit together.
-    pub fn load(table: &[u8], weights: &[u8]) -> Result<Self> {
-        Self::parse(table, Some(weights))
-    }
-
-    /// Builds a model from a self-contained (version 5) table alone.
-    ///
-    /// # Errors
-    /// Fails when the table is malformed or needs the codec's weights (version 4).
+    /// Fails when the table is malformed.
     pub fn from_table(table: &[u8]) -> Result<Self> {
-        Self::parse(table, None)
-    }
-
-    fn parse(table: &[u8], weights: Option<&[u8]>) -> Result<Self> {
         let mut cur = Cursor {
             bytes: table,
             pos: 0,
@@ -301,10 +283,9 @@ impl Model {
         ensure!(cur.take(4)? == TABLE_MAGIC, "not a model table (bad magic)");
         let version = cur.u32()?;
         ensure!(
-            version == VERSION_WEIGHTS || version == VERSION_SELF_CONTAINED,
+            version == VERSION_SELF_CONTAINED,
             "unsupported model table version {version}"
         );
-        let self_contained = version == VERSION_SELF_CONTAINED;
         let codebooks = cur.size()?;
         let frac_bits = cur.u32()?;
         let floor = cur.u32()?;
@@ -321,14 +302,7 @@ impl Model {
         let freq: Vec<u32> = (0..=MAX_SHIFT)
             .flat_map(|shift| exp.iter().map(move |&e| (e >> shift) + floor))
             .collect();
-        let stored = if self_contained {
-            Some(Centroids::from_fixed(
-                cur.i16s(codebooks * CARD * DIM)?,
-                codebooks,
-            )?)
-        } else {
-            None
-        };
+        let centroids = Centroids::from_fixed(cur.i16s(codebooks * CARD * DIM)?, codebooks)?;
         let mut layers = Vec::with_capacity(codebooks);
         for _ in 0..codebooks {
             let bias = cur.logits(CARD)?;
@@ -353,30 +327,13 @@ impl Model {
         let net = if cur.u32()? == 0 {
             None
         } else {
-            let (net, used) = Net::parse(&table[cur.pos..], codebooks, self_contained)?;
+            let (net, used) = Net::parse(&table[cur.pos..], codebooks)?;
             cur.pos += used;
             Some(net)
         };
         ensure!(cur.pos == table.len(), "model table has trailing bytes");
-        let table_hash = fnv1a(0xcbf2_9ce4_8422_2325, table);
-        let (centroids, hash) = if let Some(stored) = stored {
-            // The table holds everything the coder computes with, so it alone is hashed.
-            if let Some(weights) = weights.filter(|w| !w.is_empty()) {
-                ensure!(
-                    Centroids::from_safetensors(weights, codebooks)?.values() == stored.values(),
-                    "the weights do not round to the table's centroids"
-                );
-            }
-            (stored, table_hash)
-        } else {
-            let weights = weights.context("this model table version needs the codec's weights")?;
-            let centroids = Centroids::from_safetensors(weights, codebooks)?;
-            let hash = centroids
-                .values()
-                .iter()
-                .fold(table_hash, |h, v| fnv1a(h, &v.to_le_bytes()));
-            (centroids, hash)
-        };
+        // The table holds everything the coder computes with, so it alone is hashed.
+        let hash = fnv1a(0xcbf2_9ce4_8422_2325, table);
         let recency_steps = State::new(&centroids, 1)?.recency_steps();
         Ok(Self {
             centroids,

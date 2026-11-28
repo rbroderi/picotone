@@ -17,11 +17,12 @@ picotone is a neural audio codec in safe Rust, written for one consumer: a local
 
 Both store their codes in **`.pico`** files: Ogg pages that each decode on their own, coded losslessly with
 **cx2**, an integer-only predictive model and range coder that gives the same bits on every CPU, in
-WebAssembly and on a GPU. Decoders run natively, in WebAssembly (both codecs) and on WebGPU (EnCodec).
+WebAssembly and on a GPU. Decoders run natively, in WebAssembly (both codecs), on WebGPU (EnCodec), and through
+a C library in foobar2000 and FFmpeg.
 
 The EnCodec path has three changes to the stock codec:
 
-1. **A longer segment overlap** (stride 44800 instead of 47520), which removes stock EnCodec's audible
+1. **A longer segment overlap** (stride 44800, where EnCodec's is 47520), which removes stock EnCodec's audible
    once-per-second seam.
 2. **Beam-search quantisation**, +0.16 to +0.27 dB SNR at no decode cost.
 3. **Gapless loops**: wrap-around padding that the decoder trims away.
@@ -49,7 +50,7 @@ The 48 kHz model normalises each segment by its RMS and stores that scale.
 RVQ of 9 codebooks of 1024 entries. picotone keeps DAC's code space and quantiser but uses its own encoder and
 decoder, and extends the quantiser to 16 codebooks (§2).
 
-picotone uses its own container, `.pico` (§7), not Meta's `.ecdc`.
+Both codecs are stored in picotone's own container, `.pico` (§7).
 
 ## 2. The HQ codec
 
@@ -112,8 +113,8 @@ alone. A player upgrades a playing file by restarting at the current position wi
 
 ### 2.5 Speed
 
-The WebAssembly decoder runs HQ at about 4.2–4.7× real time for single-threaded stereo (the low end at q1–q5, with the post-filter and declicker), in about 77 MiB of
-memory.
+The WebAssembly decoder runs HQ at about 4.2–4.7× real time for single-threaded stereo (the low end at q1–q5,
+with the post-filter and declicker), in about 100 MiB of memory.
 
 ### 2.6 The low-tier post-filter
 
@@ -129,9 +130,8 @@ the decoder frozen, removes most of them. It runs between the decoder's head and
 - **Output:** `S' = S exp(tanh(o))`, a real gain between e^-1 and e^1 per bin and frame. The phase is never
   changed; the gain is what the post-filter has to work with.
 
-Training used the decoder's mel and multi-resolution STFT losses plus adversarial and feature-matching terms
-from a discriminator trained from scratch alongside it; a post-filter trained on the spectral losses alone, or
-one allowed to change the phase, sounded metallic. At 6 codebooks and above the post-filter does not run, and
+Training uses the decoder's mel and multi-resolution STFT losses plus adversarial and feature-matching terms
+from a discriminator trained from scratch alongside it (`train/hq/`). At 6 codebooks and above the post-filter does not run, and
 the decode is the decoder's own, bit for bit.
 
 The 4 k7 convolutions add 12 frames of context per side: a chunked or streamed decode carries 41 frames per side
@@ -150,7 +150,7 @@ codebooks, `declick::Declicker` finds and repairs them:
 - **Grid gate:** consonants and drum hits are hits too, but they fall in all four quarters alike. A candidate is
   repaired only if, within 2 s of it, first-quarter hits outnumber the mean of the other quarters by 1.5 times.
   In a file's first 2 s the gate looks ahead only as far as the file has gone (t seconds at time t), so
-  playback need not wait 2 s for it: first audio in the browser comes after about 0.8 s instead of 0.25 s.
+  playback need not wait 2 s for it: first audio in the browser comes after about 0.8 s.
   On speech, rock and hip-hop the gate repairs nothing; on the Boléro it keeps nearly every first-quarter hit.
 - **Repair:** the 192 samples around the window are rebuilt per channel by Janssen's iterative autoregressive
   interpolation (Janssen, Veldhuis and Vries 1986). An order-32 predictor is fitted to 1,024 samples either
@@ -212,8 +212,8 @@ Both are bit-identical to a whole-file decode, and their memory depends on the c
 ### 3.4 The limiter
 
 A decoder network can go over full scale where the original did not. HQ at q3 does so in the Boléro's climax,
-up to +3.4 dBFS (177 samples, all after 821 s), where the original peaks at −0.6 dBFS. Instead of clipping those
-samples, `limiter::Limiter` lowers the gain around them, shared across channels, to a ceiling of 0.99:
+up to +3.4 dBFS (177 samples, all after 821 s), where the original peaks at −0.6 dBFS. `limiter::Limiter`
+lowers the gain around such samples, shared across channels, to a ceiling of 0.99, so nothing is clipped:
 
 - **Shape:** the gain falls over 5 ms before an over, is held for 50 ms after it, and returns over 5 ms. It is
   the mean over ±2.5 ms of the lowest gain any sample needs within the hold, so no sample ends up over the
@@ -290,9 +290,8 @@ beam-1 files with cx2.
 ### 6.1 Approach
 
 At 10 bits per code, codes are far from random: each codebook's usage is skewed, codes repeat in time, and each
-RVQ stage depends on the ones before. A large language model can exploit this, but too slowly for browser
-playback, since it must run on both encode and decode. cx2 aims for most of that saving at tens of times real
-time on one thread.
+RVQ stage depends on the ones before. cx2 exploits this at tens of times real time on one thread, fast enough
+for browser playback, where the model runs on both encode and decode.
 
 Everything that touches probabilities is integer arithmetic, including the networks (`i16` weights, `i32`
 accumulation), so coding is bit-identical on any CPU, in WebAssembly and on a GPU. In WebAssembly the integer
@@ -327,8 +326,7 @@ the constructed experts alone.
 
 | Table | Use |
 |---|---|
-| `cx2_encodec_48khz_net2_v5.ecxm` | 48 kHz default (hybrid with `net48v2`) |
-| `cx2_encodec_48khz_v5.ecxm` | 48 kHz, constructed experts only |
+| `cx2_encodec_48khz_net2_v5.ecxm` | 48 kHz (hybrid with `net48v2`) |
 | `cx2_encodec_24khz_v5.ecxm` | 24 kHz |
 
 The tables hold the codebook centroids, so a decoder needs only the table and the decoder half of the weights.
@@ -337,13 +335,13 @@ Results on held-out clips by creators not in the fit set, two test sets (23 clip
 clips with pop and vocals), bits per code including every header and page, against about 10.0 for plainly
 packed codes:
 
-| Preset (page length) | Bits per code | Saved vs plain | Meta's LM, payload only |
-|---|---|---|---|
-| `music24` (1 s) | 7.998 / 8.635 | 20.1% / 13.8% | 25.7% / 20.8% |
-| `music12` (2 s) | 7.388 / 8.231 | 26.3% / 17.9% | 32.2% / 25.5% |
-| `music6` (4 s) | 7.001 / 7.950 | 30.4% / 20.9% | 37.6% / 30.0% |
+| Preset (page length) | Bits per code | Saved vs plain |
+|---|---|---|
+| `music24` (1 s) | 7.998 / 8.635 | 20.1% / 13.8% |
+| `music12` (2 s) | 7.388 / 8.231 | 26.3% / 17.9% |
+| `music6` (4 s) | 7.001 / 7.950 | 30.4% / 20.9% |
 
-Meta's LM decodes at 0.2–0.3× real time; the hybrid at about 55× (`music12`) on one thread.
+The hybrid decodes at about 55× real time (`music12`) on one thread.
 
 ### 6.3 The HQ table
 
@@ -395,9 +393,9 @@ coded pre-roll, a faithful rendering of the loop's own end, into the last 100 ms
 therefore runs straight into the first: the sample jump at the wrap is 0.008 on an ambient clip at 6 kbps (0.094
 without `--loop`).
 
-## 9. Browser decoders
+## 9. Players
 
-Both decoders take the same `.pico` files, stream audio as it decodes, honour loops and trims, and are written in
+Both browser decoders take the same `.pico` files, stream audio as it decodes, honour loops and trims, and are written in
 strict TypeScript. The cx2 decode is the same Rust code in both, compiled to WebAssembly, so the codes are
 bit-exact with the command line. Both are tested against the Rust decoder.
 
@@ -419,13 +417,15 @@ never the integer cx2 decode.
 | Single-threaded | 5.6× / 5.1× |
 | Single-threaded, relaxed SIMD | 6.8× / 6.0× |
 
-First audio arrives after 0.1–0.3 s. HQ decodes at about 4.2–4.7× real time single-threaded (§2.5). A decode
-from a later sample (a seek) equals the same samples of a whole decode.
+EnCodec's first audio arrives after 0.1–0.3 s. HQ decodes at about 4.2–4.7× real time single-threaded (§2.5),
+and its first audio arrives after 0.2–0.3 s, or about 0.8 s at q1–q5, where the declicker reads ahead (§2.7).
+HQ output matches the native decoder at 113–117 dB SNR. A decode from a later sample (a seek) equals the same
+samples of a whole decode.
 
 ### 9.2 WebGPU (`web/`)
 
 A TypeScript and WGSL port of the EnCodec decoder, with f32 (about 120 dB SNR against the Rust decoder) or f16
-weights (59–69 dB, LSTM 1.4–1.7× faster). It does not play HQ files yet.
+weights (59–69 dB, LSTM 1.4–1.7× faster). It does not play HQ files.
 
 | Model | f32 | f16 |
 |---|---|---|
@@ -435,7 +435,7 @@ weights (59–69 dB, LSTM 1.4–1.7× faster). It does not play HQ files yet.
 48 kHz files decode in batches of up to 4 segments (the first a single segment, for a quick start), with
 overlap-add on the GPU; 24 kHz files decode as one causal stream, 5 s at a time. GPU memory is fixed per chunk
 (about 160 MB at 48 kHz). Speed: 10–21× real time at 48 kHz, 23–33× at 24 kHz (f32). The range decode runs in
-WebAssembly a page at a time, feeding the GPU; first audio arrives after about 0.5 s.
+WebAssembly a page at a time, feeding the GPU; first audio arrives after 0.1–0.6 s.
 
 ### 9.3 Secure contexts
 
@@ -443,13 +443,32 @@ WebGPU and threaded WebAssembly require a secure context: HTTPS or `localhost`. 
 over plain HTTP gets single-threaded WebAssembly, which still decodes faster than real time. HTTPS with a locally
 trusted certificate unlocks the faster paths.
 
+### 9.4 Native players: the C library, foobar2000 and FFmpeg
+
+- **C library (`ffi/`):** picotone-ffi, a static library with a C interface (`ffi/include/picotone.h`). The
+  streaming player (`pt_open`, `pt_decode`, with an HQ file's `.picol`) is the library's `player::Player`, so
+  its output and seeks are the command line's, post-filter, declicker and limiter included. The encoder
+  (`pt_encoder_new`, `pt_encoder_set` with the `picotone encode` flag names, `pt_encoder_push`,
+  `pt_encoder_finish`) codes in memory, byte for byte as `picotone encode`.
+- **foobar2000 (`foobar/`):** `foo_input_pico`, an input component for the 32-bit and 64-bit Windows players,
+  built on the C library. It plays HQ and EnCodec files, seeks, shows the tags and the profile, and uses an HQ
+  file's `.picol` when it lies next to it.
+- **FFmpeg (`ffmpeg/`):** a `libpicotone` demuxer and muxer for FFmpeg 8.1, on the C library. The demuxer
+  decodes inside FFmpeg to 32-bit float PCM, with the tags, the `.picol` and exact seeks; the muxer encodes any
+  input FFmpeg reads, with `picotone encode`'s options, to the same bytes on every platform. Decodes equal
+  `picotone decode --float` bit for bit except at q1–q5, where the platforms' `exp` and `tanh` in the
+  post-filter differ by at most about 6e-6 (−104 dB).
+
+The C library and the foobar2000 component are LGPL-3.0-or-later, the FFmpeg files LGPL-2.1-or-later; an
+FFmpeg built with them is GPLv3.
+
 ## 10. Limitations and future work
 
-- **EnCodec bitrate gap:** cx2 trails Meta's LM by about 0.5–0.9 bit per code; the network sees only four
-  frames, while the LM is a transformer over seconds.
+- **EnCodec context:** the EnCodec cx2 network sees only four frames; a longer context would code smaller but
+  decode slower.
 - **Layers:** `.picol` exists for HQ files only, and a playing file picks up its layer by restarting at its
   position, not inside one decode.
-- **WebGPU:** no HQ decoding and no seeking yet.
+- **WebGPU:** no HQ decoding and no seeking.
 - **Thread scaling:** 16 threads give only about 2.6× over one thread on the test laptop.
 - **Listening:** quality decisions are made by ear, informally; the figures here are metrics against the
   source.
@@ -460,12 +479,13 @@ trusted certificate unlocks the faster paths.
 |---|---|
 | Build and test | `cargo build --release`, `cargo test --release` |
 | EnCodec parity with the reference | `uv run --project tools --extra parity tools/parity.py` |
-| Seam measurements | `dwp/s11_seam.py` |
-| Beam search | `dwp/s09_beam_rvq.py` |
+| Seam measurements | `tools/s11_seam.py` |
+| Beam search | `tools/s09_beam_rvq.py` |
 | EnCodec cx2 tables | `tools/build_tables.py`, `tools/check_testset.py`, `picotone dev check`; network training in `train/` |
 | HQ table | `tools/dac_codes.py` (dump codes), `train/hq_net.py` (train and export); `picotone dev dac-pack` (rates) |
 | HQ layer cost | `picotone dev layer-cost` |
-| HQ post-filter weights | `tools/export_postfilter.py` (adds `pf.*` to `dac44_vocos`); test fixture `tools/postfilter_fixture.py` |
+| HQ networks (STFT encoder, Vocos decoder, codebooks 10–16, post-filter) | training in `train/hq/` ([`train/hq/README.md`](train/hq/README.md)) |
+| HQ weights | `tools/export_stftenc.py`, `tools/export_quantizer.py`, `tools/export_vocos.py`, `tools/export_postfilter.py` (adds `pf.*` to `dac44_vocos`); parity `tools/stftenc_parity.py`; test fixtures `tools/stftenc_fixture.py`, `tools/vocos_fixture.py`, `tools/postfilter_fixture.py` |
 | Browser decoders | `web`: `npm run test:parity`; `wasm`: `node test/run.mjs` |
 
 Python tooling uses uv with `pyproject.toml`.

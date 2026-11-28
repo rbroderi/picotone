@@ -2,7 +2,7 @@
 """Add the low-tier post-filter to picotone's HQ decoder weights (`src/vocos.rs`, tensors `pf.*`).
 
     uv run --no-project --with numpy --with safetensors python tools/export_postfilter.py \
-        --pf X:/audio/distill/pf_lowtier/export/pf_g7500.safetensors --vocos weights/dac44_vocos
+        --pf train/hq/pf_lowtier/export/pf_g7500.safetensors --vocos weights/dac44_vocos
 
 Reads <pf>.safetensors (the post-filter's state dict, `LowTierPF`) and <pf>.json (its export config), and
 rewrites <vocos>.safetensors and <vocos>.json in place: any `pf.*` tensors already there are replaced. The

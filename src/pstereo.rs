@@ -1,6 +1,5 @@
 //! Parametric stereo for the HQ codec, in the style of HE-AAC v2
-//! (`distill/INTEGRATION.md`, M8; prototype and measurements:
-//! `tools/pstereo_proto.py`).
+//! (prototype and measurements: `tools/pstereo_proto.py`).
 //!
 //! The file codes the mid `(L + R) / 2` as one HQ channel, plus, per band and
 //! per parameter set of `frames` HQ frames, the intensity difference (IID)

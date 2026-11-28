@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Parity fixture for the Rust STFT encoder (`src/stftenc.rs`), from distill/encoder.py's STFTEncoder at random
-init. Run it in distill/'s environment (CPU):
+"""Parity fixture for the Rust STFT encoder (`src/stftenc.rs`), from train/hq/encoder.py's STFTEncoder at random
+init. Run it in train/hq's environment (CPU):
 
-    cd distill
-    uv run --extra cpu python ../tools/stftenc_fixture.py --out ../tests/data/stftenc_tiny
+    cd train/hq
+    uv run --extra cpu python ../../tools/stftenc_fixture.py --out ../../tests/data/stftenc_tiny
 
 1. Builds STFTEncoder(dim, blocks, mlp, ffts (2048, 512), power 0.3, embed k1, latent) and re-initialises it at
    realistic scales (`realistic_init`; the stock init, std 0.02 and zero biases, would test little).
@@ -24,7 +24,7 @@ import torch
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from export_stftenc import forward64, write  # noqa: E402  (puts distill/ on the path)
+from export_stftenc import forward64, write  # noqa: E402  (puts train/hq/ on the path)
 from encoder import STFTEncoder  # noqa: E402
 
 SR = 44100

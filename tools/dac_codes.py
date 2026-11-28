@@ -1,6 +1,6 @@
 """Dumps HQ codes of a set of clips, for fitting the HQ cx2 tables.
 
-    python tools/dac_codes.py --list X:/audio/work/clips2.json --split fit2 --wav X:/audio/work/wav2 \
+    python tools/dac_codes.py --list <clips.json> --split fit2 --wav <wav dir> \
         --out work/dac_codes/fit2 [--threads 3] [--jobs 4]
 
 Each clip is encoded with `picotone encode --codebooks 16 --dump-codes` (the shipping encoder, with its stereo
@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 import lib
 
 # Clips of the fit splits that the HQ table is not fitted on, with the reason. The DTRASH clips are the ones
-# X:/audio/distill/data/pd.jsonl flags `drop:dtrash-distorted` (clipped, distorted masters); the GT585 clips are
+# the HQ training manifest (train/hq/data/pd.jsonl) flags `drop:dtrash-distorted` (clipped, distorted masters); the GT585 clips are
 # digital silence (-180 dB RMS) for their whole length.
 EXCLUDE = {
     "fit2__electronic__DTRASH31-Exist-TheTensionAndTheDarkness__8b50896b__c0": "dtrash-distorted",

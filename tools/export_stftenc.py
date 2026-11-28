@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Convert a trained HQ encoder (distill/encoder.py STFTEncoder, a train.py --arch encoder checkpoint) into
-picotone's Rust format (`src/stftenc.rs`, encoder name `dac44_stftenc`). Run it in distill/'s environment:
+"""Convert a trained HQ encoder (train/hq/encoder.py STFTEncoder, a train.py --arch encoder checkpoint) into
+picotone's Rust format (`src/stftenc.rs`, encoder name `dac44_stftenc`). Run it in train/hq's environment:
 
-    cd distill
-    uv run --extra cpu python ../tools/export_stftenc.py --ckpt X:/audio/distill/runs/encB_arm4/ckpt_end_20000.pt \
-        --out ../weights/dac44_stftenc
+    cd train/hq
+    uv run --extra cpu python ../../tools/export_stftenc.py --ckpt runs/encB_arm4/ckpt_0020000.pt \
+        --out ../../weights/dac44_stftenc
 
 The encoder is taken from the checkpoint's EMA weights (`G_ema`, keys `enc.*`; `--no-ema` for `G`) and its
 `arch` config; the quantiser (`rvq.*`) and decoder (`dec.*`) are left out. The checkpoint is only read.
@@ -23,7 +23,7 @@ Writes <out>.safetensors and <out>.json (config, source sha256, step, parameter 
   final_norm.weight/.bias    [dim]
   out.weight / .bias         [latent, dim] / [latent]
 
-distill/ is found next to this file, or at $PICOTONE_DISTILL.
+train/hq/ is found at ../train/hq from this file.
 """
 import argparse
 import json
@@ -32,9 +32,8 @@ import sys
 
 import torch
 
-DISTILL = os.environ.get("PICOTONE_DISTILL") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
-                                                             "distill")
-sys.path.insert(0, os.path.abspath(DISTILL))
+HQ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "train", "hq")
+sys.path.insert(0, os.path.abspath(HQ))
 
 from encoder import STFTEncoder  # noqa: E402
 from export_rust import sha, write_safetensors  # noqa: E402

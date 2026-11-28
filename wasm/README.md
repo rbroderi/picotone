@@ -1,8 +1,16 @@
 # picotone-wasm: the picotone decoder in the browser
 
-A WebAssembly build of the picotone decoder. It decodes `.pico` files in a dedicated Web Worker and returns
-planar `Float32Array`s. The cx2 range decode and the EnCodec network run in the same Rust code as the command
-line. It ships in three builds:
+A WebAssembly build of the picotone decoder. It decodes `.pico` files of both codecs in a dedicated Web Worker
+and returns planar `Float32Array`s:
+
+- **HQ** (model `dac44`, 44.1 kHz): the `dac44_vocos` network with the `cx2_dac44` table, at every codebook
+  count, with an HQ file's `.picol` enhancement layer when it is given one. At 1 to 5 codebooks the decode also
+  runs the low-tier post-filter and the declicker.
+- **EnCodec** (`encodec_48khz` stereo, `encodec_24khz` mono), with their `cx2_encodec_*` tables.
+
+Every decode ends in the look-ahead peak limiter. The cx2 range decode, the networks, the post-filter, the
+declicker and the limiter are the same Rust code as the command line's (`player::Player`). It ships in three
+builds:
 
 | build | toolchain | features | used when |
 |---|---|---|---|
@@ -12,7 +20,7 @@ line. It ships in three builds:
 
 The worker picks the build and reports which one it chose and why (`decoder.build.kind`,
 `decoder.build.relaxedSimd`, `decoder.build.reason`). `pkg-st-fma` is about 15–20% faster than `pkg-st` on
-48 kHz stereo. Its output differs from `pkg-st`'s by float rounding in the network only (both stay above 100 dB
+EnCodec 48 kHz stereo. Its output differs from `pkg-st`'s by float rounding in the network only (both stay above 100 dB
 SNR against the native decoder). A browser without relaxed SIMD cannot compile it, so the worker checks first
 (`WebAssembly.validate` of a probe module) and falls back to `pkg-st`;
 `PicotoneDecoder.create({ relaxedSimd: false })` forces `pkg-st`.
@@ -60,9 +68,13 @@ www/picotone/worker.js             the dedicated decoder worker
 www/picotone/pkg-st/               single-threaded wasm-bindgen output
 www/picotone/pkg-st-fma/           the same with relaxed SIMD
 www/picotone/pkg-mt/               threaded wasm-bindgen output (+ rayon worker snippet)
-www/models/encodec_{24,48}khz.{json,safetensors}   decoder-only weights
-www/models/EnCodec-MIT.txt         the weights' licence (must travel with them)
-www/models/cx2_*.ecxm              the default cx2 table of each model
+www/models/dac44_vocos.{json,safetensors}         the HQ decoder (63.75 MB, with the post-filter)
+www/models/dac44_vocos.NOTICE.txt, .credits.jsonl, DAC-MIT.txt   its notice, training credits and DAC's
+                                   licence (must travel with it)
+www/models/encodec_{24,48}khz.{json,safetensors}   EnCodec decoder-only weights (63.4 MB, 46.6 MB)
+www/models/EnCodec-MIT.txt         the EnCodec weights' licence (must travel with them)
+www/models/cx2_*.ecxm              the default cx2 table of each model: cx2_dac44 (8.7 MB),
+                                   cx2_encodec_48khz_net2_v5 (7.4 MB), cx2_encodec_24khz_v5 (12.5 MB)
 www/models/cx2-tables.json         { tables: [{ file, model, hash }] }; the worker loads these
 www/_headers                       COOP/COEP for Netlify / Cloudflare Pages
 ```
@@ -77,8 +89,8 @@ node serve.mjs                 # http://127.0.0.1:8080/  COOP+COEP on: threaded 
 node serve.mjs --no-isolation  # headers off: single-threaded fallback
 ```
 
-Drop a `.pico` file on the page. It shows the headers and the active build, streams playback (stereo starts
-after the first segment), and offers a WAV download. `?build=single` forces the fallback.
+Drop a `.pico` file on the page. It shows the headers and the active build, streams playback (EnCodec stereo starts
+after the first segment, HQ after its first page), and offers a WAV download. `?build=single` forces the fallback.
 
 ## Test
 
@@ -86,8 +98,9 @@ after the first segment), and offers a WAV download. `?build=single` forces the 
 node test/run.mjs            # or: npm test     (add --quick to skip the long files)
 ```
 
-The test synthesises audio and encodes it to `.pico` with `target\release\picotone.exe` (presets, edge
-cross-fade, loops, and a stream with no length in its header), then writes a float reference with
+The test synthesises audio and encodes it to `.pico` with `target\release\picotone.exe` (EnCodec presets, edge
+cross-fade, loops, and a stream with no length in its header; HQ mono, left/right, mid/side and parametric
+stereo at q1 to q9, a loop and a streamed write), then writes a float reference with
 `decode --float`. It decodes every file in headless Chrome with every build (served with and without
 isolation), checks SNR ≥ 100 dB against the reference, seeks into five files at 37% and 81% and checks those
 decodes against the reference too, and prints speed, time to first audio, underruns, wasm memory and the
@@ -96,8 +109,16 @@ loop-seam measurement. Env: `PICOTONE_EXE`, `PICOTONE_TEST_DIR`, `PICOTONE_TEST_
 `CARGO_TARGET_DIR=target/native`) checks natively that the chunked stream, every seek and the codes-only paths
 are bit-identical to a whole-file decode.
 
-Measured on a 16-thread desktop (Chrome, 120 s 48 kHz stereo at music12): threaded (8 threads) about 12× real
-time, single-threaded 6.0× with relaxed SIMD and 5.1× without; first audio after 0.2–0.3 s.
+Measured on a 16-thread desktop in Chrome:
+
+- **HQ**, 30 s stereo: single-threaded about 4.2–4.7× real time, the low end at q1–q5 (post-filter and
+  declicker); threaded (16 threads) about 9–12×. First audio after about 0.8 s at q1–q5 and 0.2–0.3 s at q6
+  and above. 113–117 dB SNR against the native decoder, seeks included.
+- **EnCodec**, 120 s 48 kHz stereo at music12: threaded (8 threads) about 12× real time, single-threaded 6.0×
+  with relaxed SIMD and 5.1× without; first audio after 0.2–0.3 s.
+
+`node test/memory.mjs` prints each network's peak wasm memory: for HQ at q9, 101 MiB stereo and 94 MiB mono
+single-threaded, 203 / 159 MiB threaded (see [`INTEGRATION-gaim.md`](INTEGRATION-gaim.md) §5).
 
 ## API (TypeScript)
 
@@ -116,13 +137,23 @@ const audio = await decoder.decode(bytes, { onProgress: (p) => {} });
 // From a later sample (a seek); audio.startSample says where it starts:
 const tail = await decoder.decode(bytes, { startSample: 48000 * 30 });
 
-// Streaming playback, starting after the first segment:
+// Streaming playback, starting after the first chunk:
 const playback = decoder.play(audioContext, bytes, { loop: true });
 await playback.started;  // ms to first audio
 
 // Cached effect:
 const buffer = await decoder.decodeToAudioBuffer(audioContext, bytes);
+
+// HQ file with its enhancement layer (song.pico + song.picol):
+await decoder.loadModel("dac44");                                  // dac44_vocos + cx2_dac44
+const hq = await decoder.decode(pico, { layer: picol });
+// hq.stats.layered: whether the layer was used; hq.stats.layerError: why not (the base then plays alone)
 ```
+
+`layer` (an `ArrayBuffer` or view of the `.picol` file) is taken by `decode`, `play` and `decodeToAudioBuffer`.
+With it the decode is the combined stream's, sample for sample as a one-file encode of all the codebooks. To
+upgrade a playing file once its layer arrives, stop it and play again with `layer` and `startSample` at the
+current position.
 
 All URLs (worker, the builds, models, tables) derive from `baseUrl`; `modelsUrl` and `workerUrl` override them.
 Model files and tables are cached in Cache Storage (`cacheName`, default `picotone-models-v1`) when the context
@@ -131,7 +162,7 @@ is secure, and left to the HTTP cache otherwise.
 For other decoders (the WebGPU one), the module also exports `readCodes(bytes, tables)` and `CodePages` (one Ogg
 page at a time): the cx2 decode without the network.
 
-### Streaming and overlap-add
+### EnCodec streaming and overlap-add
 
 The 48 kHz model codes 1 s segments `stride` apart (0.933 s at the presets' 44800) and cross-fades the overlaps.
 The segments of a chunk are decoded together with `Encodec::decode_segments` (the LSTM advances them as one
@@ -143,9 +174,9 @@ the native test), nothing is decoded twice, and memory depends on the chunk size
 range-decoded only when the network needs their codes.
 
 Chunks are 1 unit first, then 2, 4, …, up to `chunkSegments` (default 16 threaded, 8 single-threaded). A unit is
-one segment (48 kHz) or one second of frames (24 kHz).
+one segment (48 kHz), one second of frames (24 kHz) or one HQ page.
 
-### Seeking
+### EnCodec seeking
 
 `decode(bytes, { startSample })` and `play()` after a seek start at the last segment whose start is at or before
 the wanted sample and that no earlier segment overlaps there, with a fresh overlap-add, then trim to the exact
@@ -166,7 +197,17 @@ EnCodec's first and last few ms are not faithful.
 
 `readPicoHeader()` and the stream's getters expose: `model`, `audioLength` (always the trimmed length),
 `codedLength`, `numCodebooks`, `stride`, `crossfade` (0 triangle, 1 edge-avoiding), `preSkip`, `endTrim`,
-`loop`, `tableHash`, `pageLength`, `tags` and `outputGainDb`. See [`../FORMAT.md`](../FORMAT.md).
+`loop`, `tableHash`, `pageLength`, `tags` and `outputGainDb`. HQ files (`model: "dac44"`) also give `layout`
+(`mono`, `lr`, `ms` or `parametric`), `codebooks` (the codebooks per frame of each coded channel) and
+`codebookHash` (the DAC codebooks the codes index); for EnCodec files `layout` and `codebookHash` are null. See
+[`../FORMAT.md`](../FORMAT.md).
+
+### HQ decoding
+
+HQ pages are 80 frames (0.93 s). A seek decodes from a few frames before the wanted sample, plus the limiter's look-back
+and, at q1–q5, the declicker's, so the result equals the same samples of a whole decode. The
+declicker reads up to 2 s ahead of a sample; in a file's first 2 s it reads only as far as the file has gone,
+so first audio at q1–q5 comes after about 0.8 s. HQ loops decode from the start.
 
 ## GitHub Pages (no custom headers)
 

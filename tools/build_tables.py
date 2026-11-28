@@ -182,17 +182,15 @@ def fixed_centroids(tag, codebooks):
     return np.clip(v, -4095, 4095).astype("<i2")
 
 
-def serialise(layers, weights=None, budget=None, net=None, version=5, centroids=None):
-    """Writes the table file; `weights[k][e]` are sixteenths (None = unit weights).
+def serialise(layers, centroids, weights=None, budget=None, net=None):
+    """Writes the table file (version 5); `weights[k][e]` are sixteenths (None = unit weights).
 
-    Version 5 stores `centroids` (fixed point, [codebook][code][dim]) after the
-    exponential table and writes the net in format 2; version 4 is the older layout.
+    `centroids` (fixed point, [codebook][code][dim]) follow the exponential table.
     """
     exp = [int(round((1 << 24) * 2.0 ** (-i / (1 << FB)))) for i in range(1 << FB)]
-    out = [b"ECXM", struct.pack("<4I", version, len(layers), FB, FLOOR), struct.pack(f"<{len(exp)}I", *exp)]
-    if version == 5:
-        assert centroids is not None and centroids.shape == (len(layers), V, 128)
-        out.append(centroids.tobytes())
+    out = [b"ECXM", struct.pack("<4I", 5, len(layers), FB, FLOOR), struct.pack(f"<{len(exp)}I", *exp)]
+    assert centroids.shape == (len(layers), V, 128)
+    out.append(centroids.tobytes())
     unit = [[16] * len(EXPERTS) for _ in layers]
     weights = weights or unit
     # global budget for static entries: keep the highest weighted scores
@@ -229,7 +227,7 @@ def serialise(layers, weights=None, budget=None, net=None, version=5, centroids=
                 out.append(struct.pack("<2I", 0, 0))
     if net:
         out.append(struct.pack("<I", 1))
-        out.append(netexport.blob(net, None, [w[10] for w in weights], 2 if version == 5 else 1))
+        out.append(netexport.blob(net, None, [w[10] for w in weights]))
     else:
         out.append(struct.pack("<I", 0))
     return b"".join(out), kept
@@ -248,9 +246,6 @@ def main():
     ap.add_argument("--reset", type=int, default=0, help="reset interval in seconds (0 = never)")
     ap.add_argument("--no-hist", action="store_true")
     ap.add_argument("--no-static", action="store_true")
-    ap.add_argument("--table-version", type=int, default=5, choices=[4, 5],
-                    help="5: self-contained table (centroids inside, net format 2); "
-                         "4: the older layout, for nets without a position input")
     args = ap.parse_args()
     tag = args.tag
     stem = os.path.splitext(os.path.basename(args.out))[0]
@@ -258,14 +253,10 @@ def main():
     reset = args.reset * lib.FRAME_RATE[tag]
     # The net's bandwidths come from its checkpoint (old checkpoints: 2, 4, 8, 16).
     net = args.net
-    version = args.table_version
-    centroids = fixed_centroids(tag, lib.KMAX[tag]) if version == 5 else None
-    if net and version == 4:
-        assert not netexport.checkpoint_period(netexport.load_state(net)), \
-            "this net has a position input; it needs --table-version 5"
+    centroids = fixed_centroids(tag, lib.KMAX[tag])
 
-    def serialise_as(*a, **kw):
-        return serialise(*a, **kw, version=version, centroids=centroids)
+    def serialise_as(layers, *a, **kw):
+        return serialise(layers, centroids, *a, **kw)
     fit, dev = lib.load_files(tag, "fit"), lib.load_files(tag, "dev")
     print(tag, "fit clips", len(fit), "dev clips", len(dev), flush=True)
 
@@ -280,7 +271,7 @@ def main():
     open(unit_path, "wb").write(blob)
     print("unit model", len(blob), "bytes,", kept, "static entries", flush=True)
     tuned_path = os.path.join(lib.WORK, f"tuned_{stem}.json")
-    run([PICOTONE, "dev", "tune", unit_path, wpath, tuned_path, str(args.samples), str(reset),
+    run([PICOTONE, "dev", "tune", unit_path, tuned_path, str(args.samples), str(reset),
          "@" + write_list(f"{stem}_dev.txt", dev)])
     tuned = json.load(open(tuned_path))
     for k, t in enumerate(tuned):

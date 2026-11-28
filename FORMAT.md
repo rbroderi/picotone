@@ -7,8 +7,7 @@ granule position, and Vorbis-style comments. The implementation is `src/pico.rs`
 trips, seeking, loops, streams without a length, damage and an independent Ogg reader (the `ogg` crate, and
 `ffprobe` when it is installed). General-purpose tools recognise the file as Ogg but not the codec inside.
 
-This document describes **version 1**. There is no compatibility with earlier picotone or encodecx files: a
-decoder refuses any other version.
+This document describes **version 1**: a decoder refuses any other version.
 
 All fixed-width integers are little-endian. A **varint** is unsigned LEB128: 7 bits per byte, low bits first,
 the top bit set on every byte but the last, at most 64 bits. "Frame" means one latent frame: 320 samples per
@@ -164,9 +163,14 @@ The HQ codec (`--model hq`, the encoder's default) codes 44.1 kHz audio as DAC 4
 STFT encoder (`dac44_stftenc`) makes DAC's latent and DAC's own residual quantiser codes it, one frame per 512
 samples, up to 16 codebooks of 1024 entries per frame, a lower codebook
 count being a prefix of the full one. picotone decodes it with a Vocos (iSTFT) decoder trained on those codes
-(`dac44-vocos`). Ogg
+(`dac44_vocos`). Ogg
 framing, the comment header, extensions (TLVs), pre-skip, granules, damage handling and loops work as for
 EnCodec; only the fixed part and the audio packets differ. The implementation is `src/pico/dac.rs`.
+
+The format stores codes only. What picotone's decoder does after the network is decoder-side and not part of
+the format: at 1 to 5 codebooks per frame a post-filter on the decoder's spectrum and a declicker, and on every
+decode (HQ and EnCodec) a look-ahead peak limiter (WHITEPAPER §2.6, §2.7, §3.4). Another decoder of these codes
+may leave them out or do otherwise.
 
 ### Fixed part
 
@@ -229,12 +233,14 @@ network, so a player seeking to a page decodes from a few frames earlier for an 
 The encoder codes a stereo input as left/right or mid/side, whichever scores better (log-mel distance, on up to
 4 loud 3 s excerpts), unless `--stereo` says which. At 2 codebooks per channel or fewer it also tries parametric
 stereo, with a mid of `2 x codebooks - 1` (about the same total rate). A stereo input whose side stays more than
-40 dB under its mid is coded as mono with `--channel-format auto`.
+40 dB under its mid is coded as mono with `--channel-format auto`. `tools/stereo_scan.py` measures the side
+level page by page, which sets that threshold, and `tools/stereo_pick_check.py` checks the sampled
+left/right or mid/side choice against a whole-track comparison.
 
 ### Parametric stereo (layout 3)
 
-The implementation is `src/pstereo.rs`; the measurements behind it are in `tools/pstereo_proto.py` and
-`distill/INTEGRATION.md` (M8).
+The implementation is `src/pstereo.rs`; the prototype and measurements behind it are in
+`tools/pstereo_proto.py`.
 
 - **Parameter sets.** Each page's frames are split into sets of `k` frames (the header's frames per set; the
   last set of a page may be shorter). A set holds, per band, an IID level (index into the dB grid -25, -18, -14,
@@ -306,7 +312,7 @@ base cannot have a left/right layer.
   id (FNV-1a 64 over the base's identification packet followed by its first audio packet), then varint
   **group**, the base pages per layer page (1 or more; the encoder writes 4). A decoder refuses a layer whose
   base id does not match the base it is given. Because the type is critical, a decoder that does not know
-  layers refuses a `.picol` given alone, instead of playing it.
+  layers refuses a `.picol` given alone and does not play it.
 - **Pages in groups:** layer page `j` covers base pages `j x group` to `j x group + group - 1` (the last layer
   page may cover fewer), and its granule position is that of the last base page it covers. A decoder pairs
   them by granule position. Grouping saves Ogg page overhead: on the test clips the layer's framing is about
